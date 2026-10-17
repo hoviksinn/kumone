@@ -1,100 +1,95 @@
+import AppKit
 import SwiftUI
 
-// MARK: - Lyrics panel
-
+/// The window owns the trailing column. This view fills that column instead
+/// of placing a second floating card over the library.
 struct LyricsPanel: View {
     @EnvironmentObject private var player: PlayerService
     @ObservedObject private var lyricsCursor = PlayerService.shared.lyricsCursor
-    @EnvironmentObject private var settings: SettingsManager
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @State private var activeIndex: Int?
     @State private var isUserScrolling = false
     @State private var resumeTask: Task<Void, Never>?
 
     var body: some View {
-        VStack(spacing: 0) {
-            header
-            Divider().opacity(0.3)
-            content
-        }
-        .frame(width: 320)
-        .frame(maxHeight: .infinity)
-        .compatGlass(interactive: true, in: RoundedRectangle(cornerRadius: Theme.Radius.panel, style: .continuous))
-        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.panel, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: Theme.Radius.panel, style: .continuous)
-                .strokeBorder(.primary.opacity(0.06), lineWidth: 0.5)
-        )
-    }
-
-    private var header: some View {
-        HStack {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("歌词")
-                    .font(.headline)
-                if let contributor = player.lyrics?.contributor {
-                    Text("贡献者：\(contributor)")
-                        .font(.system(size: 10.5))
-                        .foregroundStyle(.tertiary)
-                }
-            }
-            Spacer()
-            Button {
-                player.activePanel = nil
-            } label: {
-                Image(systemName: "xmark")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 22, height: 22)
-                    .background(.primary.opacity(0.06), in: Circle())
-            }
-            .buttonStyle(.pressable)
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 14)
+        content
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(.primary.opacity(0.025))
+            .onDisappear { resumeTask?.cancel() }
     }
 
     @ViewBuilder
     private var content: some View {
         if let lyrics = player.lyrics, !lyrics.isEmpty {
-            ScrollViewReader { proxy in
-                ScrollView(showsIndicators: false) {
-                    LazyVStack(alignment: .leading, spacing: 18) {
-                        Color.clear.frame(height: 120)
-                        ForEach(lyrics.lines) { line in
-                            lyricLine(line, isActive: line.id == activeIndex)
+            GeometryReader { geometry in
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: LyricsVisualParameters.lineSpacing) {
+                            // A proportional inset lets the first and last lines
+                            // reach the same focus position in short windows.
+                            Color.clear.frame(height: geometry.size.height * 0.38)
+                            ForEach(lyrics.lines) { line in
+                                LyricsPanelLine(
+                                    line: line,
+                                    activeIndex: activeIndex,
+                                    onSeek: {
+                                        player.seek(to: line.time)
+                                        resumeFollowing(proxy: proxy)
+                                    }
+                                )
                                 .id(line.id)
+                            }
+                            Color.clear.frame(height: geometry.size.height * 0.48)
                         }
-                        Color.clear.frame(height: 160)
+                        .padding(.horizontal, LyricsVisualParameters.horizontalPadding)
+                        .background(LyricScrollerPreferences().frame(width: 0, height: 0))
                     }
-                    .padding(.horizontal, 20)
-                }
-                .onChange(of: lyricsCursor.activeIndex) { index in
-                    guard index != activeIndex else { return }
-                    activeIndex = index
-                    guard !isUserScrolling, let index else { return }
-                    withAnimation(.spring(response: 0.7, dampingFraction: 0.85)) {
-                        proxy.scrollTo(index, anchor: .center)
+                    // NSScrollView supplies overlay scrollers and their fade
+                    // timing. Respect the user's "Always" system preference.
+                    .scrollIndicators(.automatic)
+                    .onScrollPhaseChange { _, phase in
+                        switch phase {
+                        case .tracking, .interacting:
+                            isUserScrolling = true
+                            resumeTask?.cancel()
+                        case .idle where isUserScrolling:
+                            scheduleResume(proxy: proxy)
+                        default:
+                            break // Programmatic .animating is not user input.
+                        }
                     }
-                }
-                .onAppear {
-                    adoptCursor(proxy: proxy)
-                }
-                .onChange(of: player.currentTrack?.id) { _ in
-                    activeIndex = nil
-                    proxy.scrollTo(0, anchor: .top)
-                }
-                .simultaneousGesture(
-                    DragGesture().onChanged { _ in
-                        isUserScrolling = true
+                    .onChange(of: lyricsCursor.activeIndex) { _, index in
+                        activeIndex = index
+                        guard !isUserScrolling, let index else { return }
+                        scroll(to: index, proxy: proxy, animated: true)
+                    }
+                    .onChange(of: player.currentTrack?.id) { _, _ in
                         resumeTask?.cancel()
-                        resumeTask = Task {
-                            try? await Task.sleep(for: .seconds(3))
-                            guard !Task.isCancelled else { return }
-                            isUserScrolling = false
+                        isUserScrolling = false
+                        activeIndex = nil
+                    }
+                    .onChange(of: lyrics) { _, _ in
+                        adoptCursor(proxy: proxy)
+                    }
+                    .onAppear { adoptCursor(proxy: proxy) }
+                    .overlay(alignment: .bottom) {
+                        if isUserScrolling {
+                            Button {
+                                resumeFollowing(proxy: proxy)
+                            } label: {
+                                Label("跟随播放", systemImage: "arrow.down.to.line.compact")
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .padding(.horizontal, 14)
+                                    .padding(.vertical, 9)
+                            }
+                            .buttonStyle(.plain)
+                            .background(.regularMaterial, in: Capsule())
+                            .padding(.bottom, 20)
+                            .transition(.opacity)
                         }
                     }
-                )
+                }
             }
         } else if player.lyrics?.isInstrumental == true {
             EmptyStateView(icon: "music.quarternote.3", title: "纯音乐", subtitle: "请欣赏")
@@ -111,52 +106,135 @@ struct LyricsPanel: View {
         }
     }
 
-
-    /// Jump straight to the line the song is on. Used when the view appears,
-    /// where waiting for the next line change would leave the lyrics parked at
-    /// the top. Scrolling is deferred a turn: the list has not laid out yet
-    /// while `onAppear` runs, and `scrollTo` on an unlaid list does nothing.
     private func adoptCursor(proxy: ScrollViewProxy) {
-        let index = lyricsCursor.activeIndex
-        activeIndex = index
-        guard let index else { return }
+        resumeTask?.cancel()
+        isUserScrolling = false
+        activeIndex = lyricsCursor.activeIndex
+        let trackID = player.currentTrack?.id
+        // ScrollViewReader needs a laid-out document. Re-read the cursor in
+        // the deferred turn, rather than applying a stale pre-seek position.
         DispatchQueue.main.async {
-            proxy.scrollTo(index, anchor: .center)
+            guard player.currentTrack?.id == trackID,
+                  let index = lyricsCursor.activeIndex else { return }
+            activeIndex = index
+            scroll(to: index, proxy: proxy, animated: false)
         }
     }
 
-    private func lyricLine(_ line: LyricLine, isActive: Bool) -> some View {
-        Button {
-            player.seek(to: line.time)
-        } label: {
-            VStack(alignment: .leading, spacing: 3) {
-                if settings.lyricsAnnotation == .romaji, let romaji = line.romaji {
-                    Text(romaji)
-                        .font(.system(size: isActive ? 12 : 11))
-                        .foregroundStyle(isActive ? AnyShapeStyle(.secondary) : AnyShapeStyle(.tertiary))
-                }
-                LyricText(
-                    line: line,
-                    size: isActive ? 16 : 14,
-                    weight: isActive ? .bold : .medium,
-                    // Core Text needs a resolved colour, so the hierarchical
-                    // styles the other rows use are spelled out here.
-                    color: isActive ? .primary : .secondary
-                )
-                if settings.showLyricsTranslation, let translation = line.translation {
-                    Text(translation)
-                        .font(.system(size: isActive ? 13 : 12))
-                        .foregroundStyle(isActive ? AnyShapeStyle(.secondary) : AnyShapeStyle(.tertiary))
-                }
-            }
-            .multilineTextAlignment(.leading)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .contentShape(Rectangle())
-            .opacity(isActive ? 1 : 0.75)
-            .blur(radius: isActive ? 0 : 0.3)
+    private func scheduleResume(proxy: ScrollViewProxy) {
+        resumeTask?.cancel()
+        resumeTask = Task { @MainActor in
+            do {
+                try await Task.sleep(for: .seconds(LyricsVisualParameters.followResumeDelay))
+            } catch { return }
+            resumeFollowing(proxy: proxy)
         }
-        .buttonStyle(.plain)
-        .animation(.spring(response: 0.4, dampingFraction: 0.8), value: isActive)
+    }
+
+    private func resumeFollowing(proxy: ScrollViewProxy) {
+        resumeTask?.cancel()
+        isUserScrolling = false
+        guard let index = lyricsCursor.activeIndex else { return }
+        activeIndex = index
+        scroll(to: index, proxy: proxy, animated: true)
+    }
+
+    private func scroll(to index: Int, proxy: ScrollViewProxy, animated: Bool) {
+        if animated, !reduceMotion {
+            withAnimation(LyricsVisualParameters.scrollAnimation) {
+                proxy.scrollTo(index, anchor: UnitPoint(x: 0.5, y: 0.42))
+            }
+        } else {
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                proxy.scrollTo(index, anchor: UnitPoint(x: 0.5, y: 0.42))
+            }
+        }
     }
 }
 
+private struct LyricsPanelLine: View {
+    let line: LyricLine
+    let activeIndex: Int?
+    let onSeek: () -> Void
+
+    @EnvironmentObject private var settings: SettingsManager
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var isHovering = false
+
+    private var isActive: Bool { line.id == activeIndex }
+    private var distance: Int { activeIndex.map { abs(line.id - $0) } ?? 2 }
+
+    var body: some View {
+        let visualOpacity = isHovering ? 1 : LyricsVisualParameters.opacity(distance: distance)
+        let visualBlur: CGFloat = isHovering || reduceMotion ? 0 : LyricsVisualParameters.blur(distance: distance)
+        let visualScale: CGFloat = isActive || reduceMotion ? 1 : 0.97
+        let visualOffset: CGFloat = isActive || reduceMotion ? 0 : (line.id < (activeIndex ?? 0) ? -2 : 2)
+
+        Button(action: onSeek) {
+            VStack(alignment: .leading, spacing: LyricsVisualParameters.annotationSpacing) {
+                if settings.lyricsAnnotation == .romaji, let romaji = line.romaji {
+                    Text(romaji)
+                        .font(.system(size: LyricsVisualParameters.romajiSize, weight: .medium))
+                        .foregroundStyle(.primary.opacity(0.72))
+                }
+                // Font metrics and ruby geometry stay identical when focus
+                // moves. Depth/scale are rendering effects, never reflow.
+                LyricPlaybackText(
+                    line: line,
+                    isActive: isActive,
+                    size: LyricsVisualParameters.fontSize,
+                    weight: .bold,
+                    color: .primary,
+                    verbatim: settings.verbatimLyrics
+                )
+                if settings.showLyricsTranslation, let translation = line.translation {
+                    Text(translation)
+                        .font(.system(size: LyricsVisualParameters.translationSize, weight: .medium))
+                        .foregroundStyle(.primary.opacity(0.66))
+                }
+            }
+            .multilineTextAlignment(.leading)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 6)
+            .contentShape(Rectangle())
+            .visualEffect { content, _ in
+                content
+                    .opacity(visualOpacity)
+                    .blur(radius: visualBlur)
+                    .scaleEffect(visualScale, anchor: .leading)
+                    .offset(y: visualOffset)
+            }
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovering = $0 }
+        .accessibilityHint("从这一句开始播放")
+        .accessibilityAddTraits(isActive ? [.isSelected] : [])
+        .animation(reduceMotion ? .easeInOut(duration: 0.18) : LyricsVisualParameters.focusAnimation, value: activeIndex)
+        .animation(.easeInOut(duration: 0.15), value: isHovering)
+    }
+}
+
+/// Use the containing native scroll view's own scroller policy. In particular,
+/// don't flash indicators for programmatic lyric following or force overlays
+/// for people who explicitly chose persistent scrollbars in System Settings.
+private struct LyricScrollerPreferences: NSViewRepresentable {
+    func makeNSView(context: Context) -> Probe { Probe() }
+    func updateNSView(_ view: Probe, context: Context) { view.applyPreferences() }
+
+    final class Probe: NSView {
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            DispatchQueue.main.async { [weak self] in self?.applyPreferences() }
+        }
+
+        func applyPreferences() {
+            guard let scrollView = enclosingScrollView else { return }
+            scrollView.scrollerStyle = NSScroller.preferredScrollerStyle
+            scrollView.hasVerticalScroller = true
+            scrollView.autohidesScrollers = true
+        }
+    }
+}

@@ -611,16 +611,12 @@ struct LyricMainText: View {
     let verbatim: Bool
     var inactiveOpacity: Double = 0.45
 
-    @EnvironmentObject private var player: PlayerService
-
     var body: some View {
-        if isActive, verbatim, let words = line.words, !words.isEmpty {
-            TimelineView(.animation(paused: !player.isPlaying)) { _ in
-                LyricText(
-                    line: line, size: size, weight: weight, color: .white,
-                    alphas: Self.alphas(for: line, words: words, at: player.livePlaybackTime)
-                )
-            }
+        if isActive, verbatim, line.words?.isEmpty == false {
+            LyricPlaybackText(
+                line: line, isActive: true, size: size, weight: weight,
+                color: .white, verbatim: true
+            )
         } else {
             LyricText(
                 line: line, size: size, weight: weight,
@@ -632,24 +628,7 @@ struct LyricMainText: View {
     /// One opacity per character of `line.text`: sung characters are bright,
     /// the current one fades in, unsung stay dim.
     static func alphas(for line: LyricLine, words: [LyricWord], at time: TimeInterval) -> [Double] {
-        let unsung = 0.28
-        var out: [Double] = []
-        for word in words {
-            let chars = Array(word.text)
-            let per = chars.isEmpty ? word.duration : word.duration / Double(chars.count)
-            for index in chars.indices {
-                let charStart = word.start + per * Double(index)
-                let frac = per > 0 ? min(max((time - charStart) / per, 0), 1)
-                                   : (time >= charStart ? 1 : 0)
-                out.append(unsung + (1 - unsung) * frac)
-            }
-        }
-        // `line.text` is the words joined and *then* trimmed, so drop the
-        // opacities for whitespace the line no longer starts with.
-        let joined = words.map(\.text).joined()
-        guard joined.count != line.text.count else { return out }
-        let leading = joined.count - joined.drop(while: \.isWhitespace).count
-        return Array(out.dropFirst(leading).prefix(line.text.count))
+        LyricHighlightTiming.alphas(for: line, words: words, at: time)
     }
 }
 
