@@ -14,7 +14,7 @@ public struct KumoneApp: App {
     public init() {}
 
     public var body: some Scene {
-        Window("Kumone", id: "main") {
+        Window("且听", id: "main") {
             MainWindow()
                 .environmentObject(player)
                 .environmentObject(account)
@@ -31,6 +31,16 @@ public struct KumoneApp: App {
                      height: Theme.Layout.defaultWindowHeight)
         .windowResizability(.contentMinSize)
         .commands {
+            CommandGroup(replacing: .appInfo) {
+                Button("关于且听") {
+                    NSApp.orderFrontStandardAboutPanel(options: [
+                        .applicationName: "且听",
+                        .credits: NSAttributedString(
+                            string: "Based on Kumone · © 2026 missuo\nLGPL-3.0-only\nhttps://github.com/missuo/kumone"
+                        ),
+                    ])
+                }
+            }
             CommandGroup(after: .appInfo) {
                 CheckForUpdatesButton()
             }

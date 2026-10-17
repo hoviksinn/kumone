@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <title>且听 — Listening wave</title>
+  <desc>Original placeholder artwork: five rounded sound ribbons in a calm, symmetric wave.</desc>
+  <g fill="#F6F4FF">
+    <rect x="284" y="426" width="60" height="172" rx="30"/>
+    <rect x="383" y="350" width="60" height="324" rx="30"/>
+    <rect x="482" y="270" width="60" height="484" rx="30"/>
+    <rect x="581" y="350" width="60" height="324" rx="30"/>
+    <rect x="680" y="426" width="60" height="172" rx="30"/>
+  </g>
+</svg>

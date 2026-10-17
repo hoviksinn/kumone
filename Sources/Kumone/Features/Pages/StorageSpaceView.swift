@@ -35,7 +35,7 @@ struct StorageSpaceView: View {
             }
 
             Section {
-                LabeledContent(model.snapshot?.partial == true ? String(localized: "已统计的 Kumone 占用") : String(localized: "Kumone 占用")) {
+                LabeledContent(model.snapshot?.partial == true ? String(localized: "已统计的且听占用") : String(localized: "且听占用")) {
                     Text(model.snapshot.map { format($0.appBytes) } ?? "—")
                         .font(.body.weight(.semibold)).monospacedDigit()
                 }

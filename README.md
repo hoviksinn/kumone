@@ -6,11 +6,11 @@
 
 <div align="center">
 
-<img src="docs/icon.png" width="140" alt="Kumone" />
+<img src="docs/qieting-icon.svg" width="140" alt="且听 QieTing" />
 
-# Kumone
+# 且听 · QieTing
 
-**雲の音 — Native macOS client for NetEase Cloud Music**
+**Listen at your own pace — A native macOS music player**
 
 Swift / SwiftUI / AppKit · Talks directly to NetEase's real API · GitHub Actions test builds
 
@@ -18,24 +18,15 @@ Swift / SwiftUI / AppKit · Talks directly to NetEase's real API · GitHub Actio
 [![Swift](https://img.shields.io/badge/Swift-6.2-F05138?logo=swift&logoColor=white)](Package.swift)
 [![License](https://img.shields.io/badge/license-LGPL--3.0--only-orange)](LICENSE)
 
-<table>
-  <tr>
-    <td><img src="docs/screenshot-home.png" alt="Home" /></td>
-    <td><img src="docs/screenshot-nowplaying.png" alt="Now Playing" /></td>
-  </tr>
-  <tr>
-    <td><img src="docs/screenshot-daily.png" alt="Daily Recommendations" /></td>
-    <td><img src="docs/screenshot-lyrics.png" alt="Lyrics Panel" /></td>
-  </tr>
-</table>
-
 </div>
 
-This is the personal macOS fork [hoviksinn/kumone](https://github.com/hoviksinn/kumone), based on the open-source [missuo/kumone](https://github.com/missuo/kumone) project. It supports macOS 26.0 and later on Apple Silicon (arm64). Upstream copyright, licenses, and credits are retained.
+**且听 (QieTing)** is the personal macOS fork [hoviksinn/kumone](https://github.com/hoviksinn/kumone), based on the open-source [missuo/kumone](https://github.com/missuo/kumone) project. It supports macOS 26.0 and later on Apple Silicon (arm64). Upstream copyright, licenses, and credits are retained.
 
-## About the Name
+## Name and Icon
 
-**Kumone** comes from the Japanese **雲の音** (*kumo no ne*, "the sound of clouds"), contracted into one word — **雲音** (くもね, *kumone*). It is a nod to the "cloud" in NetEase **Cloud** Music: the music drifting down to you from the cloud.
+The displayed app name is **且听**, with **QieTing** as its English identifier. This is a customization of Kumone, not a new claim of authorship over the upstream player. Internal Swift modules, the executable, the existing test Bundle ID, and data paths keep their names so login, settings, and cached music continue to work.
+
+The original placeholder icon uses five sound ribbons on an indigo background. Its editable vector source lives in `AppIcon.icon`, compiled by Apple's `actool` into the app's native macOS icon. Run `python3 Scripts/generate-icon-preview.py` to regenerate the flat README preview; macOS supplies the actual Liquid Glass appearance.
 
 ## Features
 
@@ -46,7 +37,7 @@ This is the personal macOS fork [hoviksinn/kumone](https://github.com/hoviksinn/
 - 🔓 **Gray track unblocking** — native implementation of UnblockNeteaseMusic's core sources (pyncmd / Kuwo / Kugou); unavailable or trial-only tracks automatically resolve from third-party sources
 - 🖼 **Immersive now-playing page** — artwork-tinted gradient backdrop, large artwork, big synced lyrics (click the player-bar artwork to open, Esc to close)
 - 📻 **Personal FM** — immersive roaming page with trash / skip
-- 📝 **Lyrics** — glass side panel with synced lyrics, word-level lyrics and translation, click to seek
+- 📝 **Lyrics** — full-height side region with synced lyrics, word-level lyrics and translation, click to seek
 - 🪟 **Desktop lyrics** — LyricsX-style floating always-on-top lyric line with translation; draggable, persisted position, visible across Spaces and full-screen apps
 - 📚 **Library** — liked songs, created / subscribed playlists, saved albums, followed artists, recently played, cloud disk
 - ✏️ **Playlist management** — create / delete / subscribe playlists, add / remove tracks, heart songs
@@ -59,9 +50,9 @@ This is the personal macOS fork [hoviksinn/kumone](https://github.com/hoviksinn/
 
 Requires macOS 26.0 or later and an Apple Silicon Mac. Intel Macs are no longer supported.
 
-Open [Actions → CI](https://github.com/hoviksinn/kumone/actions/workflows/ci.yml) in this repository, choose a successful run, and download the artifact whose name contains `macOS26-arm64`. Extract the download and the App ZIP inside to obtain `Kumone.app`. See the [Chinese test-build guide](docs/MACOS_TEST_BUILDS_CN.md) for manual runs and safe testing instructions.
+Open [Actions → CI](https://github.com/hoviksinn/kumone/actions/workflows/ci.yml) in this repository, choose a successful run, and download the artifact whose name contains `macOS26-arm64`. Extract the download and the App ZIP inside to obtain `且听.app`. See the [Chinese test-build guide](docs/MACOS_TEST_BUILDS_CN.md) for manual runs and safe testing instructions.
 
-Test builds are named `Kumone Test`, always use the separate Bundle ID `com.hoviksinn.kumone.test`, and keep updates disabled. They use no upstream signing certificate or release secret and are not notarized by Apple. Keep the original Kumone app separate and use a separate macOS user account as described in the guide: some data paths still use upstream names. This repository does not provide Homebrew installation, production releases, or automatic updates.
+The downloaded app is named `且听.app` and the artifact begins with `QieTing-Test-macOS26-arm64`. It keeps the separate Bundle ID `com.hoviksinn.kumone.test` and updates disabled. Test builds use no upstream signing certificate or release secret and are not notarized by Apple. Keep the original Kumone app separate and use a separate macOS user account as described in the guide: some data paths still use upstream names. This repository does not provide Homebrew installation, production releases, or automatic updates.
 
 ## Building
 
@@ -70,7 +61,7 @@ Requires an Apple Silicon Mac, macOS 26.0+, and Xcode 26+. Linux supports static
 ```bash
 swift build --triple arm64-apple-macosx26.0  # compile
 make test                                 # prepare Metal kernels and run all tests
-Scripts/build-app.sh           # package the .app (outputs .build/app/Kumone.app)
+Scripts/build-app.sh           # package the .app (outputs .build/app/且听.app)
 Scripts/compile_and_run.sh     # kill → repackage → relaunch
 ```
 
@@ -97,8 +88,7 @@ For a separate **tvOS** client, upstream recommends [Sonimbus](https://github.co
 
 ## Credits
 
-Kumone is written from scratch in Swift. No code was copied from the projects
-below, but their design and implementation ideas were referenced extensively:
+This customization is based on **Kumone by missuo** ([upstream](https://github.com/missuo/kumone), © 2026 missuo, LGPL-3.0-only). The upstream Swift implementation credits the following projects for design and implementation ideas:
 
 - [YesPlayMusic](https://github.com/qier222/YesPlayMusic) (MIT, © qier222) — feature design, NetEase API endpoints and behavior
 - [kaset](https://github.com/sozercan/kaset) (MIT, © sozercan) — UI design system, motion, and SwiftPM packaging approach
@@ -109,5 +99,4 @@ below, but their design and implementation ideas were referenced extensively:
 
 Licensed under [LGPL-3.0-only](LICENSE) (the [GPL-3.0](COPYING) text is
 included alongside). For learning and personal use only — all music data and
-rights belong to NetEase Cloud Music and the respective source platforms. No
-downloading, no social features.
+rights belong to NetEase Cloud Music and the respective source platforms. Music downloads and caching use the existing upstream capabilities; no social features are added.

@@ -4,7 +4,7 @@
 .PHONY: help build test app clean
 
 help: ## Show this help
-	@echo "Kumone make targets:"
+	@echo "且听 make targets:"
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
 		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
 

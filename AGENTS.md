@@ -1,4 +1,6 @@
-# Kumone development
+# 且听 (QieTing) development
+
+- The user-facing product is 且听 (QieTing). Package `.build/app/且听.app`; use `QieTing-Test-macOS26-arm64` for downloadable builds. Existing Kumone Swift modules, executable, Bundle ID, preference keys, and data paths are intentionally retained to preserve login and stored data. Never rename them incidentally during visual work.
 
 - Support only macOS 26.0+ on Apple Silicon (`arm64`). Do not add iOS, iPadOS, CarPlay, Intel, Universal Binary, or other platform applications.
 - Use Swift, SwiftUI, AppKit, and modern Apple native APIs. Remove obsolete compatibility branches when their macOS behavior is clear; avoid rewrites that do not improve maintainability.

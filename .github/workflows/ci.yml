@@ -43,7 +43,9 @@ jobs:
           done < <(find "$BIN_PATH" -type d -path '*.xctest/Contents/MacOS' -print0)
 
       - name: Test
-        run: swift test --skip-build --triple arm64-apple-macosx26.0
+        run: |
+          swift test --skip-build --triple arm64-apple-macosx26.0
+          test -s .build/transport-validation.json
 
       # Ad-hoc signature only. No certificate, notarization, or release secrets.
       - name: Build app (macOS 26, arm64)
@@ -51,16 +53,16 @@ jobs:
 
       - name: Verify packaged architecture, deployment target and isolation
         run: |
-          python3 Scripts/verify-app.py .build/app/Kumone.app \
+          python3 Scripts/verify-app.py ".build/app/且听.app" \
             --report .build/app-verification.json
 
       - name: Zip test app (preserve bundle metadata)
         run: |
           ditto -c -k --sequesterRsrc --keepParent \
-            .build/app/Kumone.app .build/Kumone-Test-macOS26-arm64.zip
-          stat -f 'App ZIP bytes: %z' .build/Kumone-Test-macOS26-arm64.zip
+            ".build/app/且听.app" .build/QieTing-Test-macOS26-arm64.zip
+          stat -f 'App ZIP bytes: %z' .build/QieTing-Test-macOS26-arm64.zip
           {
-            echo '### Kumone Test — macOS 26 / arm64'
+            echo '### 且听 QieTing Test — macOS 26 / arm64'
             echo 'Build, tests, architecture/deployment checks and packaging passed.'
             echo 'Download the artifact below, then extract the outer ZIP and App ZIP.'
             echo 'See app-verification.json inside the artifact for measured bundle metadata.'
@@ -70,10 +72,11 @@ jobs:
       - name: Upload macOS test app
         uses: actions/upload-artifact@v4
         with:
-          name: Kumone-Test-macOS26-arm64-${{ github.run_number }}-${{ github.run_attempt }}
+          name: QieTing-Test-macOS26-arm64-${{ github.run_number }}-${{ github.run_attempt }}
           path: |
-            .build/Kumone-Test-macOS26-arm64.zip
+            .build/QieTing-Test-macOS26-arm64.zip
             .build/app-verification.json
+            .build/transport-validation.json
           if-no-files-found: error
           retention-days: 14
           compression-level: 0
