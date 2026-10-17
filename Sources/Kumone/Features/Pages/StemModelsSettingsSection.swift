@@ -1,4 +1,3 @@
-#if os(macOS)
 import SwiftUI
 
 /// The 分离模型 rows of the settings page.
@@ -85,4 +84,3 @@ extension StemModelState {
         return false
     }
 }
-#endif

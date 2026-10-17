@@ -1,4 +1,3 @@
-#if os(macOS)
 import Foundation
 
 // Live read-out of the AutoMix pipeline, for the person running listening
@@ -13,10 +12,7 @@ import Foundation
 // and what keeps it honest when it is open — every number shown is a number
 // the player itself acted on.
 //
-// The view is macOS-only; the model is not, so PlayerService can push
-// unconditionally instead of carrying `#if os(macOS)` at a dozen call sites.
-// On iOS every plan is `.gapless` and nothing ever activates it, so the whole
-// thing costs a Bool test per push.
+// PlayerService pushes updates without depending on the debug panel's view.
 
 /// One deck's rate and gain stages, as the panel prints them.
 ///
@@ -1045,4 +1041,3 @@ extension AutoMixDebugPlan {
         }
     }
 }
-#endif

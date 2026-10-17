@@ -1,10 +1,5 @@
 // macOS player: the dual-deck `PlaybackEngine` with AutoMix, stems and the
-// output-device picker. iOS never gets AutoMix and keeps the original
-// AVPlayer-based `PlayerService` in PlayerServiceIOS.swift (kept identical to
-// the pre-AutoMix file). Exactly one of the two compiles per platform, so
-// every call site sees a single `PlayerService`; anything shared UI calls on
-// it must exist in both, or be guarded with `#if os(macOS)` at the call site.
-#if os(macOS)
+// output-device picker.
 import Combine
 import AVFoundation
 import Foundation
@@ -592,8 +587,8 @@ final class PlayerService: ObservableObject {
     }
 
     /// Whether the AutoMix order can do anything at all. It picks by planning,
-    /// and planning needs analyses — which iOS and an AutoMix-off player never
-    /// compute — and it downloads candidates the listener did not ask for,
+    /// and planning needs analyses — which an AutoMix-off player never
+    /// computes — and it downloads candidates the listener did not ask for,
     /// which is its own opt-in. The shuffle button cycles through two states
     /// rather than three when this is false.
     var autoMixOrderAvailable: Bool {
@@ -2263,8 +2258,8 @@ final class PlayerService: ObservableObject {
     ///
     /// The debug panel's force override is applied here rather than at the one
     /// planning call, so the stem pre-render is built against the very config
-    /// the plan was made under. Off — always, on iOS and for anyone who has not
-    /// opened the panel — `plannerConfig` returns exactly what it always did.
+    /// the plan was made under. With the panel closed, `plannerConfig` returns
+    /// the normal configuration.
     private var plannerConfig: TransitionPlanner.Config {
         var config = TransitionPlanner.Config.standard
         config.loudnessCompensation = loudnessCompensationEnabled
@@ -2348,8 +2343,8 @@ final class PlayerService: ObservableObject {
                                     config: plannerConfig.loudnessConfig)
     }
 
-    /// Whether analysis results would ever be consumed: on iOS, with the
-    /// AutoMix master off, and with every sub-setting that could read an
+    /// Whether analysis results would ever be consumed: with the
+    /// AutoMix master off, or with every sub-setting that could read an
     /// analysis off, decoding + analyzing the whole track would be pure waste.
     ///
     /// Three consumers, so three terms. Transitions plan against two beat
@@ -3732,4 +3727,3 @@ final class PlayerService: ObservableObject {
         KumoneDirectories.applicationSupport().appendingPathComponent("player-state.json")
     }
 }
-#endif

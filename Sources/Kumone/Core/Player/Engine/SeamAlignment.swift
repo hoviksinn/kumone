@@ -1,4 +1,3 @@
-#if os(macOS)
 import Accelerate
 import AVFoundation
 import Foundation
@@ -322,4 +321,3 @@ enum SeamOffsetMeter {
         return LoudnessMeter.monoDownmix(channels)
     }
 }
-#endif

@@ -5,18 +5,12 @@ struct SettingsView: View {
     @EnvironmentObject private var account: AccountStore
     @Environment(\.openDestination) private var openDestination
     @Environment(\.dismiss) private var dismiss
-    #if os(macOS)
     @ObservedObject private var downloader = StemModelDownloader.shared
-    #endif
 
     var body: some View {
-        #if os(macOS)
         NavigationStack { settingsForm }
             .background(SettingsWindowToolbar())
             .frame(width: 520, height: 620)
-        #else
-        settingsForm
-        #endif
     }
 
     private var settingsForm: some View {
@@ -35,7 +29,6 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            #if os(macOS)
 
             // AutoMix is a group of its own because it is a group of costs:
             // the master switch buys analysis, and each sub-switch below adds
@@ -70,9 +63,7 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
-                // Stem separation runs on MLX, which is Apple silicon only —
-                // the x86_64 slice of the universal app never offers it.
-                #if arch(arm64)
+                // Stem separation runs on MLX and the Apple silicon GPU.
                 // Off *and* unavailable until the model is on disk: a toggle
                 // that cannot do anything must not look like it can, and the
                 // section below is where it becomes possible.
@@ -83,7 +74,6 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 StemModelsSettingsSection()
-                #endif
             } header: {
                 Text("AutoMix")
             } footer: {
@@ -91,7 +81,6 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            #endif
 
             if settings.enableUnblock {
                 Section {
@@ -118,10 +107,8 @@ struct SettingsView: View {
                         Text(appearance.displayName).tag(appearance)
                     }
                 }
-                #if os(macOS)
-                // macOS only renders two now-playing layouts — 黑胶 and the
-                // regular page; the iOS 沉浸/简洁 options all fall back to the
-                // regular page here, so offering four was misleading (#105).
+                // macOS renders two now-playing layouts — 黑胶 and the regular
+                // page. Keep legacy stored values mapped to the regular page.
                 // Map any non-vinyl value onto 经典模式 so a stored default (e.g.
                 // 沉浸模式) still shows a valid selection.
                 Picker("播放页模式", selection: Binding(
@@ -131,13 +118,6 @@ struct SettingsView: View {
                     Text(NowPlayingMode.vinyl.displayName).tag(NowPlayingMode.vinyl)
                     Text(NowPlayingMode.classic.displayName).tag(NowPlayingMode.classic)
                 }
-                #else
-                Picker("播放页模式", selection: $settings.nowPlayingMode) {
-                    ForEach(NowPlayingMode.allCases) { mode in
-                        Text(mode.displayName).tag(mode)
-                    }
-                }
-                #endif
                 Toggle("显示歌词翻译", isOn: $settings.showLyricsTranslation)
                 Toggle("逐字歌词（卡拉OK）", isOn: $settings.verbatimLyrics)
                 Picker("日文歌词读音", selection: $settings.lyricsAnnotation) {
@@ -171,7 +151,6 @@ struct SettingsView: View {
                         .foregroundStyle(.secondary)
                     }
                 }
-                #if os(macOS)
                 Toggle("桌面歌词", isOn: $settings.showDesktopLyrics)
                 if settings.showDesktopLyrics {
                     Toggle("桌面歌词水平居中", isOn: $settings.desktopLyricsCentered)
@@ -179,15 +158,11 @@ struct SettingsView: View {
                 Text("在屏幕上悬浮显示当前歌词，可拖动调整位置")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                #endif
             }
 
             Section("存储") {
                 NavigationLink {
                     StorageSpaceView {
-                        #if os(iOS)
-                        dismiss()
-                        #endif
                         openDestination(.downloaded)
                     }
                 } label: {
@@ -195,7 +170,6 @@ struct SettingsView: View {
                 }
             }
 
-            #if os(macOS)
             Section("通用") {
                 NavigationLink {
                     ShortcutSettingsView()
@@ -203,7 +177,6 @@ struct SettingsView: View {
                     Label("快捷键", systemImage: "keyboard")
                 }
             }
-            #endif
 
             Section("账号") {
                 if let profile = account.profile {
@@ -226,16 +199,6 @@ struct SettingsView: View {
 
             Section("关于") {
                 LabeledContent("Kumone", value: appVersion)
-                #if os(iOS)
-                Button {
-                    IOSUpdater.shared.check(interactive: true)
-                } label: {
-                    Label("检查更新", systemImage: "arrow.triangle.2.circlepath")
-                }
-                Text("装有 TrollStore（巨魔）可在应用内一键自动安装；否则可下载 IPA 用侧载工具重装（登录状态与设置保留）")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                #endif
                 Text("网易云音乐第三方客户端 · 数据来自网易云音乐")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -243,7 +206,6 @@ struct SettingsView: View {
         }
         .formStyle(.grouped)
     }
-    #if os(macOS)
 
     /// Whether the two-stem model is on disk, read from the downloader so the
     /// toggle flips the moment a download lands (the launcher wires the
@@ -260,7 +222,6 @@ struct SettingsView: View {
                 set: { settings.automixStemsEnabled = $0 })
     }
 
-    #endif
 
     private var appVersion: String {
         Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev"
@@ -268,7 +229,6 @@ struct SettingsView: View {
 
 }
 
-#if os(macOS)
 /// A Settings scene keeps its preference-style toolbar even when given a
 /// scene-level windowToolbarStyle. Configure this window through AppKit so
 /// navigation shares the title bar instead of becoming a centered second row.
@@ -293,4 +253,3 @@ struct SettingsWindowToolbar: NSViewRepresentable {
         }
     }
 }
-#endif

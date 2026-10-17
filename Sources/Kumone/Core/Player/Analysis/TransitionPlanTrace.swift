@@ -1,4 +1,3 @@
-#if os(macOS)
 import Foundation
 
 // A decision ledger for `TransitionPlanner.plan`.
@@ -177,4 +176,3 @@ public struct PlanTrace: Sendable {
         shadowGates.first { !$0.passed && $0.stage != .barUpgrade && $0.stage != .structure }
     }
 }
-#endif

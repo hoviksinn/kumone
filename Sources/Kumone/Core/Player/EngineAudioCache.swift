@@ -1,4 +1,3 @@
-#if os(macOS)
 import Foundation
 import os
 
@@ -297,4 +296,3 @@ actor EngineAudioCache {
         }
     }
 }
-#endif

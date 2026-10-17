@@ -1,4 +1,3 @@
-#if os(macOS)
 import AVFoundation
 import AudioToolbox
 import Foundation
@@ -835,4 +834,3 @@ extension ProgressiveLoader: URLSessionDataDelegate {
         notify { self.onCompleted?() }
     }
 }
-#endif

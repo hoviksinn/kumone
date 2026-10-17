@@ -1,4 +1,3 @@
-#if os(macOS)
 import Foundation
 import os
 
@@ -104,4 +103,3 @@ enum PlaybackJournal {
         String(format: "a=×%.4f b=×%.4f", a, b)
     }
 }
-#endif

@@ -1,4 +1,3 @@
-#if os(macOS)
 import AppKit
 
 /// Dock icon menu (right-click / long-press on the Dock tile).
@@ -122,4 +121,3 @@ private extension RepeatMode {
         }
     }
 }
-#endif

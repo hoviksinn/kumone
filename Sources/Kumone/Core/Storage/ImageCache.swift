@@ -174,8 +174,7 @@ struct CachedAsyncImage<Placeholder: View>: View {
         self.url = url
         self.animated = animated
         self.placeholder = placeholder
-        // Seed from the in-memory cache so a re-created view (e.g. the iOS 26
-        // tab-bar accessory rebuilt on a tab switch, #46) shows already-decoded
+        // Seed from the in-memory cache so a re-created view shows already-decoded
         // artwork immediately instead of flashing the placeholder.
         let seeded = url.flatMap { ImageCache.shared.cachedImage(for: $0) }
         _imageState = State(initialValue: CachedImageState(url: url, image: seeded))

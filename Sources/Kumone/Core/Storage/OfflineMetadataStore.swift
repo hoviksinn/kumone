@@ -135,8 +135,5 @@ actor OfflineMetadataStore {
         var values = URLResourceValues()
         values.isExcludedFromBackup = true
         try directory.setResourceValues(values)
-        #if os(iOS)
-        try FileManager.default.setAttributes([.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication], ofItemAtPath: url.path)
-        #endif
     }
 }

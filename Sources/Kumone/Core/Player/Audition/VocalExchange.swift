@@ -1,4 +1,3 @@
-#if os(macOS)
 import Foundation
 
 // The `vocalExchange` template: from "these two are both singing" to four
@@ -933,4 +932,3 @@ extension Audition {
         }
     }
 }
-#endif

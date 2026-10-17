@@ -163,13 +163,6 @@ struct LoginSheet: View {
             .font(.system(size: 12))
             .foregroundStyle(.secondary)
 
-            #if os(iOS)
-            Text("只有一台设备？截图二维码，到网易云音乐 App 的扫一扫里选择相册识别，然后回到这里即可")
-                .font(.system(size: 11))
-                .foregroundStyle(.tertiary)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 24)
-            #endif
         }
     }
 
@@ -269,18 +262,12 @@ struct LoginSheet: View {
                     Rectangle().fill(.quaternary).frame(width: 1, height: 20)
                     TextField("手机号", text: $phone)
                         .textFieldStyle(.plain).font(.system(size: 15))
-                        #if os(iOS)
-                        .keyboardType(.phonePad).textContentType(.telephoneNumber)
-                        #endif
                 }
                 .fieldChrome()
 
                 HStack(spacing: 10) {
                     TextField("验证码", text: $code)
                         .textFieldStyle(.plain).font(.system(size: 15))
-                        #if os(iOS)
-                        .keyboardType(.numberPad).textContentType(.oneTimeCode)
-                        #endif
                     Button {
                         sendCode()
                     } label: {
@@ -382,11 +369,7 @@ struct LoginSheet: View {
         let scaled = output.transformed(by: CGAffineTransform(scaleX: 12, y: 12))
         let context = CIContext()
         guard let cgImage = context.createCGImage(scaled, from: scaled.extent) else { return nil }
-        #if os(macOS)
         return NSImage(cgImage: cgImage, size: NSSize(width: 180, height: 180))
-        #elseif os(iOS)
-        return UIImage(cgImage: cgImage)
-        #endif
     }
 }
 

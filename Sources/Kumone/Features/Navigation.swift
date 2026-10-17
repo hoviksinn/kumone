@@ -126,7 +126,6 @@ struct DestinationsModifier: ViewModifier {
                     SearchView(query: query)
                 }
             }
-            .playerContentInset()
         }
     }
 }
@@ -134,13 +133,6 @@ struct DestinationsModifier: ViewModifier {
 extension View {
     func playerChrome(detailWidth: CGFloat) -> some View {
         modifier(PlayerChromeModifier(detailWidth: detailWidth))
-    }
-
-    /// Pages clear the floating player bar with an explicit trailing
-    /// `PlayerClearanceSpacer` in their scroll content; safeAreaPadding
-    /// proved unreliable inside navigation stacks (#12).
-    func playerContentInset() -> some View {
-        self
     }
 
     func appDestinations() -> some View {
@@ -151,27 +143,9 @@ extension View {
 /// Trailing spacer for scrollable pages so the last row clears the
 /// floating player bar.
 struct PlayerClearanceSpacer: View {
-    @EnvironmentObject private var player: PlayerService
-
     var body: some View {
-        #if os(iOS)
-        if #available(iOS 26.0, *) {
-            // On iOS 26+, the native TabView bottom accessory automatically
-            // expands the content safe area insets; keep only the breathing margin.
-            Color.clear.frame(height: Theme.Layout.scrollBreathingMargin)
-        } else {
-            // On iOS < 26, customTabInterface floats above content and requires
-            // explicit bottom clearance.
-            Color.clear.frame(
-                height: player.hasCurrentTrack
-                    ? Theme.Layout.FloatingChrome.fullChromeClearance
-                    : Theme.Layout.FloatingChrome.tabBarClearance
-            )
-        }
-        #else
         Color.clear.frame(
             height: Theme.Layout.playerChromeClearance + Theme.Layout.scrollBreathingMargin
         )
-        #endif
     }
 }

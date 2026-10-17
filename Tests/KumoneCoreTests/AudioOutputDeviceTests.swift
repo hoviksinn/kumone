@@ -1,4 +1,3 @@
-#if os(macOS)
 import CoreAudio
 import Foundation
 import Testing
@@ -399,4 +398,3 @@ import Testing
         #expect(damper.settled(at: at(2)) == .ignore)
     }
 }
-#endif

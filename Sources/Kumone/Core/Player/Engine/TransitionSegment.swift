@@ -1,4 +1,3 @@
-#if os(macOS)
 import AVFoundation
 import Foundation
 
@@ -117,4 +116,3 @@ struct TransitionSegment: @unchecked Sendable {
     /// Where the incoming deck is cued to when it takes over.
     var incomingResume: TimeInterval { incomingTime(at: handoffOutStart) }
 }
-#endif

@@ -43,30 +43,6 @@ enum Theme {
         /// Extra breathing margin for scrollable content clearing chrome.
         static let scrollBreathingMargin: CGFloat = 8
 
-        #if os(iOS)
-        enum FloatingChrome {
-            /// Total height of GlassTabBar: 56pt content + 2 * 4pt inset.
-            static let tabBarHeight: CGFloat = 64
-            /// Total height of legacy mini player bar: 44pt button + 2 * 4pt vertical padding.
-            static let miniPlayerHeight: CGFloat = 52
-            /// Spacing between mini player and tab bar in customTabInterface.
-            static let barSpacing: CGFloat = 8
-            /// Bottom padding under the tab bar.
-            static let bottomMargin: CGFloat = 6
-            /// Breathing margin ensuring content clears above the floating bars.
-            static let extraPadding: CGFloat = 12
-
-            /// Clearance needed when only the tab bar is visible.
-            static var tabBarClearance: CGFloat {
-                tabBarHeight + bottomMargin + extraPadding
-            }
-
-            /// Clearance needed when both mini player and tab bar are visible.
-            static var fullChromeClearance: CGFloat {
-                miniPlayerHeight + barSpacing + tabBarHeight + bottomMargin + extraPadding
-            }
-        }
-        #endif
         static let minWindowWidth: CGFloat = 1020
         /// Width the split view's divider occupies between the two columns.
         static let splitDividerWidth: CGFloat = 8
@@ -104,44 +80,21 @@ enum AppAnimation {
 }
 
 extension View {
-    /// `scrollClipDisabled` is iOS 17 / macOS 14; older systems clip normally.
+    /// Allows shelves to draw through the scroll container's edges.
     @ViewBuilder
     func compatScrollClipDisabled() -> some View {
-        if #available(iOS 17.0, macOS 14.0, *) { scrollClipDisabled() } else { self }
+        scrollClipDisabled()
     }
 
-    /// Hides the toolbar background; `toolbarBackgroundVisibility` is
-    /// macOS 15+/iOS 18+, so iOS 17 falls back to `toolbarBackground`.
+    /// Hides the native toolbar background.
     @ViewBuilder
     func compatHiddenToolbarBackground() -> some View {
-        #if os(macOS)
         toolbarBackgroundVisibility(.hidden, for: .automatic)
-        #else
-        if #available(iOS 18.0, *) {
-            toolbarBackgroundVisibility(.hidden, for: .automatic)
-        } else {
-            toolbarBackground(.hidden, for: .navigationBar)
-        }
-        #endif
     }
 
-    /// Glass background with a graceful material fallback on macOS 15.
+    /// Native Liquid Glass background on macOS 26 and later.
     @ViewBuilder
     func compatGlass(interactive: Bool = false, in shape: some Shape) -> some View {
-        #if os(macOS)
-        if #available(macOS 26.0, *) {
-            self.glassEffect(interactive ? .regular.interactive() : .regular, in: shape)
-        } else {
-            self.background(.ultraThinMaterial, in: shape)
-        }
-        #elseif os(iOS)
-        if #available(iOS 26.0, *) {
-            self.glassEffect(interactive ? .regular.interactive() : .regular, in: shape)
-        } else {
-            self.background(.ultraThinMaterial, in: shape)
-        }
-        #else
-        self.background(.ultraThinMaterial, in: shape)
-        #endif
+        self.glassEffect(interactive ? .regular.interactive() : .regular, in: shape)
     }
 }

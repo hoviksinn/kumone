@@ -6,9 +6,6 @@ struct StorageSpaceView: View {
     @StateObject private var model = StorageSpaceModel()
     @EnvironmentObject private var settings: SettingsManager
     @State private var clearing: StorageCategory?
-    #if os(iOS)
-    @State private var automaticLimitMB: Int?
-    #endif
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
@@ -62,28 +59,12 @@ struct StorageSpaceView: View {
 
             Section {
                 usageRow("歌曲缓存", icon: "music.note", category: .musicCache)
-                #if os(macOS)
                 Picker("歌曲缓存上限", selection: $settings.audioCacheLimit) {
                     Text("512 MB").tag(Int64(512) << 20)
                     Text("2 GB").tag(Int64(2) << 30)
                     Text("8 GB").tag(Int64(8) << 30)
                     Text("不限").tag(Int64(0))
                 }
-                #else
-                Toggle("歌曲缓存", isOn: $settings.enableAudioCache)
-                if settings.enableAudioCache {
-                    Picker("歌曲缓存上限", selection: cacheLimitSelection) {
-                        if let automaticLimitMB {
-                            Text("自动（\(format(Int64(automaticLimitMB) * 1_000_000))）").tag(0)
-                        } else {
-                            Text("自动").tag(0)
-                        }
-                        ForEach(manualCacheLimitsMB, id: \.self) { megabytes in
-                            Text(format(Int64(megabytes) * 1_000_000)).tag(megabytes)
-                        }
-                    }
-                }
-                #endif
                 Button(role: .destructive) { clearing = .musicCache } label: {
                     HStack {
                         Text("清除歌曲缓存")
@@ -125,11 +106,7 @@ struct StorageSpaceView: View {
         }
         .formStyle(.grouped)
         .navigationTitle("存储空间")
-        #if os(iOS)
-        .navigationBarTitleDisplayMode(.inline)
-        #else
         .background(SettingsWindowToolbar())
-        #endif
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button { Task { await model.reload() } } label: {
@@ -142,20 +119,9 @@ struct StorageSpaceView: View {
                 await model.reload()
             }
         }
-        #if os(macOS)
         .onChange(of: settings.audioCacheLimit) { _, _ in
             Task { await model.reload() }
         }
-        #else
-        .task(id: [settings.enableAudioCache ? (settings.audioCacheAutomatic ? -1 : settings.audioCacheSizeMB) : 0]) {
-            guard settings.enableAudioCache else { await DownloadManager.shared.refreshCachedTracks(); return }
-            let limit = await settings.effectiveAudioCacheSizeMB(refresh: true)
-            automaticLimitMB = settings.audioCacheAutomatic ? limit : nil
-            try? await AudioCache.shared.enforce(maximumSizeMB: limit)
-            await DownloadManager.shared.refreshCachedTracks()
-            await model.reload()
-        }
-        #endif
         .alert(clearTitle, isPresented: Binding(get: { clearing != nil }, set: { if !$0 { clearing = nil } }), presenting: clearing) { category in
             Button("清除", role: .destructive) {
                 Task { await model.clear(category) }
@@ -170,34 +136,11 @@ struct StorageSpaceView: View {
     }
 
     private var busy: Bool { model.isLoading || model.isClearing }
-    #if os(iOS)
-    /// Tag 0 is the automatic limit; the rest are megabytes.
-    private var cacheLimitSelection: Binding<Int> {
-        Binding(get: { settings.audioCacheAutomatic ? 0 : settings.audioCacheSizeMB },
-                set: { value in
-                    if value == 0 { settings.audioCacheAutomatic = true }
-                    else { settings.audioCacheAutomatic = false; settings.audioCacheSizeMB = value }
-                })
-    }
-    private var manualCacheLimitsMB: [Int] {
-        var sizes = [500, 1_000, 2_000, 5_000, 10_000]
-        // A size chosen on the old slider stays selectable until it is changed.
-        if !settings.audioCacheAutomatic, !sizes.contains(settings.audioCacheSizeMB) {
-            sizes.append(settings.audioCacheSizeMB)
-            sizes.sort()
-        }
-        return sizes
-    }
-    #endif
     private var clearTitle: String {
         clearing == .imageCache ? String(localized: "清除图片缓存？") : String(localized: "清除歌曲缓存？")
     }
     private var deviceName: String {
-        #if os(macOS)
         return "Mac"
-        #else
-        return UIDevice.current.userInterfaceIdiom == .pad ? "iPad" : "iPhone"
-        #endif
     }
     private func size(_ category: StorageCategory) -> String {
         guard let snapshot = model.snapshot, !snapshot.unavailableCategories.contains(category) else { return "—" }

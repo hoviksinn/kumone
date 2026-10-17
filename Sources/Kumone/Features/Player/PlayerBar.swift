@@ -75,39 +75,22 @@ struct PlayerBar: View {
 
     // MARK: - Queue-order control
 
-    /// The queue-order button's three platform-dependent values. macOS cycles
-    /// `listed → shuffled → autoMix`; iOS has no AutoMix and toggles shuffle.
+    /// The queue-order button cycles `listed → shuffled → autoMix`.
 
     private var queueOrderIcon: String {
-        #if os(macOS)
         player.queueOrder.symbolName
-        #else
-        "shuffle"
-        #endif
     }
 
     private var queueOrderIsActive: Bool {
-        #if os(macOS)
         player.queueOrder != .listed
-        #else
-        player.shuffleEnabled
-        #endif
     }
 
     private var queueOrderHelp: LocalizedStringKey {
-        #if os(macOS)
         player.queueOrder.controlHelp
-        #else
-        "随机播放"
-        #endif
     }
 
     private func cycleQueueOrder() {
-        #if os(macOS)
         player.cycleQueueOrder()
-        #else
-        player.toggleShuffle()
-        #endif
     }
 
     // MARK: - Center: transport + scrubber
@@ -125,10 +108,7 @@ struct PlayerBar: View {
                     // is a *kind* of shuffle, so it lives inside the shuffle
                     // button rather than beside it. The cycle skips it wherever
                     // it could do nothing (AutoMix off, order off), which
-                    // leaves the familiar two-state button untouched there —
-                    // and iOS, which has no AutoMix at all, keeps the plain
-                    // two-state shuffle toggle. Only the three values below
-                    // differ per platform; the button itself is one button.
+                    // leaves the familiar two-state button untouched there.
                     PlayerIconButton(
                         icon: queueOrderIcon, size: 12,
                         isActive: queueOrderIsActive,
@@ -230,10 +210,8 @@ struct PlayerBar: View {
                 player.activePanel = player.activePanel == .queue ? nil : .queue
             }
             .help("播放队列")
-            #if os(macOS)
             RoutePickerButton(diameter: 26, glyphSize: 13,
                               tint: .secondary, background: .clear)
-            #endif
             VolumeControl()
         }
     }
@@ -252,7 +230,6 @@ struct PlayerBar: View {
 }
 
 // MARK: - Icon button
-#if os(macOS)
 
 /// How the one queue-order control presents each state. Here rather than on
 /// the enum itself so `QueueOrder` stays a pure Core type: three transports
@@ -286,7 +263,6 @@ extension QueueOrder {
         }
     }
 }
-#endif
 
 struct PlayerIconButton: View {
     let icon: String

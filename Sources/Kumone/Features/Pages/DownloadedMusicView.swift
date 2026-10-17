@@ -46,9 +46,6 @@ struct DownloadedMusicView: View {
         // show the previous list through a saved-collection page.
         .background(Platform.windowBackgroundColor)
         .navigationTitle(collection?.name ?? String(localized: "已下载"))
-        #if os(iOS)
-        .navigationBarTitleDisplayMode(collectionID == nil ? .large : .inline)
-        #endif
         .task { await downloads.start(); await downloads.refreshLibrary() }
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
@@ -236,9 +233,7 @@ struct DownloadTasksView: View {
                             .frame(width: 30, height: 30)
                             .background(.primary.opacity(0.06), in: Circle())
                     }
-                    #if os(macOS)
                     .menuStyle(.borderlessButton)
-                    #endif
                     .fixedSize()
                     .accessibilityLabel("更多下载操作")
                     .disabled(downloads.pendingJobs.isEmpty)
@@ -346,11 +341,7 @@ private struct DownloadTaskRow: View {
     private func control(_ icon: String, title: LocalizedStringKey, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: icon).font(.callout.weight(.medium))
-                #if os(macOS)
                 .frame(width: 28, height: 28)
-                #else
-                .frame(width: 44, height: 44)
-                #endif
         }
         .buttonStyle(.pressable)
         .foregroundStyle(.secondary)

@@ -1,5 +1,7 @@
 # AutoMix S1 — 离线可行性原型报告
 
+> 上游音频研究档案：保留技术分析、来源及许可记录。文中的 iOS、旧系统及发布方式属于当时背景；本定制版仅支持 macOS 26+ / arm64，当前构建与测试方式以 [测试指南](MACOS_TEST_BUILDS_CN.md) 为准。
+
 > 状态：原型完成，**决策未做**（2026-08-27）
 > 前置阅读：[`automix-stems-predev.md`](automix-stems-predev.md) §8（S1 kill gate）· [`automix-spec.md`](automix-spec.md)
 > 脚本：`Scripts/stems-prototype/`（已从仓库移除，保留在分支历史中：`git log -- Scripts/stems-prototype`） · A/B 音频：scratchpad `stems-ab/`（不进 repo）

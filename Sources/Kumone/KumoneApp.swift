@@ -1,7 +1,6 @@
 import Combine
 import SwiftUI
 
-#if os(macOS)
 public struct KumoneApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
@@ -204,4 +203,3 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return false
     }
 }
-#endif

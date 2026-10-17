@@ -1,4 +1,3 @@
-#if os(macOS)
 import Foundation
 
 /// Persistent, quality-independent home for `TrackAnalysis` (spec §3).
@@ -161,4 +160,3 @@ actor AnalysisStore {
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     }
 }
-#endif

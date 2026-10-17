@@ -342,8 +342,7 @@ public final class StemSeparator: @unchecked Sendable {
 
 /// A lock around one value. `NSLock` plus a stored property, spelled once.
 ///
-/// Swift's own `Mutex` is in `Synchronization` and needs macOS 15; StemKit
-/// still builds for 14.
+/// Keeps access to separator state synchronous and scoped to one value.
 private final class Mutex<Value>: @unchecked Sendable {
     private let lock = NSLock()
     private var value: Value

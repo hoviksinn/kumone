@@ -1,4 +1,3 @@
-#if os(macOS)
 import AVFoundation
 import Foundation
 
@@ -727,4 +726,3 @@ enum StemTechniqueLayer {
         return biquad(biquad(input).reversed().map { $0 }).reversed().map { $0 }
     }
 }
-#endif

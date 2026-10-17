@@ -11,7 +11,7 @@ Kumone 的 AutoMix：队列自动衔接时，在乐句边界做节拍对齐的�
 |---|---|
 | 引擎策略 | **全量替换**：所有播放走 AVAudioEngine，删除 AVPlayer 路径 |
 | 缓存层 | **完整缓存层**：所有播放先落磁盘缓存（LRU，上限可设，默认 2 GB） |
-| 平台 | **macOS 先行**：引擎代码两端编译，AutoMix 功能开关先只在 macOS 启用 |
+| 平台 | **macOS 26+ / arm64**：只维护 macOS 原生引擎与 AutoMix |
 | 过渡深度 | **完整 AutoMix**：BPM/downbeat 分析 + 乐句选点 + 变速对拍，含自动退化链 |
 | 节拍分析 | **Accelerate/vDSP 自研**，零新依赖。aubio/BTrack 等均为 GPL，与本项目 LGPL-3.0-only 不兼容 |
 
@@ -170,11 +170,10 @@ struct BeatMatchedPlan {
 - `handleItemEnded` → 改为引擎回调：自然衔接时曲目状态切换发生在**过渡中点**（beatMatched 为 bassSwapAt，crossfade 为重叠中点）：`currentTrack`/歌词/NowPlaying metadata/scrobble 均以中点为界。
 - **Scrobble**：出曲被裁掉尾部仍按"完整播放"上报（seconds = 原 duration），与 Apple Music 行为一致。
 - 失败链（`consecutiveFailures`）、`resolveGeneration` 防竞态、状态持久化逻辑保留，generation 扩展覆盖 pipeline。
-- iOS 的 AVAudioSession/中断处理迁到引擎层，行为不变（本期不启用 AutoMix，但引擎必须在 iOS 正常工作——全量替换意味着 iOS 也跑新引擎）。
 
 ## 7. 设置与 UI
 
-- `SettingsManager`（macOS；iOS 全部隐藏并强制 gapless 路径）。AutoMix 是**分层自愿**的：主开关买"分析"，每个子项各自再加一笔账，主开关关闭时子项全部失效。
+- `SettingsManager`（macOS）。AutoMix 是**分层自愿**的：主开关买"分析"，每个子项各自再加一笔账，主开关关闭时子项全部失效。
   - `automixEnabled: Bool`（主开关，默认 **关**）
   - `automixTransitionsEnabled: Bool`（自动过渡，默认 **开**）
   - `automixOrderEnabled: Bool`（智能顺序 / `.autoMix` 队列顺序，默认 **关**；会额外下载候选歌曲打分）
@@ -213,7 +212,7 @@ struct BeatMatchedPlan {
 
 | 阶段 | 内容 | 验收 |
 |---|---|---|
-| **M1 引擎替换** | PlaybackEngine + AudioCache + ProgressiveLoader，单 deck 使用，行为与现状完全对齐（播放/暂停/seek/音量/试听/unblock/失败跳曲/状态恢复/NowPlaying/scrobble/iOS 会话） | 现有全部播放场景手测无回归；曲间为 gapless |
+| **M1 引擎替换** | PlaybackEngine + AudioCache + ProgressiveLoader，单 deck 使用，行为与现状完全对齐（播放/暂停/seek/音量/试听/unblock/失败跳曲/状态恢复/NowPlaying/scrobble） | 现有全部播放场景手测无回归；曲间为 gapless |
 | **M2 Crossfade** | 双 deck 过渡 + 预取流水线 + 设置开关 + 手动切歌快淡 | 队列连播无缝淡出；下一曲未就绪时正确退化 |
 | **M3 分析器** | TrackAnalyzer + sidecar + 离线验证 CLI | 回归集：BPM ±2、拍点相位 <70ms |
 | **M4 真 AutoMix** | TransitionPlanner + 变速对拍 + bass swap + 乐句选点 + 调试面板 | 同 BPM 段电子/流行歌单上过渡对拍不跑偏；混合歌单正确退化 |
@@ -222,7 +221,7 @@ struct BeatMatchedPlan {
 
 ## 9. 风险与对策
 
-- **渐进解码复杂度**（M1 最大风险）：AudioFileStream 对 mp3/aac 成熟，FLAC 需走 `AudioFileStreamOpen` 的 FLAC 支持（macOS 15 可用）；若某格式流式解码不稳，兜底为"该格式等缓存完成再播 + 播放前提示缓冲中"。
+- **渐进解码复杂度**（M1 最大风险）：AudioFileStream 对 mp3/aac 成熟，FLAC 需走 `AudioFileStreamOpen` 的 FLAC 支持（当前 macOS 26+ 目标可用）；若某格式流式解码不稳，兜底为"该格式等缓存完成再播 + 播放前提示缓冲中"。
 - **Swift 6 并发**：引擎与分析器不进 MainActor，deck 状态由引擎内部串行队列守护，对外只暴露 `Sendable` 值和 AsyncStream；language mode v5 下先以 `@unchecked Sendable` + 断言过渡。
 - **NetEase URL 时效**：resolve 与下载原子化在同一 pipeline task 内，URL 永不落盘。
 - **分析准确度**：自研 beat tracking 对无鼓点/自由节拍曲目会低置信，退化链保证听感底线——置信度阈值宁高勿低。

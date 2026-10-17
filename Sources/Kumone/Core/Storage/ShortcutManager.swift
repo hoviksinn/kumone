@@ -1,4 +1,3 @@
-#if os(macOS)
 import SwiftUI
 import AppKit
 
@@ -293,4 +292,3 @@ final class ShortcutManager: ObservableObject {
         }
     }
 }
-#endif
