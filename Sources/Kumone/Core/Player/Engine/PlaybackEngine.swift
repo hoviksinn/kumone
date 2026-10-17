@@ -174,6 +174,9 @@ final class PlaybackEngine: @unchecked Sendable {
         /// is not this schedule's to pay for. Cleared by the resume that
         /// forgives it. See `clearPauseSkewLocked`.
         var anchoredWhilePaused = false
+        /// A resumed real-time node may briefly expose its PRE-pause render
+        /// timestamp. Do not subtract the new pause skew from that old clock.
+        var resumedClockNotBeforeHostTime: UInt64?
         /// Last position we could compute; the fallback when the node clock
         /// is unavailable (paused engine, configuration change).
         var lastKnownPosition: TimeInterval = 0
@@ -379,6 +382,8 @@ final class PlaybackEngine: @unchecked Sendable {
     /// invalidate lastRenderTime on pause; tail disarming and a paused abort
     /// still need this position to preserve AutoMix's source-time mapping.
     private var pausedSegmentElapsed: TimeInterval?
+    private var lastPauseCallDuration: TimeInterval = 0
+    private var lastResumeStartDuration: TimeInterval = 0
 
     // Stream backpressure: pause the download when this many ~0.5s buffers
     // are scheduled but unplayed, resume below the low mark.
@@ -903,8 +908,11 @@ final class PlaybackEngine: @unchecked Sendable {
             }
             self.pausedSegmentElapsed = self.segmentElapsedLocked()
             self.isPaused = true
+            let pauseBegan = mach_absolute_time()
             self.engine.pause()
             self.pausedAtHostTime = mach_absolute_time()
+            self.lastPauseCallDuration = AVAudioTime.seconds(forHostTime:
+                self.pausedAtHostTime! &- pauseBegan)
 
             // Host-clock releases must be cancelled while the graph is frozen:
             // their deadlines keep advancing during a pause. The wait tick
@@ -926,17 +934,23 @@ final class PlaybackEngine: @unchecked Sendable {
     func resume() {
         queue.async {
             guard self.isPaused else { return }
-            // Engine-only pause preserves audio but its real-time player clock
-            // includes paused host time. Correct it before any consumer runs.
-            self.applyPauseSkewLocked()
+            let startBegan = mach_absolute_time()
             self.ensureEngineRunningLocked()
+            self.lastResumeStartDuration = AVAudioTime.seconds(forHostTime:
+                mach_absolute_time() &- startBegan)
             guard self.engine.isRunning else {
-                // A temporary device failure must still allow a later retry.
-                self.pausedAtHostTime = mach_absolute_time()
+                // Keep the original pause anchor through failed starts. None
+                // of this stopped interval has sounded, including a retry.
                 return
             }
+            // prepare/start itself can take hundreds of milliseconds. The
+            // player clock counts that stopped host interval too. Account for
+            // it AFTER start succeeds, while the serial queue and isPaused
+            // still protect every position reader from a half-resumed clock.
+            self.applyPauseSkewLocked(resumedAt: startBegan)
+            PlaybackJournal.note(String(format: "transport resume start=%.2fms",
+                AVAudioTime.seconds(forHostTime: mach_absolute_time() &- startBegan) * 1000))
             self.isPaused = false
-            self.pausedSegmentElapsed = nil
             // Normal sounding nodes are already playing: this is a no-op for
             // them. A seek/rebuild while paused may have made a fresh schedule,
             // which needs one guarded start using the usual exception/retry path.
@@ -961,9 +975,11 @@ final class PlaybackEngine: @unchecked Sendable {
     /// only while it is *sounding*: an armed-but-unreleased segment was taken
     /// off the clock by `disarmSegmentLocked` on the way into the pause.
     ///
-    /// Runs before `ensureEngineRunningLocked`, so no position read can land
-    /// between the engine restarting and the correction being in place.
-    private func applyPauseSkewLocked() {
+    /// Resume calls this after a successful engine start, before clearing
+    /// `isPaused`, in the same serial-queue transaction. This includes the
+    /// stopped time spent in prepare/start without exposing an uncorrected
+    /// playhead to any consumer.
+    private func applyPauseSkewLocked(resumedAt: UInt64? = nil) {
         guard let pausedAt = pausedAtHostTime else { return }
         pausedAtHostTime = nil
         // Offline rendering advances only when frames are explicitly pulled;
@@ -974,12 +990,14 @@ final class PlaybackEngine: @unchecked Sendable {
         for (deck, state) in deckStates {
             defer { state.anchoredWhilePaused = false }
             guard state.isPlaying, !state.anchoredWhilePaused, paused > 0 else { continue }
+            state.resumedClockNotBeforeHostTime = resumedAt
             state.pauseSkew = PausedClockSkew.skew(after: paused, existing: state.pauseSkew)
             PlaybackJournal.note(PausedClockSkew.line(
                 deck: deck.rawValue, paused: paused, total: state.pauseSkew))
         }
         let segmentSounding = transition?.phase == .segmentPlaying
         if segmentSounding, !segmentState.anchoredWhilePaused, paused > 0 {
+            segmentState.resumedClockNotBeforeHostTime = resumedAt
             segmentState.pauseSkew = PausedClockSkew.skew(
                 after: paused, existing: segmentState.pauseSkew)
             PlaybackJournal.note(PausedClockSkew.line(
@@ -994,6 +1012,7 @@ final class PlaybackEngine: @unchecked Sendable {
     /// this, which is what keeps the two in step.
     private func clearPauseSkewLocked(_ state: DeckState) {
         state.pauseSkew = 0
+        state.resumedClockNotBeforeHostTime = nil
         // Written *during* a pause (the graph rebuild re-cues every deck from
         // its cached position, paused or not): the pause still running belongs
         // to the schedule this one replaced, not to this one.
@@ -1369,15 +1388,26 @@ final class PlaybackEngine: @unchecked Sendable {
         var position: TimeInterval
         var pauseSkew: TimeInterval
         var hasPendingPause: Bool
+        var rawPlayerFrames: AVAudioFramePosition?
+        var manualOutputFrames: AVAudioFramePosition?
+        var pauseCallDuration: TimeInterval
+        var resumeStartDuration: TimeInterval
     }
 
     func transportSnapshotForTesting(_ deck: Deck) -> TransportSnapshot {
         queue.sync {
             let state = deckStates[deck]!
+            let rawPlayerFrames = Self.renderedNodeTime(state.player).flatMap {
+                state.player.playerTime(forNodeTime: $0)?.sampleTime
+            }
             return TransportSnapshot(paused: isPaused, engineRunning: engine.isRunning,
                                      nodePlaying: state.player.isPlaying, generation: state.generation,
                                      startOffset: state.startOffset, position: reportedPositionLocked(deck),
-                                     pauseSkew: state.pauseSkew, hasPendingPause: pausedAtHostTime != nil)
+                                     pauseSkew: state.pauseSkew, hasPendingPause: pausedAtHostTime != nil,
+                                     rawPlayerFrames: rawPlayerFrames,
+                                     manualOutputFrames: engine.isInManualRenderingMode ? engine.manualRenderingSampleTime : nil,
+                                     pauseCallDuration: lastPauseCallDuration,
+                                     resumeStartDuration: lastResumeStartDuration)
         }
     }
 
@@ -3888,6 +3918,12 @@ final class PlaybackEngine: @unchecked Sendable {
               playerTime.sampleRate > 0 else {
             return state.lastKnownPosition
         }
+        if let earliest = state.resumedClockNotBeforeHostTime {
+            guard nodeTime.isHostTimeValid, nodeTime.hostTime >= earliest else {
+                return state.lastKnownPosition
+            }
+            state.resumedClockNotBeforeHostTime = nil
+        }
         let raw = state.startOffset + Double(playerTime.sampleTime) / playerTime.sampleRate
         // The node's timeline kept counting through every global pause this
         // schedule survived; the song did not. See `PausedClockSkew`.
@@ -4578,7 +4614,16 @@ final class PlaybackEngine: @unchecked Sendable {
         guard !isPaused else { return pausedSegmentElapsed }
         guard let nodeTime = Self.renderedNodeTime(segmentState.player),
               let playerTime = segmentState.player.playerTime(forNodeTime: nodeTime),
-              playerTime.sampleRate > 0, playerTime.sampleTime >= 0 else { return nil }
+              playerTime.sampleRate > 0, playerTime.sampleTime >= 0 else {
+            return segmentState.resumedClockNotBeforeHostTime == nil ? nil : pausedSegmentElapsed
+        }
+        if let earliest = segmentState.resumedClockNotBeforeHostTime {
+            guard nodeTime.isHostTimeValid, nodeTime.hostTime >= earliest else {
+                return pausedSegmentElapsed
+            }
+            segmentState.resumedClockNotBeforeHostTime = nil
+            pausedSegmentElapsed = nil
+        }
         // Same correction as `livePositionLocked`: a segment that was sounding
         // when the engine paused freezes with it, and its node clock does not.
         return PausedClockSkew.position(
@@ -4745,6 +4790,7 @@ final class PlaybackEngine: @unchecked Sendable {
 
     private func parkSegmentLocked() {
         pausedSegmentElapsed = nil
+        segmentState.resumedClockNotBeforeHostTime = nil
         segmentState.generation += 1
         segmentState.fader = 0
         segmentState.faderRequest = 0

@@ -63,11 +63,11 @@ struct PlaybackTransportContinuityTests {
         return url
     }
 
-    private func engine(playing url: URL, bothDecks: Bool = false) throws -> PlaybackEngine {
+    private func engine(playing url: URL, from seconds: TimeInterval = 0, bothDecks: Bool = false) throws -> PlaybackEngine {
         let engine = PlaybackEngine()
         try engine.enableOfflineRenderingForTesting(maximumFrameCount: Self.quantum)
         _ = try engine.loadFile(at: url, on: .a)
-        engine.play(deck: .a, from: 0)
+        engine.play(deck: .a, from: seconds)
         if bothDecks {
             _ = try engine.loadFile(at: url, on: .b, trimDB: -6)
             engine.play(deck: .b, from: 0)
@@ -176,7 +176,8 @@ struct PlaybackTransportContinuityTests {
         let url = try fixture()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
         let subject = try engine(playing: url)
-        defer { subject.stopAll() }
+        let reference = try engine(playing: url, from: 1.75)
+        defer { subject.stopAll(); reference.stopAll() }
         for _ in 0..<8 { _ = try samples(subject) }
         let before = subject.transportSnapshotForTesting(.a)
         subject.pause()
@@ -186,17 +187,39 @@ struct PlaybackTransportContinuityTests {
         #expect(abs(seeked.position - 1.75) <= 1 / Self.sampleRate)
         Thread.sleep(forTimeInterval: 0.025)
         subject.resume()
-        for _ in 0..<16 { _ = try samples(subject) }
+        for _ in 0..<16 { _ = try samples(subject); _ = try samples(reference) }
         let resumed = subject.transportSnapshotForTesting(.a)
-        let expected = 1.75 + 16 * Double(Self.quantum) / Self.sampleRate
-        #expect(abs(resumed.position - expected) <= Double(Self.quantum) / Self.sampleRate,
-                "a fresh seek schedule must neither lose its paused interval nor jump forward")
+        let uninterrupted = reference.transportSnapshotForTesting(.a)
+        // lastRenderTime belongs to the upstream source node. An offline DSP
+        // graph can pull/cache ahead of its output, so output-frame count is
+        // not a valid absolute clock for that node. Compare the SAME graph's
+        // fresh schedule at the seek target, with a stricter two-frame bound.
+        #expect(abs(resumed.position - uninterrupted.position) <= 2 / Self.sampleRate,
+                "paused seek must match a fresh source anchor, without pause-time debt or extra frames")
         #expect(!resumed.hasPendingPause && resumed.pauseSkew == 0)
+        // The existing seek flush intentionally holds the fader until source
+        // frames have cleared the effects. Give its production queue timer an
+        // opportunity to observe those rendered frames, then compare PCM too.
+        // This wait belongs only to the test; transport adds no delay.
+        Thread.sleep(forTimeInterval: 0.025)
+        var maximumSampleError: Float = 0
+        for chunk in 0..<8 {
+            maximumSampleError = max(maximumSampleError,
+                expectSamePCM(try samples(subject), try samples(reference), context: "post-seek flush chunk \(chunk)"))
+        }
         try TransportEvidence.record([
             "name": "explicitSeekWhilePaused", "seekSeconds": 1.75,
             "renderedFrames": 16 * Int(Self.quantum),
-            "expectedPositionSeconds": expected, "actualPositionSeconds": resumed.position,
-            "clockErrorFrames": abs(resumed.position - expected) * Self.sampleRate,
+            "referencePositionSeconds": uninterrupted.position, "actualPositionSeconds": resumed.position,
+            "subjectRawPlayerFrames": resumed.rawPlayerFrames ?? -1,
+            "referenceRawPlayerFrames": uninterrupted.rawPlayerFrames ?? -1,
+            "subjectManualOutputFrames": resumed.manualOutputFrames ?? -1,
+            "referenceManualOutputFrames": uninterrupted.manualOutputFrames ?? -1,
+            "clockErrorFrames": abs(resumed.position - uninterrupted.position) * Self.sampleRate,
+            "positionFromOutputFramesSeconds": 1.75 + 16 * Double(Self.quantum) / Self.sampleRate,
+            "referenceSourceLeadFrames": (uninterrupted.position - 1.75) * Self.sampleRate - 16 * Double(Self.quantum),
+            "postFlushComparedFramesPerChannel": 8 * Int(Self.quantum),
+            "postFlushMaximumSampleError": maximumSampleError,
         ])
     }
 }

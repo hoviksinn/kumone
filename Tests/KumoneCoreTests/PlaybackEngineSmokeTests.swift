@@ -534,6 +534,9 @@ struct PlaybackEngineSmokeTests {
             var held: TimeInterval
             var resumed: TimeInterval
             var after: TimeInterval
+            var pauseCallDuration: TimeInterval
+            var resumeStartDuration: TimeInterval
+            var pauseSkew: TimeInterval
         }
         let result = await withWatchdog("pauseContinuity-\(stereo)", timeout: 25) { () -> [Cycle] in
             let engine = PlaybackEngine()
@@ -551,15 +554,22 @@ struct PlaybackEngineSmokeTests {
                 let held = engine.position(of: .a)
                 engine.resume()
                 let resumed = engine.position(of: .a)
+                let transport = engine.transportSnapshotForTesting(.a)
                 Thread.sleep(forTimeInterval: 0.3)
                 let after = engine.position(of: .a)
-                cycles.append(Cycle(paused: paused, held: held, resumed: resumed, after: after))
+                cycles.append(Cycle(paused: paused, held: held, resumed: resumed, after: after,
+                                    pauseCallDuration: transport.pauseCallDuration,
+                                    resumeStartDuration: transport.resumeStartDuration,
+                                    pauseSkew: transport.pauseSkew))
             }
             return cycles
         }
         guard let cycles = result else { return }
         #expect(cycles.count == 3, "fixture must load and complete all pause cycles")
         for (index, cycle) in cycles.enumerated() {
+            print("TRANSPORT_REALTIME stereo=\(stereo) cycle=\(index) "
+                + "paused=\(cycle.paused) held=\(cycle.held) resumed=\(cycle.resumed) after=\(cycle.after) "
+                + "pauseCallSeconds=\(cycle.pauseCallDuration) startSeconds=\(cycle.resumeStartDuration) skewSeconds=\(cycle.pauseSkew)")
             #expect(abs(cycle.held - cycle.paused) < 0.01, "pause \(index) must hold the media position")
             #expect(abs(cycle.resumed - cycle.paused) < 0.08,
                     "resume \(index) must not skip forward or repeat a paused interval")

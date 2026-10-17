@@ -19,11 +19,11 @@
 
 确认的源码问题：旧实现先暂停各音源节点，再暂停整个引擎；恢复时反向执行。这给音源与包含 timePitch/EQ/delay/limiter 的完整图设置了两套输送边界。恢复还清空 pauseSkew 而没有消费 pausedAtHostTime；一段增益清理也发生在图停止之前。
 
-改为只冻结/恢复完整图，保留发声节点、缓冲与播放计划；增益清理在停止渲染后执行。恢复沿用既有、已有上游实测依据的累计暂停时钟补偿；主动 Seek/重建写入的新锚点不扣旧计划的暂停时间。离线 manual-render 时间线不扣墙上时钟。暂停前保存第三段 segment 的时间，保证暂停中 AutoMix 的取消、重新计时和回交仍能映射位置；撤销尚未发声的 host-clock 调度并清除旧 watchdog 标记。
+改为只冻结/恢复完整图，保留发声节点、缓冲与播放计划；增益清理在停止渲染后执行。恢复沿用既有、已有上游实测依据的累计暂停时钟补偿，并在 engine.start 成功之后计算，包含引擎启动期间未发声的时间。首轮 CI 的 mono/stereo 实时测试发现恢复位置约有 0.24–0.39 秒偏差，修复与后续验证详见 PR。主动 Seek/重建写入的新锚点不扣旧计划的暂停时间。离线 manual-render 时间线不扣墙上时钟。暂停前保存第三段 segment 的时间，保证暂停中 AutoMix 的取消、重新计时和回交仍能映射位置；撤销尚未发声的 host-clock 调度并清除旧 watchdog 标记。
 
 没有为普通暂停添加 Seek、跳过时长、重复整首歌、额外等待或淡入淡出。UI 与 F8/控制中心继续共用 PlayerService transport 入口。AutoMix 和整套 DSP 没有被关闭。
 
-新增测试以非周期 chirp 合成数据穿过实际 production graph，与另一个不中断 engine 逐样本比较。覆盖单/双 deck 各 3 次暂停、96 条快速重复命令、暂停中主动 Seek、位置上界与下界。实际运行写出 `transport-validation.json`，包括帧数、样本误差、时钟误差；静音数据不能通过。另有 mono/stereo 实时循环测试，无真正推进的音频设备时明确打印 `TRANSPORT_REALTIME_NOT_RUN`。
+新增测试以非周期 chirp 合成数据穿过实际 production graph，与另一个不中断 engine 逐样本比较。覆盖单/双 deck 各 3 次暂停、96 条快速重复命令、暂停中主动 Seek、位置上界与下界。实际运行写出 `transport-validation.json`，包括帧数、样本误差、时钟误差；静音数据不能通过。另有 mono/stereo 实时循环测试，无真正推进的音频设备时明确打印 `Transport real-time clock regression NOT RUN: no advancing output device`。
 
 **证据边界：** 这是可确认的源码问题及回归修复，不是旧版真实声卡爆音的实录 A/B 证明。离线样本连续不等于物理 DAC、蓝牙或驱动无爆音；整段 AutoMix/第三链听感、启动耗时产生的微小时钟差和最终听感仍需实体 Mac 验证。不能仅凭 CI 全绿宣称电流音完全消失。
 

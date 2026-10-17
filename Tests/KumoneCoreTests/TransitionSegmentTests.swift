@@ -457,6 +457,18 @@ struct TransitionSegmentTests {
         // is a splice that forgot to silence one side (0.25 each, so ~0.5).
         let silent = buckets.filter { (levels[$0]!.max() ?? 0) < 0.03 }
         let doubled = buckets.filter { levels[$0]!.reduce(0, +) > 0.42 }
+        // Preserve the dropout assertion and expose raw callback timing when
+        // it fails. Wall-time buckets alone cannot distinguish graph silence
+        // from missing monitor callbacks on a heavily loaded CI output device.
+        for source in 0..<3 {
+            let times = samples.filter { $0.1 == source }.map(\.0)
+            let largestGap = zip(times.dropFirst(), times).map { $0 - $1 }.max() ?? 0
+            print("SPLICE_MONITOR source=\(source) callbacks=\(times.count) maximumCallbackGapSeconds=\(largestGap)")
+        }
+        for bucket in silent {
+            let nearby = samples.filter { abs($0.0 - Double(bucket) / 10) < 0.25 }
+            print("SPLICE_DROPOUT bucket=\(bucket) rawCallbacks=\(nearby)")
+        }
         #expect(silent.isEmpty,
                 "the output went silent at \(silent.map { Double($0) / 10 })")
         #expect(doubled.isEmpty,
