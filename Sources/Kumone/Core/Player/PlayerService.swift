@@ -218,6 +218,18 @@ final class PlayerService: ObservableObject {
         let t = engine.position(of: activeDeck)
         return t.isFinite ? t : progress
     }
+    /// A nonblocking read of the actual audio clock for local lyric rendering.
+    /// A track/deck change while awaiting the queue retires the old sample.
+    func livePlaybackTimeAsync() async -> TimeInterval {
+        guard deckLoaded else { return progress }
+        let generation = resolveGeneration
+        let deck = activeDeck
+        let trackID = currentTrack?.id
+        let seconds = await engine.positionAsync(of: deck)
+        guard generation == resolveGeneration, deck == activeDeck,
+              trackID == currentTrack?.id, deckLoaded else { return progress }
+        return seconds.isFinite ? seconds : progress
+    }
     private var resolveGeneration = 0
     /// True while the engine is paused by us (togglePlayPause/pause/
     /// interruption). When false, "resume" must re-issue play() instead —
@@ -461,10 +473,8 @@ final class PlayerService: ObservableObject {
     func togglePlayPause() {
         guard let track = currentTrack else { return }
         if isPlaying {
-            engine.pause()
-            enginePaused = true
-            isPlaying = false
-            AudioSpectrum.shared.reset()
+            pause()
+            return
         } else if !deckLoaded {
             // Restored session: re-resolve the source.
             startPlaying(track, indexUnchanged: true)

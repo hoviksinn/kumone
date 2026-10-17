@@ -375,6 +375,10 @@ final class PlaybackEngine: @unchecked Sendable {
     /// hands the paused seconds to every node still holding its schedule.
     /// See `applyPauseSkewLocked`.
     private var pausedAtHostTime: UInt64?
+    /// Segment media time captured before freezing the graph. The engine can
+    /// invalidate lastRenderTime on pause; tail disarming and a paused abort
+    /// still need this position to preserve AutoMix's source-time mapping.
+    private var pausedSegmentElapsed: TimeInterval?
 
     // Stream backpressure: pause the download when this many ~0.5s buffers
     // are scheduled but unplayed, resume below the low mark.
@@ -838,7 +842,11 @@ final class PlaybackEngine: @unchecked Sendable {
     func play(deck: Deck, from seconds: TimeInterval) {
         queue.async {
             let state = self.deckStates[deck]!
+            // Explicit play can replace a paused session too. Account for
+            // surviving schedules before the new schedule gets its own anchor.
+            self.applyPauseSkewLocked()
             self.isPaused = false
+            self.pausedSegmentElapsed = nil
             // This deck is being handed a track to carry. Decks are reused as
             // they are found, so unless a live transition owns its knobs
             // (its ramps rewrite them every tick), start from a transparent
@@ -881,66 +889,59 @@ final class PlaybackEngine: @unchecked Sendable {
         }
     }
 
-    /// Global pause: `engine.pause()`, keeping every schedule intact.
+    /// Freeze the entire render graph once, keeping source schedules AND
+    /// in-flight time-pitch/EQ/delay samples together. Pausing the sources
+    /// first and restarting them after the engine creates two independent
+    /// render boundaries: effects can consume a short silent input interval
+    /// while the player is paused. Do not add player.pause()/play() here.
     func pause() {
         queue.async {
             guard !self.isPaused else { return }
-            // Snapshot positions first — the node clocks freeze with the engine.
-            for state in self.deckStates.values where state.isPlaying {
-                state.lastKnownPosition = self.livePositionLocked(state)
-                state.player.pause()
+            // Capture the media clock before engine.pause invalidates it.
+            for deck in [Deck.a, .b] {
+                self.deckStates[deck]!.lastKnownPosition = self.reportedPositionLocked(deck)
             }
-            // A gapless hand-over armed via play(at:) fires on the host
-            // clock, which keeps running while paused — the incoming track
-            // would blast in the moment playback resumes. Disarm; the wait
-            // tick re-arms after resume.
+            self.pausedSegmentElapsed = self.segmentElapsedLocked()
+            self.isPaused = true
+            self.engine.pause()
+            self.pausedAtHostTime = mach_absolute_time()
+
+            // Host-clock releases must be cancelled while the graph is frozen:
+            // their deadlines keep advancing during a pause. The wait tick
+            // derives fresh release times after resume. Already sounding
+            // segment/deck nodes retain their schedules and DSP buffers.
             self.disarmGaplessLocked()
-            // A pre-rendered segment is armed on the same host clock, and the
-            // incoming deck's hand-back inside one is too. Both are undone
-            // here and re-armed by the tick after playback resumes; a segment
-            // that is already sounding needs nothing, because it freezes with
-            // the engine exactly like the decks do. If it is already sounding,
-            // pause its clock too.
             self.disarmSegmentLocked()
             self.disarmSegmentTailLocked()
-            if self.transition?.phase == .segmentPlaying {
-                self.segmentState.player.pause()
-            }
-            // An echo tail cannot decay while the engine is stopped, and a
-            // frozen wet delay would blare back on resume — end it now.
             if let tr = self.transition, tr.phase == .settling, tr.echoTailRinging {
                 tr.echoTailRinging = false
                 self.silenceDeckLocked(self.deckStates[tr.from]!)
             }
-            // A gain ride cannot glide while nothing renders, and resuming
-            // into a half-released one would just make the drift longer than
-            // it was designed to be. Settle it while the engine is silent —
-            // a ride still inside its overlap is at its target already, so a
-            // pause mid-crossfade moves nothing.
+            // This can change gain by several dB. It MUST happen after the
+            // engine has stopped rendering, never on the audible side of pause.
             for state in self.deckStates.values { self.settleRideLocked(state) }
-            self.isPaused = true
-            self.engine.pause()
-            // After the pause, not before: the wall clock that has to be
-            // discounted is the one the *stopped* engine spends, and taking
-            // the stamp on the far side of the call cannot over-count it.
-            self.pausedAtHostTime = mach_absolute_time()
         }
     }
 
     func resume() {
         queue.async {
             guard self.isPaused else { return }
-            self.isPaused = false
-            // Clear the skew because we paused the nodes explicitly.
-            for state in self.deckStates.values { state.pauseSkew = 0 }
-            self.segmentState.pauseSkew = 0
-
+            // Engine-only pause preserves audio but its real-time player clock
+            // includes paused host time. Correct it before any consumer runs.
+            self.applyPauseSkewLocked()
             self.ensureEngineRunningLocked()
-            for state in self.deckStates.values where state.isPlaying {
-                _ = KumoneCatchException({ state.player.play() })
+            guard self.engine.isRunning else {
+                // A temporary device failure must still allow a later retry.
+                self.pausedAtHostTime = mach_absolute_time()
+                return
             }
-            if self.transition?.phase == .segmentPlaying {
-                _ = KumoneCatchException({ self.segmentState.player.play() })
+            self.isPaused = false
+            self.pausedSegmentElapsed = nil
+            // Normal sounding nodes are already playing: this is a no-op for
+            // them. A seek/rebuild while paused may have made a fresh schedule,
+            // which needs one guarded start using the usual exception/retry path.
+            for state in self.deckStates.values {
+                self.startNodeIfNeededLocked(state)
             }
         }
     }
@@ -965,7 +966,11 @@ final class PlaybackEngine: @unchecked Sendable {
     private func applyPauseSkewLocked() {
         guard let pausedAt = pausedAtHostTime else { return }
         pausedAtHostTime = nil
-        let paused = AVAudioTime.seconds(forHostTime: mach_absolute_time() &- pausedAt)
+        // Offline rendering advances only when frames are explicitly pulled;
+        // its sample timeline does not include elapsed host time. This keeps
+        // the same production transport testable without an output device.
+        let offline = engine.isInManualRenderingMode && engine.manualRenderingMode == .offline
+        let paused = offline ? 0 : AVAudioTime.seconds(forHostTime: mach_absolute_time() &- pausedAt)
         for (deck, state) in deckStates {
             defer { state.anchoredWhilePaused = false }
             guard state.isPlaying, !state.anchoredWhilePaused, paused > 0 else { continue }
@@ -1028,6 +1033,17 @@ final class PlaybackEngine: @unchecked Sendable {
 
     func position(of deck: Deck) -> TimeInterval {
         queue.sync { reportedPositionLocked(deck) }
+    }
+
+    /// Display-synchronized lyric updates must not wait on the engine's serial
+    /// command queue from the main thread. Read the same real render clock,
+    /// asynchronously; no guessed frame rate or synthetic song clock is used.
+    func positionAsync(of deck: Deck) async -> TimeInterval {
+        await withCheckedContinuation { continuation in
+            queue.async {
+                continuation.resume(returning: self.reportedPositionLocked(deck))
+            }
+        }
     }
 
     func duration(of deck: Deck) -> TimeInterval? {
@@ -1306,6 +1322,63 @@ final class PlaybackEngine: @unchecked Sendable {
     func deckGains(of deck: Deck) -> DeckGainSnapshot {
         let both = deckGains()
         return deck == .a ? both.a : both.b
+    }
+
+    // MARK: - Deterministic transport validation
+
+    /// Use the actual deck/effect/master graph with no hardware audio device.
+    /// Must be configured before playback. Production never enables this mode.
+    func enableOfflineRenderingForTesting(maximumFrameCount: AVAudioFrameCount = 1024) throws {
+        try queue.sync {
+            guard !engine.isRunning else {
+                throw NSError(domain: "PlaybackEngineOffline", code: 1,
+                              userInfo: [NSLocalizedDescriptionKey: "Configure offline mode before playback"])
+            }
+            try engine.enableManualRenderingMode(.offline, format: graphFormat,
+                                                  maximumFrameCount: maximumFrameCount)
+        }
+    }
+
+    /// Pull one buffer through production DSP. An error fails the test instead
+    /// of silently treating a missing output device as a passing assertion.
+    func renderOfflineForTesting(_ frames: AVAudioFrameCount) throws -> AVAudioPCMBuffer {
+        try queue.sync {
+            guard engine.isInManualRenderingMode, engine.manualRenderingMode == .offline,
+                  !isPaused, engine.isRunning,
+                  frames > 0, frames <= engine.manualRenderingMaximumFrameCount,
+                  let buffer = AVAudioPCMBuffer(pcmFormat: engine.manualRenderingFormat,
+                                               frameCapacity: frames) else {
+                throw NSError(domain: "PlaybackEngineOffline", code: 2,
+                              userInfo: [NSLocalizedDescriptionKey: "Offline engine is not ready to render"])
+            }
+            let status = try engine.renderOffline(frames, to: buffer)
+            guard status == .success, buffer.frameLength == frames else {
+                throw NSError(domain: "PlaybackEngineOffline", code: 3,
+                              userInfo: [NSLocalizedDescriptionKey: "Offline render failed: \(status.rawValue)"])
+            }
+            return buffer
+        }
+    }
+
+    struct TransportSnapshot {
+        var paused: Bool
+        var engineRunning: Bool
+        var nodePlaying: Bool
+        var generation: Int
+        var startOffset: TimeInterval
+        var position: TimeInterval
+        var pauseSkew: TimeInterval
+        var hasPendingPause: Bool
+    }
+
+    func transportSnapshotForTesting(_ deck: Deck) -> TransportSnapshot {
+        queue.sync {
+            let state = deckStates[deck]!
+            return TransportSnapshot(paused: isPaused, engineRunning: engine.isRunning,
+                                     nodePlaying: state.player.isPlaying, generation: state.generation,
+                                     startOffset: state.startOffset, position: reportedPositionLocked(deck),
+                                     pauseSkew: state.pauseSkew, hasPendingPause: pausedAtHostTime != nil)
+        }
     }
 
     /// Test hook: whether any transition is still scheduled or running.
@@ -3807,6 +3880,9 @@ final class PlaybackEngine: @unchecked Sendable {
     /// actually rendered. Falls back to the cached value when the node clock
     /// is unavailable (engine paused/stopped).
     private func livePositionLocked(_ state: DeckState) -> TimeInterval {
+        // A manual renderer may retain a valid lastRenderTime after pause.
+        // Expose the frozen media anchor regardless of device clock behavior.
+        guard !isPaused else { return state.lastKnownPosition }
         guard let nodeTime = Self.renderedNodeTime(state.player),
               let playerTime = state.player.playerTime(forNodeTime: nodeTime),
               playerTime.sampleRate > 0 else {
@@ -3839,6 +3915,7 @@ final class PlaybackEngine: @unchecked Sendable {
     /// starting — the same story the live overlap tells.
     private func reportedPositionLocked(_ deck: Deck) -> TimeInterval {
         let state = deckStates[deck]!
+        guard !isPaused else { return state.lastKnownPosition }
         guard let tr = transition, tr.phase == .segmentPlaying, let segment = tr.segment,
               let elapsed = segmentElapsedLocked() else {
             return livePositionLocked(state)
@@ -4382,7 +4459,9 @@ final class PlaybackEngine: @unchecked Sendable {
         to.generation += 1
         to.player.stop()
         to.isPlaying = false
+        to.hostScheduledStart = false
         to.scheduledStartHostTime = nil
+        to.startCheck = nil
         to.startOffset = 0
         clearPauseSkewLocked(to)
         to.lastKnownPosition = 0
@@ -4496,6 +4575,7 @@ final class PlaybackEngine: @unchecked Sendable {
     /// 50 Hz tick only decides *when* a parameter is written, never *what* it
     /// is: a late tick lands the same value it would have landed on time.
     private func segmentElapsedLocked() -> TimeInterval? {
+        guard !isPaused else { return pausedSegmentElapsed }
         guard let nodeTime = Self.renderedNodeTime(segmentState.player),
               let playerTime = segmentState.player.playerTime(forNodeTime: nodeTime),
               playerTime.sampleRate > 0, playerTime.sampleTime >= 0 else { return nil }
@@ -4658,9 +4738,13 @@ final class PlaybackEngine: @unchecked Sendable {
                      to.lastKnownPosition, Double(to.generation))
         to.player.stop()
         to.isPlaying = false
+        to.hostScheduledStart = false
+        to.scheduledStartHostTime = nil
+        to.startCheck = nil
     }
 
     private func parkSegmentLocked() {
+        pausedSegmentElapsed = nil
         segmentState.generation += 1
         segmentState.fader = 0
         segmentState.faderRequest = 0

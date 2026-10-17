@@ -520,6 +520,55 @@ struct PlaybackEngineSmokeTests {
                 "position must advance after resume (\(o.pausedB) → \(o.resumed))")
     }
 
+    /// Complements the no-device PCM suite: real-time host-clock compensation
+    /// must freeze through several pauses and advance only by sounding time.
+    /// This is explicitly conditional on a real advancing output clock.
+    @Test(arguments: [false, true])
+    func repeatedPauseResumeHasNoPositionJump(stereo: Bool) async throws {
+        guard await audioOutputAvailable.value else {
+            print("Transport real-time clock regression NOT RUN: no advancing output device")
+            return
+        }
+        struct Cycle {
+            var paused: TimeInterval
+            var held: TimeInterval
+            var resumed: TimeInterval
+            var after: TimeInterval
+        }
+        let result = await withWatchdog("pauseContinuity-\(stereo)", timeout: 25) { () -> [Cycle] in
+            let engine = PlaybackEngine()
+            defer { engine.stopAll() }
+            let url = stereo ? Fixtures.eightSecondStereoCAF : Fixtures.eightSecondCAF
+            guard (try? engine.loadFile(at: url, on: .a)) != nil else { return [] }
+            engine.outputVolume = 0
+            engine.play(deck: .a, from: 0)
+            _ = pollPosition(engine, deck: .a, past: 0.4, timeout: 4)
+            var cycles: [Cycle] = []
+            for _ in 0..<3 {
+                engine.pause()
+                let paused = engine.position(of: .a) // serial-queue barrier
+                Thread.sleep(forTimeInterval: 0.25)
+                let held = engine.position(of: .a)
+                engine.resume()
+                let resumed = engine.position(of: .a)
+                Thread.sleep(forTimeInterval: 0.3)
+                let after = engine.position(of: .a)
+                cycles.append(Cycle(paused: paused, held: held, resumed: resumed, after: after))
+            }
+            return cycles
+        }
+        guard let cycles = result else { return }
+        #expect(cycles.count == 3, "fixture must load and complete all pause cycles")
+        for (index, cycle) in cycles.enumerated() {
+            #expect(abs(cycle.held - cycle.paused) < 0.01, "pause \(index) must hold the media position")
+            #expect(abs(cycle.resumed - cycle.paused) < 0.08,
+                    "resume \(index) must not skip forward or repeat a paused interval")
+            let sounding = cycle.after - cycle.paused
+            #expect(sounding > 0.15 && sounding < 0.45,
+                    "resume \(index): 0.3 s sounding must advance 0.3±0.15 s, got \(sounding)")
+        }
+    }
+
     // (c) Progressive streaming from a local HTTP server: position advances,
     // download completes, and the .part mirror matches the fixture bytes.
     @Test func streamingPlaybackAndPartFile() async throws {
