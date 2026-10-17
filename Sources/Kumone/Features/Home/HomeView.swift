@@ -176,6 +176,7 @@ struct HomeView: View {
                             }
                         }
                         .buttonStyle(.plain)
+                        .navigationCardLink()
                     }
                 }
             }
@@ -187,6 +188,7 @@ struct HomeView: View {
                             toplistCard(toplist)
                         }
                         .buttonStyle(.plain)
+                        .navigationCardLink()
                     }
                 }
             }
@@ -242,6 +244,7 @@ struct HomeView: View {
                         )
                     }
                     .buttonStyle(.plain)
+                    .navigationCardLink()
 
                     Button {
                         player.startFM()
@@ -255,6 +258,7 @@ struct HomeView: View {
                         )
                     }
                     .buttonStyle(.interactiveCard)
+                    .navigationCardLink()
 
                     Button {
                         startHeartbeatMode()
@@ -268,6 +272,7 @@ struct HomeView: View {
                         )
                     }
                     .buttonStyle(.interactiveCard)
+                    .navigationCardLink()
                 }
                 Color.clear.frame(width: max(0, Theme.Layout.contentInset - 16), height: 1)
             }
@@ -312,6 +317,7 @@ struct HomeView: View {
             }
         }
         .buttonStyle(.plain)
+        .navigationCardLink()
     }
 
     private func albumCard(_ album: AlbumSummary, size: CGFloat) -> some View {
@@ -331,6 +337,7 @@ struct HomeView: View {
             }
         }
         .buttonStyle(.plain)
+        .navigationCardLink()
     }
 
     private func artistCard(_ artist: ArtistSummary) -> some View {
@@ -348,6 +355,7 @@ struct HomeView: View {
             .frame(width: 140)
         }
         .buttonStyle(.plain)
+        .navigationCardLink()
     }
 
     private func toplistCard(_ toplist: ToplistItem) -> some View {

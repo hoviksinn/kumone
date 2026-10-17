@@ -144,11 +144,10 @@ struct PlaylistDetailView: View {
                     } label: {
                         Text(description.replacingOccurrences(of: "\n", with: " "))
                             .font(.system(size: 12))
-                            .foregroundStyle(.secondary)
                             .lineLimit(2)
                             .multilineTextAlignment(.leading)
                     }
-                    .buttonStyle(.plain)
+                    .navigationTextLink()
                     .popover(isPresented: $showFullDescription, arrowEdge: .bottom) {
                         ScrollView {
                             Text(description)

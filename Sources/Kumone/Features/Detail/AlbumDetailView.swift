@@ -75,6 +75,7 @@ struct AlbumDetailView: View {
                                         )
                                     }
                                     .buttonStyle(.interactiveCard)
+                                    .navigationCardLink()
                                 }
                                 Spacer().frame(width: (Theme.Layout.contentInset) - 16)
                             }
@@ -144,9 +145,8 @@ struct AlbumDetailView: View {
                     NavigationLink(value: Destination.artist(artist.id)) {
                         Text(artist.name)
                             .font(.system(size: 14, weight: .medium))
-                            .foregroundStyle(Theme.accent)
                     }
-                    .buttonStyle(.plain)
+                    .navigationTextLink(color: Theme.accent)
                 }
 
                 Text("\(tracks.count) 首 · \(totalDuration) · \(Formatters.date(fromMS: album.publishTime))")
@@ -159,11 +159,10 @@ struct AlbumDetailView: View {
                     } label: {
                         Text(description.replacingOccurrences(of: "\n", with: " "))
                             .font(.system(size: 12))
-                            .foregroundStyle(.secondary)
                             .lineLimit(2)
                             .multilineTextAlignment(.leading)
                     }
-                    .buttonStyle(.plain)
+                    .navigationTextLink()
                     .popover(isPresented: $showFullDescription, arrowEdge: .bottom) {
                         ScrollView {
                             Text(description)

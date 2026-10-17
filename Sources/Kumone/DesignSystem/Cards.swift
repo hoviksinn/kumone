@@ -52,6 +52,7 @@ struct CoverCard: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.interactiveCard)
+        .navigationCardLink()
         .onHover { isHovering = $0 }
     }
 }
@@ -79,6 +80,7 @@ struct ArtistCard: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.interactiveCard)
+        .navigationCardLink()
     }
 }
 

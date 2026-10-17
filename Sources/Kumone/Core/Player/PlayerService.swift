@@ -114,8 +114,8 @@ final class PlayerService: ObservableObject {
 
     // MARK: - Observable state
 
-    @Published private(set) var queue: [Track] = []
-    @Published private(set) var shuffledQueue: [Track] = []
+    @Published private(set) var queue: [Track] = [] { didSet { queueRevision &+= 1 } }
+    @Published private(set) var shuffledQueue: [Track] = [] { didSet { queueRevision &+= 1 } }
     /// The AutoMix order's working list: `queue` with the decided next track
     /// spliced to `currentIndex + 1` as each pick is made.
     ///
@@ -126,10 +126,10 @@ final class PlayerService: ObservableObject {
     /// display contract ("only the decided next is shown reordered; the rest
     /// stays list order") falls out of the splice rather than needing its own
     /// rule.
-    @Published private(set) var autoMixQueue: [Track] = []
-    @Published private(set) var playNextList: [Track] = []
-    @Published private(set) var currentIndex = -1
-    @Published private(set) var currentTrack: Track?
+    @Published private(set) var autoMixQueue: [Track] = [] { didSet { queueRevision &+= 1 } }
+    @Published private(set) var playNextList: [Track] = [] { didSet { queueRevision &+= 1 } }
+    @Published private(set) var currentIndex = -1 { didSet { if currentIndex != oldValue { queueRevision &+= 1 } } }
+    @Published private(set) var currentTrack: Track? { didSet { if currentTrack?.id != oldValue?.id { queueRevision &+= 1 } } }
     @Published private(set) var source: PlaySource = .none
     @Published private(set) var isPlaying = false
     @Published private(set) var isBuffering = false
@@ -153,7 +153,7 @@ final class PlayerService: ObservableObject {
     /// states are mutually exclusive by construction — there is one value —
     /// and none of them ever reorders `queue` itself, so leaving a mode always
     /// restores the list the user gave us.
-    @Published private(set) var queueOrder: QueueOrder = .listed
+    @Published private(set) var queueOrder: QueueOrder = .listed { didSet { if queueOrder != oldValue { queueRevision &+= 1 } } }
     /// The old two-state name, kept as a read-only derivation so every call
     /// site that only ever asked "is shuffle on" — the Dock menu, the two
     /// transport bars, the persisted state — keeps working unchanged.
@@ -189,6 +189,22 @@ final class PlayerService: ObservableObject {
         return playNextList + Array(rest.prefix(200))
     }
 
+    /// A row is an occurrence in one queue snapshot, never merely a song ID.
+    /// Invalidating on edits prevents a delayed mouse event from deleting the
+    /// next identical song after its previous neighbour has already gone.
+    private(set) var queueRevision: UInt64 = 0
+
+    var upcomingQueueEntries: [QueuePanelEntry] {
+        let candidates: [PlaybackQueueCandidate]
+        if activeQueue.isEmpty || currentIndex < 0 {
+            candidates = playNextList.enumerated().map { .init(track: $0.element, origin: .inserted($0.offset)) }
+        } else {
+            candidates = PlaybackQueuePlan.next(queue: activeQueue, currentIndex: currentIndex, inserted: playNextList,
+                                                fm: [], isFM: false, repeatAll: false, limit: playNextList.count + 200)
+        }
+        return candidates.map { QueuePanelEntry(candidate: $0, revision: queueRevision) }
+    }
+
     var hasCurrentTrack: Bool { currentTrack != nil }
 
     // MARK: - Engine
@@ -218,6 +234,7 @@ final class PlayerService: ObservableObject {
         let t = engine.position(of: activeDeck)
         return t.isFinite ? t : progress
     }
+
     /// A nonblocking read of the actual audio clock for local lyric rendering.
     /// A track/deck change while awaiting the queue retires the old sample.
     func livePlaybackTimeAsync() async -> TimeInterval {
@@ -312,6 +329,21 @@ final class PlayerService: ObservableObject {
     /// turns out to be missing offline is skipped rather than reported.
     private var pendingAutoAdvance = false
     private var currentWasAdvanced = false
+
+    /// Isolated queue fixture: no service observers, playback, persistence or
+    /// network registration. Repeat-one keeps removal's normal prefetch path
+    /// empty while tests exercise the real occurrence-removal API.
+    init(queueForTesting tracks: [Track], currentIndex index: Int, inserted: [Track] = [],
+         order: QueueOrder = .listed, orderedTracks: [Track]? = nil) {
+        queue = tracks
+        shuffledQueue = order == .shuffled ? (orderedTracks ?? tracks) : []
+        autoMixQueue = order == .autoMix ? (orderedTracks ?? tracks) : []
+        playNextList = inserted
+        queueOrder = order
+        currentIndex = index
+        currentTrack = activeQueue.indices.contains(index) ? activeQueue[index] : nil
+        repeatMode = .one
+    }
 
     private init() {
         sleepTimer.onDeadlineReached = { [weak self] in
@@ -702,10 +734,39 @@ final class PlayerService: ObservableObject {
         schedulePrefetch()
     }
 
+    /// Only the exact row from the currently displayed queue can act. In
+    /// particular, a rapid second click on a removed duplicate is harmless.
+    func jumpToQueueEntry(_ entry: QueuePanelEntry) {
+        guard let selected = validatedQueuePanelCandidate(entry) else { return }
+        jumpToUpcomingCandidate(selected)
+    }
+
+    func removeQueueEntry(_ entry: QueuePanelEntry) {
+        guard let selected = validatedQueuePanelCandidate(entry) else { return }
+        removeUpcomingCandidate(selected)
+    }
+
+    private func validatedQueuePanelCandidate(_ entry: QueuePanelEntry) -> PlaybackQueueCandidate? {
+        guard entry.id.revision == queueRevision else { return nil }
+        switch entry.id.origin {
+        case .inserted(let offset):
+            guard playNextList.indices.contains(offset), playNextList[offset].id == entry.track.id else { return nil }
+        case .queue(let offset):
+            guard offset > currentIndex, activeQueue.indices.contains(offset),
+                  activeQueue[offset].id == entry.track.id else { return nil }
+        case .fm: return nil
+        }
+        return .init(track: entry.track, origin: entry.id.origin)
+    }
+
     /// Queue rows carry their occurrence, so a repeated song selects the row
     /// the listener clicked rather than its first occurrence.
     func jumpToUpcoming(at index: Int, matching trackID: Int) {
         guard let selected = upcomingCandidate(at: index, matching: trackID) else { return }
+        jumpToUpcomingCandidate(selected)
+    }
+
+    private func jumpToUpcomingCandidate(_ selected: PlaybackQueueCandidate) {
         var indexUnchanged = false
         switch selected.origin {
         case .inserted(let offset):
@@ -723,8 +784,15 @@ final class PlayerService: ObservableObject {
     /// listener chose, not its first one, so the current index stays put.
     func removeUpcoming(at index: Int, matching trackID: Int) {
         guard let selected = upcomingCandidate(at: index, matching: trackID) else { return }
+        removeUpcomingCandidate(selected)
+    }
+
+    private func removeUpcomingCandidate(_ selected: PlaybackQueueCandidate) {
         switch selected.origin {
-        case .inserted(let offset): playNextList.remove(at: offset)
+        case .inserted(let offset):
+            playNextList.remove(at: offset)
+            refreshAutoMixLookahead(force: true)
+            schedulePrefetch()
         case .queue(let offset): removeQueueRow(at: offset, trackID: selected.track.id)
         case .fm: return
         }

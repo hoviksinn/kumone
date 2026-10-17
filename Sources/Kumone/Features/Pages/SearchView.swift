@@ -205,6 +205,7 @@ struct SearchView: View {
                 .frame(width: 140)
             }
             .buttonStyle(.plain)
+            .navigationCardLink()
         }
     }
 
@@ -220,6 +221,7 @@ struct SearchView: View {
                 )
             }
             .buttonStyle(.plain)
+            .navigationCardLink()
         }
     }
 
@@ -235,6 +237,7 @@ struct SearchView: View {
                 )
             }
             .buttonStyle(.plain)
+            .navigationCardLink()
         }
     }
 }

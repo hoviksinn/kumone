@@ -95,10 +95,9 @@ struct TrackRow: View {
                     } label: {
                         Text(track.album.name)
                             .font(.system(size: 12))
-                            .foregroundStyle(.secondary)
                             .lineLimit(1)
                     }
-                    .buttonStyle(.plain)
+                    .navigationTextLink()
                     .accessibilityLabel("打开专辑：\(track.album.name)")
                     .frame(maxWidth: 220, alignment: .leading)
                 } else {
@@ -197,7 +196,7 @@ struct TrackRow: View {
                     } label: {
                         Text(artist.name)
                     }
-                    .buttonStyle(.plain)
+                    .navigationTextLink()
                     .accessibilityLabel("打开歌手：\(artist.name)")
                 }
             }

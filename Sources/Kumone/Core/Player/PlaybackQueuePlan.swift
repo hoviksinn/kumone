@@ -23,7 +23,7 @@ extension PlayContext {
 }
 
 struct PlaybackQueueCandidate: Equatable {
-    enum Origin: Equatable { case inserted(Int), queue(Int), fm(Int) }
+    enum Origin: Hashable { case inserted(Int), queue(Int), fm(Int) }
     let track: Track
     let origin: Origin
 }

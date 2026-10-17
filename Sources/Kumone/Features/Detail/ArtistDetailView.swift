@@ -86,6 +86,7 @@ struct ArtistDetailView: View {
                                         .frame(width: 100)
                                     }
                                     .buttonStyle(.interactiveCard)
+                                    .navigationCardLink()
                                 }
                                 Spacer().frame(width: (Theme.Layout.contentInset) - 16)
                             }
@@ -202,6 +203,7 @@ struct ArtistDetailView: View {
             )
         }
         .buttonStyle(.interactiveCard)
+        .navigationCardLink()
     }
 
     private func toggleFollow() {
