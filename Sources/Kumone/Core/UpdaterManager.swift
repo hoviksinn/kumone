@@ -10,14 +10,16 @@ final class UpdaterManager: ObservableObject {
 
     @Published private(set) var canCheckForUpdates = false
 
-    private let controller: SPUStandardUpdaterController
+    private var controller: SPUStandardUpdaterController?
 
     private init() {
-        controller = SPUStandardUpdaterController(
+        guard Bundle.main.object(forInfoDictionaryKey: "KumoneDisableUpdates") as? Bool != true else { return }
+        let controller = SPUStandardUpdaterController(
             startingUpdater: true,
             updaterDelegate: nil,
             userDriverDelegate: nil
         )
+        self.controller = controller
         controller.updater.publisher(for: \.canCheckForUpdates)
             .receive(on: DispatchQueue.main)
             .assign(to: &$canCheckForUpdates)
@@ -26,11 +28,11 @@ final class UpdaterManager: ObservableObject {
 
     /// Toggle Sparkle's scheduled update checks (#42).
     func setAutomaticChecks(_ enabled: Bool) {
-        controller.updater.automaticallyChecksForUpdates = enabled
+        controller?.updater.automaticallyChecksForUpdates = enabled
     }
 
     func checkForUpdates() {
-        controller.checkForUpdates(nil)
+        controller?.checkForUpdates(nil)
     }
 }
 
