@@ -6,32 +6,66 @@ struct PlayerBar: View {
     @EnvironmentObject private var player: PlayerService
     @EnvironmentObject private var account: AccountStore
     @EnvironmentObject private var settings: SettingsManager
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var isHovering = false
 
     var body: some View {
-        GeometryReader { proxy in
-            let compact = proxy.size.width < 860
-            HStack(spacing: 12) {
-                songInfoSection(compact: compact)
-                    .frame(width: compact ? 180 : 252, alignment: .leading)
-                centerSection
-                    .frame(maxWidth: .infinity)
-                optionsSection(compact: compact)
-            }
+        barContent
             .padding(.horizontal, 14)
+            .frame(maxWidth: .infinity)
+            .frame(height: layout.height)
+            .compatGlass(interactive: true, in: barShape)
+            .overlay(barShape.strokeBorder(.primary.opacity(isHovering ? 0.1 : 0.06), lineWidth: 0.5))
+            .onHover { isHovering = $0 }
+            .animation(reduceMotion ? nil : AppAnimation.quick, value: isHovering)
+    }
+
+    private var barShape: RoundedRectangle {
+        RoundedRectangle(cornerRadius: layout == .wide ? 28 : 24, style: .continuous)
+    }
+
+    @ViewBuilder
+    private var barContent: some View {
+        switch layout {
+        case .wide:
+            HStack(spacing: 12) {
+                songInfoSection.frame(width: 220, alignment: .leading)
+                centerSection.frame(maxWidth: .infinity)
+                optionsSection(includeQuality: true)
+            }
+        case .stacked:
+            VStack(spacing: 6) {
+                HStack(spacing: 12) {
+                    songInfoSection.frame(maxWidth: .infinity, alignment: .leading)
+                    optionsSection(includeQuality: true)
+                }
+                HStack(spacing: 12) {
+                    transportControls
+                    ScrubberLane().frame(maxWidth: .infinity)
+                }
+                .opacity(player.hasCurrentTrack ? 1 : 0.5)
+            }
+        case .narrow:
+            VStack(spacing: 6) {
+                HStack(spacing: 8) {
+                    songInfoSection.frame(maxWidth: .infinity, alignment: .leading)
+                    qualityIndicator
+                }
+                HStack(spacing: 8) {
+                    transportControls
+                    Spacer(minLength: 0)
+                    optionsSection(includeQuality: false)
+                }
+                ScrubberLane()
+                    .frame(maxWidth: .infinity)
+                    .opacity(player.hasCurrentTrack ? 1 : 0.5)
+            }
         }
-        .frame(height: Theme.Layout.playerBarHeight)
-        .compatGlass(interactive: true, in: Capsule())
-        .overlay(Capsule().strokeBorder(.primary.opacity(0.06), lineWidth: 0.5))
-        // Keep the capsule clear of the window's rounded corners so the inner
-        // and outer radii don't visually merge (#88).
-        .padding(.horizontal, 20)
-        .padding(.bottom, Theme.Layout.playerBarBottomMargin)
-        .background(alignment: .bottom) { bottomFade }
     }
 
     // MARK: - Left: artwork + titles + like
 
-    private func songInfoSection(compact: Bool) -> some View {
+    private var songInfoSection: some View {
         HStack(spacing: 10) {
             artworkButton
             VStack(alignment: .leading, spacing: 1) {
@@ -42,7 +76,7 @@ struct PlayerBar: View {
                         VIPBadge()
                     }
                 }
-                Text(player.currentTrack?.artistNames ?? "Kumone")
+                Text(player.currentTrack?.artistNames ?? "且听")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -57,7 +91,7 @@ struct PlayerBar: View {
     private var artworkButton: some View {
         Button {
             guard player.hasCurrentTrack else { return }
-            withAnimation(AppAnimation.smooth) {
+            withAnimation(reduceMotion ? nil : AppAnimation.smooth) {
                 player.showNowPlaying = true
             }
         } label: {
@@ -99,56 +133,61 @@ struct PlayerBar: View {
 
     private var centerSection: some View {
         VStack(spacing: 3) {
-            HStack(spacing: 6) {
-                if player.isFMMode {
-                    PlayerIconButton(icon: "trash", size: 12) {
-                        player.fmTrash()
-                    }
-                    .help("不喜欢，换一首")
-                } else {
-                    // One control for all three queue orders: the third state
-                    // is a *kind* of shuffle, so it lives inside the shuffle
-                    // button rather than beside it. The cycle skips it wherever
-                    // it could do nothing (AutoMix off, order off), which
-                    // leaves the familiar two-state button untouched there.
-                    PlayerIconButton(
-                        icon: queueOrderIcon, size: 12,
-                        isActive: queueOrderIsActive,
-                        action: cycleQueueOrder
-                    )
-                    .help(queueOrderHelp)
-                }
-
-                PlayerIconButton(icon: "backward.fill", size: 14, disabled: player.isFMMode) {
-                    player.previous()
-                }
-
-                playPauseButton
-
-                PlayerIconButton(icon: "forward.fill", size: 14) {
-                    player.next()
-                }
-
-                if player.isFMMode {
-                    Image(systemName: "wave.3.right.circle.fill")
-                        .font(.system(size: 12))
-                        .foregroundStyle(Theme.accent)
-                        .frame(width: 26, height: 26)
-                        .help("私人漫游中")
-                } else {
-                    PlayerIconButton(
-                        icon: player.repeatMode == .one ? "repeat.1" : "repeat", size: 12,
-                        isActive: player.repeatMode != .off
-                    ) {
-                        player.cycleRepeatMode()
-                    }
-                    .help("循环模式")
-                }
-            }
+            transportControls
             ScrubberLane()
         }
         .padding(.vertical, 5)
         .opacity(player.hasCurrentTrack ? 1 : 0.5)
+    }
+
+    private var transportControls: some View {
+        HStack(spacing: 6) {
+            if player.isFMMode {
+                PlayerIconButton(icon: "trash", size: 12) {
+                    player.fmTrash()
+                }
+                .help("不喜欢，换一首")
+            } else {
+                // One control for all three queue orders: the third state
+                // is a *kind* of shuffle, so it lives inside the shuffle
+                // button rather than beside it. The cycle skips it wherever
+                // it could do nothing (AutoMix off, order off), which
+                // leaves the familiar two-state button untouched there.
+                PlayerIconButton(
+                    icon: queueOrderIcon, size: 12,
+                    isActive: queueOrderIsActive,
+                    action: cycleQueueOrder
+                )
+                .help(queueOrderHelp)
+            }
+
+            PlayerIconButton(icon: "backward.fill", size: 14, disabled: player.isFMMode) {
+                player.previous()
+            }
+
+            playPauseButton
+
+            PlayerIconButton(icon: "forward.fill", size: 14) {
+                player.next()
+            }
+
+            if player.isFMMode {
+                Image(systemName: "wave.3.right.circle.fill")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Theme.accent)
+                    .frame(width: 26, height: 26)
+                    .help("私人漫游中")
+            } else {
+                PlayerIconButton(
+                    icon: player.repeatMode == .one ? "repeat.1" : "repeat", size: 12,
+                    isActive: player.repeatMode != .off
+                ) {
+                    player.cycleRepeatMode()
+                }
+                .help("循环模式")
+            }
+        }
+        .fixedSize(horizontal: true, vertical: false)
     }
 
     private var playPauseButton: some View {
@@ -175,20 +214,28 @@ struct PlayerBar: View {
         }
         .buttonStyle(.pressable)
         .padding(.horizontal, 2)
+        .help(player.isPlaying ? String(localized: "暂停") : String(localized: "播放"))
+        .accessibilityLabel(player.isPlaying ? String(localized: "暂停") : String(localized: "播放"))
     }
 
     // MARK: - Right: quality / panels / volume
 
-    private func optionsSection(compact: Bool) -> some View {
+    @ViewBuilder
+    private var qualityIndicator: some View {
+        if let level = player.servedQuality,
+           let quality = AudioQuality(rawValue: level) {
+            QualityTag(text: quality.badge)
+        } else if player.unblockSource != nil {
+            QualityTag(text: String(localized: "音源"))
+                .help("来自 \(player.unblockSource ?? "")")
+        }
+    }
+
+    private func optionsSection(includeQuality: Bool) -> some View {
         HStack(spacing: 4) {
-            if !compact, let level = player.servedQuality,
-               let quality = AudioQuality(rawValue: level) {
-                QualityTag(text: quality.badge)
+            if includeQuality {
+                qualityIndicator
                     .padding(.trailing, 2)
-            } else if !compact, player.unblockSource != nil {
-                QualityTag(text: String(localized: "音源"))
-                    .padding(.trailing, 2)
-                    .help("来自 \(player.unblockSource ?? "")")
             }
             PlayerIconButton(
                 icon: "quote.bubble", size: 13,
@@ -216,18 +263,7 @@ struct PlayerBar: View {
                               tint: .secondary, background: .clear)
             VolumeControl()
         }
-    }
-
-    private var bottomFade: some View {
-        LinearGradient(
-            colors: [
-                Platform.windowBackgroundColor.opacity(0),
-                Platform.windowBackgroundColor.opacity(0.25),
-            ],
-            startPoint: .top, endPoint: .bottom
-        )
-        .frame(height: 50)
-        .allowsHitTesting(false)
+        .fixedSize(horizontal: true, vertical: false)
     }
 }
 
@@ -275,6 +311,7 @@ struct PlayerIconButton: View {
 
     @State private var isHovering = false
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         Button(action: action) {
@@ -292,7 +329,8 @@ struct PlayerIconButton: View {
         .disabled(disabled)
         .opacity(disabled ? 0.35 : 1)
         .onHover { isHovering = $0 }
-        .animation(AppAnimation.quick, value: isHovering)
+        .animation(reduceMotion ? nil : AppAnimation.quick, value: isHovering)
+        .animation(reduceMotion ? nil : AppAnimation.quick, value: isActive)
     }
 
     private var backgroundColor: Color {
@@ -329,6 +367,7 @@ struct ScrubberLane: View {
     @EnvironmentObject private var player: PlayerService
     @ObservedObject private var clock = PlayerService.shared.clock
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @State private var isHovering = false
     @State private var isDragging = false
@@ -392,9 +431,9 @@ struct ScrubberLane: View {
         }
         .frame(height: 14)
         .onHover { hovering in
-            withAnimation(AppAnimation.quick) { isHovering = hovering }
+            withAnimation(reduceMotion ? nil : AppAnimation.quick) { isHovering = hovering }
         }
-        .animation(.spring(response: 0.24, dampingFraction: 0.72), value: isDragging)
+        .animation(reduceMotion ? nil : .spring(response: 0.24, dampingFraction: 0.72), value: isDragging)
     }
 
     private var thumbDiameter: CGFloat {
