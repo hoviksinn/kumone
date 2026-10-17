@@ -45,6 +45,7 @@ struct MainWindow: View {
                 .navigationSplitViewColumnWidth(min: 200, ideal: Theme.Layout.sidebarWidth, max: 280)
         } detail: {
             detailStack
+                .playerChrome()
                 .onGeometryChange(for: CGRect.self) { proxy in
                     proxy.frame(in: .named("mainWindow"))
                 } action: { frame in
@@ -93,7 +94,6 @@ struct MainWindow: View {
                 titlebarFadedOut: nowPlayingChromeFadedOut
             )
         )
-        .playerChrome(detailWidth: detailWidth)
         .modifier(OfflinePlaybackAlert(player: player, onDownloads: { openDestination(.downloaded) }))
         .modifier(MeteredDownloadAlert())
         .environment(\.openLogin, { showLogin = true })

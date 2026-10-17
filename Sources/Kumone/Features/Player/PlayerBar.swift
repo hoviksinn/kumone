@@ -1,6 +1,8 @@
 import SwiftUI
 
 struct PlayerBar: View {
+    var layout: PlayerBarLayout = .wide
+
     @EnvironmentObject private var player: PlayerService
     @EnvironmentObject private var account: AccountStore
     @EnvironmentObject private var settings: SettingsManager

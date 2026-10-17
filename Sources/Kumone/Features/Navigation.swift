@@ -26,22 +26,50 @@ extension EnvironmentValues {
 
 struct PlayerChromeModifier: ViewModifier {
     @EnvironmentObject private var player: PlayerService
-    let detailWidth: CGFloat
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     func body(content: Content) -> some View {
-        content
-            .overlay(alignment: .bottomTrailing) {
-                PlayerBar()
-                    .frame(width: detailWidth)
+        GeometryReader { proxy in
+            let metrics = PlayerLayoutMetrics(
+                detailWidth: proxy.size.width,
+                showsPanel: player.activePanel != nil
+            )
+            HStack(spacing: 0) {
+                content
+                    .environment(\.playerChromeClearance, metrics.barClearance)
+                    .frame(width: metrics.mainWidth)
+                    .frame(maxHeight: .infinity)
+                    .overlay(alignment: .bottom) {
+                        PlayerBar(layout: metrics.barLayout)
+                            .frame(width: metrics.barWidth)
+                            .padding(.bottom, PlayerLayoutMetrics.barBottomMargin)
+                    }
+                    .clipped()
+
+                if player.activePanel != nil {
+                    trailingPanel
+                        .frame(width: metrics.panelWidth)
+                        .frame(maxHeight: .infinity)
+                        .background(.regularMaterial)
+                        .overlay(alignment: .leading) {
+                            Rectangle()
+                                .fill(.primary.opacity(0.08))
+                                .frame(width: PlayerLayoutMetrics.dividerWidth)
+                        }
+                        .padding(.leading, PlayerLayoutMetrics.dividerWidth)
+                        .transition(reduceMotion ? .opacity : .move(edge: .trailing).combined(with: .opacity))
+                }
             }
-            .overlay(alignment: .trailing) {
-                rightPanel
-            }
-            .animation(AppAnimation.standard, value: player.activePanel)
+            .clipped()
+            // Only opening/closing changes the column geometry. Switching
+            // lyrics ↔ queue keeps the exact same main-column and bar widths.
+            .animation(reduceMotion ? nil : .spring(response: 0.42, dampingFraction: 0.9),
+                       value: player.activePanel != nil)
+        }
     }
 
     @ViewBuilder
-    private var rightPanel: some View {
+    private var trailingPanel: some View {
         if let panel = player.activePanel {
             Group {
                 switch panel {
@@ -51,11 +79,20 @@ struct PlayerChromeModifier: ViewModifier {
                     QueuePanel()
                 }
             }
-            .padding(.top, 12)
-            .padding(.bottom, Theme.Layout.playerChromeClearance + 10)
-            .padding(.trailing, 16)
-            .transition(.move(edge: .trailing).combined(with: .opacity))
+            .transition(.opacity)
+            .animation(reduceMotion ? nil : .easeInOut(duration: 0.16), value: panel)
         }
+    }
+}
+
+private struct PlayerChromeClearanceKey: EnvironmentKey {
+    static let defaultValue: CGFloat = Theme.Layout.playerChromeClearance
+}
+
+extension EnvironmentValues {
+    var playerChromeClearance: CGFloat {
+        get { self[PlayerChromeClearanceKey.self] }
+        set { self[PlayerChromeClearanceKey.self] = newValue }
     }
 }
 
@@ -131,8 +168,8 @@ struct DestinationsModifier: ViewModifier {
 }
 
 extension View {
-    func playerChrome(detailWidth: CGFloat) -> some View {
-        modifier(PlayerChromeModifier(detailWidth: detailWidth))
+    func playerChrome() -> some View {
+        modifier(PlayerChromeModifier())
     }
 
     func appDestinations() -> some View {
@@ -143,9 +180,11 @@ extension View {
 /// Trailing spacer for scrollable pages so the last row clears the
 /// floating player bar.
 struct PlayerClearanceSpacer: View {
+    @Environment(\.playerChromeClearance) private var clearance
+
     var body: some View {
         Color.clear.frame(
-            height: Theme.Layout.playerChromeClearance + Theme.Layout.scrollBreathingMargin
+            height: clearance + Theme.Layout.scrollBreathingMargin
         )
     }
 }
