@@ -537,6 +537,7 @@ struct PlaybackEngineSmokeTests {
             var pauseCallDuration: TimeInterval
             var resumeStartDuration: TimeInterval
             var pauseSkew: TimeInterval
+            var soundingHostDuration: TimeInterval
         }
         let result = await withWatchdog("pauseContinuity-\(stereo)", timeout: 25) { () -> [Cycle] in
             let engine = PlaybackEngine()
@@ -554,13 +555,16 @@ struct PlaybackEngineSmokeTests {
                 let held = engine.position(of: .a)
                 engine.resume()
                 let resumed = engine.position(of: .a)
+                let resumedReadAt = ProcessInfo.processInfo.systemUptime
                 let transport = engine.transportSnapshotForTesting(.a)
                 Thread.sleep(forTimeInterval: 0.3)
                 let after = engine.position(of: .a)
+                let soundingHostDuration = ProcessInfo.processInfo.systemUptime - resumedReadAt
                 cycles.append(Cycle(paused: paused, held: held, resumed: resumed, after: after,
                                     pauseCallDuration: transport.pauseCallDuration,
                                     resumeStartDuration: transport.resumeStartDuration,
-                                    pauseSkew: transport.pauseSkew))
+                                    pauseSkew: transport.pauseSkew,
+                                    soundingHostDuration: soundingHostDuration))
             }
             return cycles
         }
@@ -569,13 +573,14 @@ struct PlaybackEngineSmokeTests {
         for (index, cycle) in cycles.enumerated() {
             print("TRANSPORT_REALTIME stereo=\(stereo) cycle=\(index) "
                 + "paused=\(cycle.paused) held=\(cycle.held) resumed=\(cycle.resumed) after=\(cycle.after) "
-                + "pauseCallSeconds=\(cycle.pauseCallDuration) startSeconds=\(cycle.resumeStartDuration) skewSeconds=\(cycle.pauseSkew)")
+                + "pauseCallSeconds=\(cycle.pauseCallDuration) startSeconds=\(cycle.resumeStartDuration) skewSeconds=\(cycle.pauseSkew) "
+                + "actualSoundingHostSeconds=\(cycle.soundingHostDuration)")
             #expect(abs(cycle.held - cycle.paused) < 0.01, "pause \(index) must hold the media position")
             #expect(abs(cycle.resumed - cycle.paused) < 0.08,
                     "resume \(index) must not skip forward or repeat a paused interval")
             let sounding = cycle.after - cycle.paused
-            #expect(sounding > 0.15 && sounding < 0.45,
-                    "resume \(index): 0.3 s sounding must advance 0.3±0.15 s, got \(sounding)")
+            #expect(abs(sounding - cycle.soundingHostDuration) < 0.15,
+                    "resume \(index): media advancement \(sounding) must match measured sounding host time \(cycle.soundingHostDuration) ±0.15 s")
         }
     }
 
@@ -1485,6 +1490,7 @@ struct PlaybackEngineSmokeTests {
                 }
                 o.aPosAfterQuiet = engine.position(of: .a)
                 o.bPosAfterQuiet = engine.position(of: .b)
+                print("SEEK_FALLBACK case=\(testCase.name) deckA=\(engine.transportSnapshotForTesting(.a)) deckB=\(engine.transportSnapshotForTesting(.b))")
                 // The fallback still has to hand over at the end of the track.
                 o.completed = log.wait(timeout: 8) {
                     if case .transitionCompleted(from: .a, to: .b) = $0 { return true }
@@ -1618,12 +1624,14 @@ struct PlaybackEngineSmokeTests {
                 engine.outputVolume = 0
                 engine.play(deck: .a, from: 0)
                 let before = pollPosition(engine, deck: .a, past: 1.0, timeout: 5)
+                print("CONFIG_REBUILD before source=\(name) transport=\(engine.transportSnapshotForTesting(.a))")
 
                 engine.simulateConfigurationChange()
                 Thread.sleep(forTimeInterval: 0.3)
                 // Playback has to *advance* from where it was, not restart and
                 // not stall: the resume is from the cached position.
                 let after = pollPosition(engine, deck: .a, past: before + 0.8, timeout: 5)
+                print("CONFIG_REBUILD after source=\(name) transport=\(engine.transportSnapshotForTesting(.a))")
                 let volume = engine.effectSnapshot(of: .a).volume
                 // And the track still ends by itself, which is the assertion
                 // that the rebuilt schedule is a whole schedule.

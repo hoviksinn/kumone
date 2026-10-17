@@ -176,39 +176,53 @@ struct PlaybackTransportContinuityTests {
         let url = try fixture()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
         let subject = try engine(playing: url)
-        let reference = try engine(playing: url, from: 1.75)
+        let reference = try engine(playing: url)
         defer { subject.stopAll(); reference.stopAll() }
-        for _ in 0..<8 { _ = try samples(subject) }
+        for _ in 0..<8 { _ = try samples(subject); _ = try samples(reference) }
         let before = subject.transportSnapshotForTesting(.a)
         subject.pause()
         subject.seek(deck: .a, to: 1.75)
+        reference.seek(deck: .a, to: 1.75)
         let seeked = subject.transportSnapshotForTesting(.a)
         #expect(seeked.paused && seeked.generation > before.generation)
         #expect(abs(seeked.position - 1.75) <= 1 / Self.sampleRate)
         Thread.sleep(forTimeInterval: 0.025)
         subject.resume()
-        for _ in 0..<16 { _ = try samples(subject); _ = try samples(reference) }
+        var maximumSampleError: Float = 0
+        var maximumSignal: Float = 0
+        for chunk in 0..<16 {
+            let actual = try samples(subject)
+            let expected = try samples(reference)
+            maximumSignal = max(maximumSignal, actual.map(abs).max() ?? 0)
+            maximumSampleError = max(maximumSampleError,
+                expectSamePCM(actual, expected, context: "paused vs ordinary seek chunk \(chunk)"))
+        }
         let resumed = subject.transportSnapshotForTesting(.a)
         let uninterrupted = reference.transportSnapshotForTesting(.a)
         // lastRenderTime belongs to the upstream source node. An offline DSP
         // graph can pull/cache ahead of its output, so output-frame count is
         // not a valid absolute clock for that node. Compare the SAME graph's
-        // fresh schedule at the seek target, with a stricter two-frame bound.
+        // new schedule at the seek target, with a stricter two-frame bound.
         #expect(abs(resumed.position - uninterrupted.position) <= 2 / Self.sampleRate,
                 "paused seek must match a fresh source anchor, without pause-time debt or extra frames")
         #expect(!resumed.hasPendingPause && resumed.pauseSkew == 0)
-        // The existing seek flush intentionally holds the fader until source
-        // frames have cleared the effects. Give its production queue timer an
-        // opportunity to observe those rendered frames, then compare PCM too.
-        // This wait belongs only to the test; transport adds no delay.
-        Thread.sleep(forTimeInterval: 0.025)
-        var maximumSampleError: Float = 0
+        #expect(!resumed.hasPendingFaderFlush && !uninterrupted.hasPendingFaderFlush,
+                "both real seek flush controllers must have completed")
+        #expect(abs(resumed.fader - 1) < 0.000_01 && abs(uninterrupted.fader - 1) < 0.000_01)
+        // Match an ordinary, unpaused seek with the SAME pre-seek history,
+        // flush and native gain smoothing. Comparing to a never-muted start
+        // would incorrectly count the normal seek gain ramp as discontinuity.
         for chunk in 0..<8 {
+            let actual = try samples(subject)
+            let expected = try samples(reference)
+            maximumSignal = max(maximumSignal, actual.map(abs).max() ?? 0)
             maximumSampleError = max(maximumSampleError,
-                expectSamePCM(try samples(subject), try samples(reference), context: "post-seek flush chunk \(chunk)"))
+                expectSamePCM(actual, expected, context: "post-seek flush chunk \(chunk)"))
         }
+        #expect(maximumSignal > 0.1, "matching silent captures must not pass seek PCM validation")
         try TransportEvidence.record([
             "name": "explicitSeekWhilePaused", "seekSeconds": 1.75,
+            "reference": "same pre-seek history and ordinary seek, without global pause",
             "renderedFrames": 16 * Int(Self.quantum),
             "referencePositionSeconds": uninterrupted.position, "actualPositionSeconds": resumed.position,
             "subjectRawPlayerFrames": resumed.rawPlayerFrames ?? -1,
@@ -218,8 +232,10 @@ struct PlaybackTransportContinuityTests {
             "clockErrorFrames": abs(resumed.position - uninterrupted.position) * Self.sampleRate,
             "positionFromOutputFramesSeconds": 1.75 + 16 * Double(Self.quantum) / Self.sampleRate,
             "referenceSourceLeadFrames": (uninterrupted.position - 1.75) * Self.sampleRate - 16 * Double(Self.quantum),
-            "postFlushComparedFramesPerChannel": 8 * Int(Self.quantum),
-            "postFlushMaximumSampleError": maximumSampleError,
+            "comparedFramesPerChannel": 24 * Int(Self.quantum),
+            "maximumSampleError": maximumSampleError, "maximumSignal": maximumSignal,
+            "subjectFlushPending": resumed.hasPendingFaderFlush,
+            "referenceFlushPending": uninterrupted.hasPendingFaderFlush,
         ])
     }
 }

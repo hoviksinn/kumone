@@ -174,6 +174,10 @@ final class PlaybackEngine: @unchecked Sendable {
         /// is not this schedule's to pay for. Cleared by the resume that
         /// forgives it. See `clearPauseSkewLocked`.
         var anchoredWhilePaused = false
+        /// Host timestamp paired with the media snapshot taken for a pause.
+        /// Each node has its own render clock; pause() itself can block after
+        /// this frame, so its return-time wall stamp is not interchangeable.
+        var pausedRenderHostTime: UInt64?
         /// A resumed real-time node may briefly expose its PRE-pause render
         /// timestamp. Do not subtract the new pause skew from that old clock.
         var resumedClockNotBeforeHostTime: UInt64?
@@ -902,17 +906,17 @@ final class PlaybackEngine: @unchecked Sendable {
     func pause() {
         queue.async {
             guard !self.isPaused else { return }
-            // Capture the media clock before engine.pause invalidates it.
-            for deck in [Deck.a, .b] {
-                self.deckStates[deck]!.lastKnownPosition = self.reportedPositionLocked(deck)
-            }
-            self.pausedSegmentElapsed = self.segmentElapsedLocked()
-            self.isPaused = true
             let pauseBegan = mach_absolute_time()
+            self.pausedAtHostTime = pauseBegan
+            // Snapshot before pause invalidates node clocks, then refresh from
+            // the FINAL render frame if the stopped graph still exposes it.
+            // Both reads keep position paired with its render host timestamp.
+            self.capturePauseClocksLocked()
             self.engine.pause()
-            self.pausedAtHostTime = mach_absolute_time()
             self.lastPauseCallDuration = AVAudioTime.seconds(forHostTime:
-                self.pausedAtHostTime! &- pauseBegan)
+                mach_absolute_time() &- pauseBegan)
+            self.capturePauseClocksLocked()
+            self.isPaused = true
 
             // Host-clock releases must be cancelled while the graph is frozen:
             // their deadlines keep advancing during a pause. The wait tick
@@ -943,10 +947,9 @@ final class PlaybackEngine: @unchecked Sendable {
                 // of this stopped interval has sounded, including a retry.
                 return
             }
-            // prepare/start itself can take hundreds of milliseconds. The
-            // player clock counts that stopped host interval too. Account for
-            // it AFTER start succeeds, while the serial queue and isPaused
-            // still protect every position reader from a half-resumed clock.
+            // Close each node's measured render-clock gap after start succeeds.
+            // Keep the serial queue and isPaused protecting position readers
+            // until the correction and the stale-render guard are installed.
             self.applyPauseSkewLocked(resumedAt: startBegan)
             PlaybackJournal.note(String(format: "transport resume start=%.2fms",
                 AVAudioTime.seconds(forHostTime: mach_absolute_time() &- startBegan) * 1000))
@@ -986,9 +989,15 @@ final class PlaybackEngine: @unchecked Sendable {
         // its sample timeline does not include elapsed host time. This keeps
         // the same production transport testable without an output device.
         let offline = engine.isInManualRenderingMode && engine.manualRenderingMode == .offline
-        let paused = offline ? 0 : AVAudioTime.seconds(forHostTime: mach_absolute_time() &- pausedAt)
+        let resumedNow = mach_absolute_time()
+        func pauseDuration(_ state: DeckState) -> TimeInterval {
+            guard !offline else { return 0 }
+            let anchor = state.pausedRenderHostTime ?? pausedAt
+            return resumedNow >= anchor ? AVAudioTime.seconds(forHostTime: resumedNow - anchor) : 0
+        }
         for (deck, state) in deckStates {
-            defer { state.anchoredWhilePaused = false }
+            defer { state.anchoredWhilePaused = false; state.pausedRenderHostTime = nil }
+            let paused = pauseDuration(state)
             guard state.isPlaying, !state.anchoredWhilePaused, paused > 0 else { continue }
             state.resumedClockNotBeforeHostTime = resumedAt
             state.pauseSkew = PausedClockSkew.skew(after: paused, existing: state.pauseSkew)
@@ -996,6 +1005,7 @@ final class PlaybackEngine: @unchecked Sendable {
                 deck: deck.rawValue, paused: paused, total: state.pauseSkew))
         }
         let segmentSounding = transition?.phase == .segmentPlaying
+        let paused = pauseDuration(segmentState)
         if segmentSounding, !segmentState.anchoredWhilePaused, paused > 0 {
             segmentState.resumedClockNotBeforeHostTime = resumedAt
             segmentState.pauseSkew = PausedClockSkew.skew(
@@ -1004,6 +1014,45 @@ final class PlaybackEngine: @unchecked Sendable {
                 deck: "segment", paused: paused, total: segmentState.pauseSkew))
         }
         segmentState.anchoredWhilePaused = false
+        segmentState.pausedRenderHostTime = nil
+    }
+
+    /// Read both halves of a clock anchor from ONE render timestamp. A stale
+    /// pre-pause frame remains paired with its old host time, never with the
+    /// time at which engine.pause() happened to return.
+    private func pauseClockSnapshotLocked(_ state: DeckState) -> (position: TimeInterval, host: UInt64?)? {
+        guard let nodeTime = Self.renderedNodeTime(state.player),
+              let playerTime = state.player.playerTime(forNodeTime: nodeTime),
+              playerTime.sampleRate > 0, playerTime.sampleTime >= 0 else { return nil }
+        let offline = engine.isInManualRenderingMode && engine.manualRenderingMode == .offline
+        // A real-time sample-only timestamp cannot be paired with a later
+        // wall clock. Retain the preceding valid pair instead. Offline has no
+        // advancing host timeline and intentionally needs only sample time.
+        guard offline || nodeTime.isHostTimeValid else { return nil }
+        if let earliest = state.resumedClockNotBeforeHostTime,
+           !nodeTime.isHostTimeValid || nodeTime.hostTime < earliest { return nil }
+        let raw = state.startOffset + Double(playerTime.sampleTime) / playerTime.sampleRate
+        return (PausedClockSkew.position(raw: raw, startOffset: state.startOffset, skew: state.pauseSkew),
+                nodeTime.isHostTimeValid ? nodeTime.hostTime : nil)
+    }
+
+    private func capturePauseClocksLocked() {
+        for state in deckStates.values where state.isPlaying {
+            if let snapshot = pauseClockSnapshotLocked(state) {
+                state.lastKnownPosition = snapshot.position
+                state.pausedRenderHostTime = snapshot.host
+            }
+        }
+        guard let tr = transition, tr.phase == .segmentPlaying, let segment = tr.segment else { return }
+        if let snapshot = pauseClockSnapshotLocked(segmentState) {
+            pausedSegmentElapsed = snapshot.position
+            segmentState.pausedRenderHostTime = snapshot.host
+        }
+        guard let elapsed = pausedSegmentElapsed else { return }
+        deckStates[tr.from]!.lastKnownPosition = segment.outgoingTime(at: elapsed)
+        if !deckStates[tr.to]!.isPlaying {
+            deckStates[tr.to]!.lastKnownPosition = segment.incomingTime(at: elapsed)
+        }
     }
 
     /// A fresh anchor: the node clock this deck's position is derived from
@@ -1012,6 +1061,7 @@ final class PlaybackEngine: @unchecked Sendable {
     /// this, which is what keeps the two in step.
     private func clearPauseSkewLocked(_ state: DeckState) {
         state.pauseSkew = 0
+        state.pausedRenderHostTime = nil
         state.resumedClockNotBeforeHostTime = nil
         // Written *during* a pause (the graph rebuild re-cues every deck from
         // its cached position, paused or not): the pause still running belongs
@@ -1370,6 +1420,10 @@ final class PlaybackEngine: @unchecked Sendable {
                 throw NSError(domain: "PlaybackEngineOffline", code: 2,
                               userInfo: [NSLocalizedDescriptionKey: "Offline engine is not ready to render"])
             }
+            // Offline time advances by pulls, not wall time. Run the SAME
+            // production flush controller against that source-frame clock so
+            // two reference graphs restore their faders at identical frames.
+            faderFlushTickLocked()
             let status = try engine.renderOffline(frames, to: buffer)
             guard status == .success, buffer.frameLength == frames else {
                 throw NSError(domain: "PlaybackEngineOffline", code: 3,
@@ -1392,12 +1446,17 @@ final class PlaybackEngine: @unchecked Sendable {
         var manualOutputFrames: AVAudioFramePosition?
         var pauseCallDuration: TimeInterval
         var resumeStartDuration: TimeInterval
+        var hasPendingFaderFlush: Bool
+        var fader: Float
+        var renderHostTime: UInt64?
+        var resumeClockPending: Bool
     }
 
     func transportSnapshotForTesting(_ deck: Deck) -> TransportSnapshot {
         queue.sync {
             let state = deckStates[deck]!
-            let rawPlayerFrames = Self.renderedNodeTime(state.player).flatMap {
+            let renderTime = Self.renderedNodeTime(state.player)
+            let rawPlayerFrames = renderTime.flatMap {
                 state.player.playerTime(forNodeTime: $0)?.sampleTime
             }
             return TransportSnapshot(paused: isPaused, engineRunning: engine.isRunning,
@@ -1407,7 +1466,11 @@ final class PlaybackEngine: @unchecked Sendable {
                                      rawPlayerFrames: rawPlayerFrames,
                                      manualOutputFrames: engine.isInManualRenderingMode ? engine.manualRenderingSampleTime : nil,
                                      pauseCallDuration: lastPauseCallDuration,
-                                     resumeStartDuration: lastResumeStartDuration)
+                                     resumeStartDuration: lastResumeStartDuration,
+                                     hasPendingFaderFlush: state.pendingFaderRestore != nil,
+                                     fader: state.fader,
+                                     renderHostTime: renderTime.flatMap { $0.isHostTimeValid ? $0.hostTime : nil },
+                                     resumeClockPending: state.resumedClockNotBeforeHostTime != nil)
         }
     }
 
@@ -3768,6 +3831,9 @@ final class PlaybackEngine: @unchecked Sendable {
     }
 
     private func startFaderFlushTimerLocked() {
+        // Manual rendering uses renderOfflineForTesting's source-frame tick.
+        // Real-time playback retains its existing 10 ms controller unchanged.
+        if engine.isInManualRenderingMode, engine.manualRenderingMode == .offline { return }
         guard faderFlushTimer == nil else { return }
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now() + Self.faderFlushTick,
