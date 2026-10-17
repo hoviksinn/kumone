@@ -23,7 +23,7 @@
 #   --product Kumone` puts the app binary). MLX looks for `mlx.metallib` next to the
 #   running executable, so the metallib must sit beside whichever binary you intend
 #   to run — repeat for .build/debug, or for a packaged app's Contents/MacOS.
-#   Scripts/build-app.sh copies the first one it finds under .build into the app.
+#   Scripts/build-app.sh copies the kernels from its own configuration into the app.
 #
 #   The extracted file is checked against MLX_METALLIB_SHA256 below (also when it
 #   is already present); a mismatch is an error. Bump both together.
@@ -61,17 +61,23 @@ if [ -f "$TARGET" ]; then
     exit 0
 fi
 
+# Share the exact verified kernels between debug tests and release packaging.
+CACHE="$REPO_ROOT/.build/mlx-metal-$MLX_VERSION/mlx.metallib"
+if [ -f "$CACHE" ]; then
+    verify_sha256 "$CACHE"
+    cp "$CACHE" "$TARGET"
+    echo "Installed cached metallib -> $TARGET"
+    exit 0
+fi
+
 WORKDIR="$(mktemp -d)"
 trap 'rm -rf "$WORKDIR"' EXIT
 
 echo "Creating a throwaway venv to pull mlx==$MLX_VERSION ..."
 python3 -m venv "$WORKDIR/venv"
-# The metallib lives in the `mlx-metal` wheel, and MLX publishes one per
-# macOS target. pip would pick the wheel for *this* machine — on macOS 26 that
-# is a metallib stamped for macOS 26, which macOS 15 refuses to load ("compiled
-# with Metal 4.0"). The app's minimum is macOS 15, so ask for that wheel
-# explicitly; it is the same kernels from the same compiler, only the target
-# OS field differs, and it loads on 15 and 26 alike.
+# Keep the audited wheel and digest paired with MLX 0.30.6. Its macOS 15
+# deployment floor is compatible with macOS 26; it does not set the app's
+# deployment target. Changing the wheel requires a new digest and GPU validation.
 "$WORKDIR/venv/bin/pip" download --quiet --no-deps --only-binary=:all: \
     --platform macosx_15_0_arm64 --python-version 3.13 \
     -d "$WORKDIR/wheel" "mlx-metal==$MLX_VERSION"
@@ -84,5 +90,7 @@ if [ -z "$SOURCE" ]; then
 fi
 
 verify_sha256 "$SOURCE" || exit 1
-cp "$SOURCE" "$TARGET"
+mkdir -p "$(dirname "$CACHE")"
+cp "$SOURCE" "$CACHE"
+cp "$CACHE" "$TARGET"
 echo "Installed $(du -h "$TARGET" | cut -f1) metallib -> $TARGET"

@@ -1,33 +1,37 @@
-# macOS 测试版下载与测试
+# macOS 26 / arm64 测试版
 
-本流程仅供测试：不发布 Release、不公证，不使用原作者的签名证书、发布密钥或 Sparkle 私钥。
+本仓库只支持 Apple Silicon Mac、macOS 26.0 及更新版本。测试包不发布 Release、不公证，不使用原作者证书或发布密钥，不提供自动更新。
 
-## 在 GitHub 运行
+## 在 GitHub 运行和下载
 
-1. 打开 https://github.com/hoviksinn/kumone/actions ，如提示 Actions 尚未启用，先启用。
-2. Pull Request（包括 Draft）创建或更新后，CI 会自动运行；在 PR 页面点击 CI 检查的 Details 可查看进度。
-3. 手动运行：Actions → CI → Run workflow → 选择 `codex/macos-test-builds`（或后续修改所在分支）→ Run workflow。
-   GitHub 要求默认分支存在 workflow_dispatch 才显示手动运行入口；若入口暂不可见，可先通过本 PR 的自动检查构建，无需合并此 Draft PR。
-4. 等待 Build、Test、Build app、Zip、Upload 全部成功。失败时查看对应步骤日志；失败的构建不会上传测试包。
-5. 打开成功运行的 Summary，向下滚动到 Artifacts，点击 `Kumone-Test-macOS-universal-运行编号-尝试编号`。产物保留 14 天，过期后重新运行。
+1. 打开 https://github.com/hoviksinn/kumone/actions/workflows/ci.yml ，如提示 Actions 未启用，先启用。
+2. Pull Request（包括 Draft）创建或更新后自动运行 CI。在 PR 的检查区域点击 CI → Details 查看进度。
+3. 手动运行：Actions → CI → Run workflow → 选择本次修改分支 → Run workflow。默认分支必须含 workflow_dispatch；平台清理合并前，请选择 `codex/macos26-arm64-cleanup` 才会使用新流程。
+4. 等待编译、测试、打包、架构/系统版本检查、ZIP 和上传全部成功。失败时查看对应步骤日志，失败构建不会上传 App。
+5. 打开成功运行的 Summary，向下滚动到 Artifacts，点击 `Kumone-Test-macOS26-arm64-运行编号-尝试编号`。需登录 GitHub，产物保留 14 天。
+6. 解压下载的外层 ZIP，再解压其中的 `Kumone-Test-macOS26-arm64.zip`，得到 `Kumone.app`。旁边的 `app-verification.json` 记录实际架构、最低系统版本、文件大小和 Metal 核校验值。
 
-## 在 Mac 打开
+## 在 Mac 测试
 
-1. 登录 GitHub 下载产物 ZIP，解压后找到 `Kumone-Test-macOS-universal.zip`，再解压得到 `Kumone.app`。
-2. 支持 macOS 15 或更高版本，包内含 Apple Silicon 和 Intel 两种架构。
-3. **首次测试请使用单独的 macOS 用户账户**（系统设置 → 用户与群组 → 添加用户），将 App 放在该用户的 `~/Applications/Kumone Test.app`，不要覆盖原版 App。
-4. 这是只有临时 ad-hoc 签名、未经 Apple 公证的测试包。macOS 可能拦截；确认下载来自自己的 Actions 后，可按系统提示到“系统设置 → 隐私与安全性 → 仍要打开”。不要关闭系统的全局安全保护。若仍不能运行，记录系统提示与 Actions 日志以便排查。
+- 首次请使用单独的 macOS 用户账户（系统设置 → 用户与群组 → 添加用户）。将 App 放进该用户的 `~/Applications/Kumone Test.app`，不要覆盖原版。
+- App 只有 ad-hoc 临时签名，未经 Apple 公证。确认来自自己仓库的 Actions 后，可按系统提示到“系统设置 → 隐私与安全性 → 仍要打开”；不要关闭系统全局安全保护。
+- 请实际检查：网易云登录与重启后保持登录、搜索、无损播放、暂停切歌/队列、歌单收藏、同步/逐字/翻译/桌面歌词、沉浸页面、AutoMix、模型下载后音轨分离、媒体键/控制中心、缓存和设置。
+- CI 的 MLX GPU 小运算测试可验证 Metal 核加载和运行，不能替代下载模型后的完整音轨分离、真实账号和音频设备测试。
 
-## 隔离范围与限制
+## 隔离范围
 
-CI 设置 `KUMONE_TEST_BUILD=1`：测试版 Bundle ID 为 `com.hoviksinn.kumone.test`，显示名称为 `Kumone Test`；磁盘构建路径仍为 `.build/app/Kumone.app`。偏好设置和按 Bundle ID 存储的缓存与原版隔离。
+所有打包入口固定使用 Bundle ID `com.hoviksinn.kumone.test`、显示名称 `Kumone Test`。App 路径保持 `.build/app/Kumone.app`；以前的 `KUMONE_TEST_BUILD` 开关已不再需要，不能切回原版身份。
 
-测试包不包含原作者的更新地址和更新公钥，且设置 `KumoneDisableUpdates`。UpdaterManager 读取此标记后不创建 Sparkle 控制器，自动检查、设置中的开关和手动检查均无法启动更新。仅将 SUEnableAutomaticChecks 设为 false 不足以做到这一点，因为应用设置原本会再次开启检查。
+Info.plist 不包含上游更新地址或公钥，并固定 `KumoneDisableUpdates=true`、`SUEnableAutomaticChecks=false`、`SUAllowsAutomaticUpdates=false`。UpdaterManager 不创建 Sparkle 控制器，自动、手动检查及设置开关均无法启动更新。Sparkle 暂保留为既有模块依赖；嵌入的框架和辅助程序也仅保留 arm64。
 
-**不同 Bundle ID 并不等于全部数据隔离。** 项目仍有写死的 `~/Library/Application Support/Kumone`、`~/Library/Caches/Kumone` 和 `~/Library/Caches/im.missuo.Kumone` 等路径。同一 macOS 用户下运行会共享部分数据；同时运行也有写入冲突风险。独立系统用户可隔离这些用户目录。本阶段不改存储实现；以后如需在同一用户下并存，应先统一改造并核查所有存储路径、登录信息和后台任务标识。
+不同 Bundle ID 仅隔离偏好设置及按 ID 存储的缓存。部分目录仍固定为 `~/Library/Application Support/Kumone`、`~/Library/Caches/Kumone`、`~/Library/Caches/im.missuo.Kumone`，同一系统用户仍会共享部分数据。独立系统用户是当前安全隔离方案；本次不进行数据迁移。
 
-原有 `release.yml` 仍仅由 `v*` 标签触发，本流程不会创建标签、调用发布流程或自动合并 PR。不要为测试推送发布标签。
+旧 release.yml、IPA/AltStore 生成及模型上传脚本已移除，不再有标签触发的正式发布工作流。应用的模型下载 URL、摘要和来源许可保留，避免影响现有音轨分离。
 
-## 验证边界
+## 开发与验证
 
-Linux 只能进行脚本语法、配置和差异检查，无法验证 SwiftUI 编译、macOS 自动测试、ditto、codesign 或 App 实际启动。以 macos-26 Actions 的实际结果及 Mac 上的手动测试为准。
+使用 Apple Silicon、macOS 26+、Xcode 26+，运行 `make build`、`make test` 和 `FETCH_MLX_METALLIB=1 make app CONFIG=release`。
+
+测试准备会先编译全部测试，把固定版本、SHA-256 核验的 MLX Metal 核放入测试执行目录，再运行完整测试套件（`--skip-build` 只复用刚编译的测试，不跳过测试）。同一份核缓存在 `.build`，供 release 打包复用。MLX 0.30.6 的预编译核来自最低系统为 macOS 15 的 arm64 wheel，可用于 macOS 26；这不是 App 的部署目标，App 和自身代码仍要求 macOS 26.0。
+
+Linux 仅执行脚本语法、配置、引用和差异检查。SwiftUI 编译、自动测试、GPU、ditto、codesign 及实际 Mach-O 检查以 macos-26 Actions 结果为准，App 真实功能以 Mac 手测为准。
