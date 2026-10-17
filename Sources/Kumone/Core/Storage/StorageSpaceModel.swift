@@ -27,11 +27,7 @@ final class StorageSpaceModel: ObservableObject {
 
     /// The song cache the player on this platform actually writes to.
     static var musicCacheDirectories: [URL] {
-        #if os(macOS)
         [KumoneDirectories.caches("Audio")]
-        #else
-        [AudioCache.shared.directory]
-        #endif
     }
 
     func reload(clearMessage: Bool = true) async {
@@ -64,11 +60,7 @@ final class StorageSpaceModel: ObservableObject {
                 try await images.clear()
                 message = String(localized: "图片缓存已清除")
             case .musicCache:
-                #if os(macOS)
                 await EngineAudioCache.shared.removeAll()
-                #else
-                try await AudioCache.shared.clear()
-                #endif
                 await DownloadManager.shared.refreshCachedTracks()
                 message = String(localized: "歌曲缓存已清除")
             default: return

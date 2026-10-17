@@ -1,5 +1,7 @@
 # AutoMix 外部项目调研 — walkywalker/automix 与 sony/fxnorm-automix
 
+> 上游音频研究档案：保留技术分析、来源及许可记录。文中的 iOS、旧系统及发布方式属于当时背景；本定制版仅支持 macOS 26+ / arm64，当前构建与测试方式以 [测试指南](MACOS_TEST_BUILDS_CN.md) 为准。
+
 > 状态：调研（2026-08-28） · 纯阅读，未写任何产品代码
 > 前置阅读：[`automix-spec.md`](automix-spec.md) · `audition.md`（已移除，见分支历史） · [`automix-stems-predev.md`](automix-stems-predev.md)
 > 注:文中提到的离线工具(`audition`、`vocaleval`、`stemtool`,及 `docs/audition.md`)已从仓库移除,保留在分支历史中(`git log -- Sources/audition docs/audition.md`)。

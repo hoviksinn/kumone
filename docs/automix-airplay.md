@@ -2,14 +2,11 @@
 
 ## 为什么 `AVRoutePickerView` 在 macOS 上是死的
 
-`RoutePickerButton` 原本在两个平台都用 `AVRoutePickerView`。这个视图路由的是
+`RoutePickerButton` 原本使用 `AVRoutePickerView`。这个视图路由的是
 **AVFoundation 的播放对象**（`AVPlayer` / `AVSampleBufferAudioRenderer`）。
 双 deck 引擎（`PlaybackEngine`，`AVAudioEngine` 图）落地之后，进程里已经没有
 AVPlayer 了 —— 于是 macOS 上点开这个按钮、选中 AirPlay 音箱，什么也不会发生。
 用户的判断（"现在似乎是完全不 work 的"）是准确的。
-
-iOS 不同：那里的路由是 `AVAudioSession` 的事，而 `AVAudioEngine` 正是通过
-session 渲染的，所以系统 picker 仍然有效 —— iOS 保留原实现。
 
 ## macOS 的做法
 

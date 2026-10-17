@@ -1,4 +1,3 @@
-#if os(macOS)
 import CoreAudio
 import Foundation
 import SwiftUI
@@ -218,4 +217,3 @@ final class AudioOutputController: ObservableObject {
         handle(state.reconcile(with: devices), damped: true)
     }
 }
-#endif

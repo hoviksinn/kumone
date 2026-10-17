@@ -199,7 +199,6 @@ struct PlayOverlayButton: View {
     let action: () -> Void
 
     var body: some View {
-        #if os(macOS)
         Button(action: action) {
             Image(systemName: "play.fill")
                 .font(.system(size: size * 0.38, weight: .bold))
@@ -214,9 +213,6 @@ struct PlayOverlayButton: View {
         .animation(AppAnimation.spring, value: visible)
         // Opacity alone leaves it clickable while invisible.
         .allowsHitTesting(visible)
-        #else
-        EmptyView()
-        #endif
     }
 }
 
@@ -274,9 +270,7 @@ final class MarqueeTextView: PlatformView {
         self.fontSize = fontSize
         self.weight = weight
         super.init(frame: .zero)
-        #if os(macOS)
         wantsLayer = true
-        #endif
         hostLayer?.addSublayer(scroller)
         scroller.addSublayer(first)
         scroller.addSublayer(second)
@@ -306,11 +300,7 @@ final class MarqueeTextView: PlatformView {
     private var font: PlatformFont { .systemFont(ofSize: fontSize, weight: weight) }
 
     private var labelColor: CGColor {
-        #if os(macOS)
         return NSColor.labelColor.cgColor
-        #else
-        return UIColor.label.cgColor
-        #endif
     }
 
     private func applyText() {
@@ -324,7 +314,6 @@ final class MarqueeTextView: PlatformView {
         }
     }
 
-    #if os(macOS)
     override func layout() {
         super.layout()
         guard bounds.size != laidOutFor else { return }
@@ -346,27 +335,6 @@ final class MarqueeTextView: PlatformView {
         second.contentsScale = scale
         relayout()
     }
-    #else
-    override func layoutSubviews() {
-        super.layoutSubviews()
-        guard bounds.size != laidOutFor else { return }
-        relayout()
-    }
-
-    override func traitCollectionDidChange(_ previous: UITraitCollection?) {
-        super.traitCollectionDidChange(previous)
-        first.foregroundColor = labelColor
-        second.foregroundColor = labelColor
-    }
-
-    override func didMoveToWindow() {
-        super.didMoveToWindow()
-        let scale = window?.screen.scale ?? 2
-        first.contentsScale = scale
-        second.contentsScale = scale
-        relayout()
-    }
-    #endif
 
     private func relayout() {
         guard bounds.width > 0, bounds.height > 0 else { return }
@@ -425,20 +393,11 @@ final class MarqueeTextView: PlatformView {
         let fontSize: CGFloat
         let weight: PlatformFont.Weight
 
-        #if os(macOS)
         func makeNSView(context: Context) -> MarqueeTextView {
             MarqueeTextView(text: text, fontSize: fontSize, weight: weight)
         }
         func updateNSView(_ view: MarqueeTextView, context: Context) {
             view.update(text: text, fontSize: fontSize, weight: weight)
         }
-        #else
-        func makeUIView(context: Context) -> MarqueeTextView {
-            MarqueeTextView(text: text, fontSize: fontSize, weight: weight)
-        }
-        func updateUIView(_ view: MarqueeTextView, context: Context) {
-            view.update(text: text, fontSize: fontSize, weight: weight)
-        }
-        #endif
     }
 }

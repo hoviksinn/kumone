@@ -37,14 +37,6 @@ enum KumonePaths {
 
     static var storageRoots: [URL] {
         if isOfflineUITest { return [applicationSupport] }
-        #if os(iOS)
-        // These are inside this app's sandbox, including preferences,
-        // URLSession data and any update IPA saved to Files.
-        return FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)
-            + FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)
-            + [FileManager.default.temporaryDirectory]
-        #else
         return [applicationSupport, networkCache]
-        #endif
     }
 }

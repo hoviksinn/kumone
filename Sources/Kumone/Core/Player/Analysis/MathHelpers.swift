@@ -1,4 +1,3 @@
-#if os(macOS)
 import Foundation
 
 // Two things the analysis and planning code kept re-spelling, in one place.
@@ -43,4 +42,3 @@ func fnv1a(_ byte: UInt8, from hash: UInt64) -> UInt64 {
 func fnv1a(littleEndian value: UInt64, from hash: UInt64) -> UInt64 {
     withUnsafeBytes(of: value.littleEndian) { fnv1a($0, from: hash) }
 }
-#endif

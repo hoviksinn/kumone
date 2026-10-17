@@ -32,10 +32,6 @@ struct TrackRow: View {
     @EnvironmentObject private var player: PlayerService
     @EnvironmentObject private var account: AccountStore
     @Environment(\.openDestination) private var openDestination
-    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
-    @ScaledMetric(relativeTo: .body) private var compactArtworkSize: CGFloat = 48
-    @ScaledMetric(relativeTo: .body) private var compactRowHeight: CGFloat = 64
-    @ScaledMetric(relativeTo: .body) private var compactAlbumRowHeight: CGFloat = 50
     @State private var isHovering = false
     @State private var showAddToPlaylist = false
     @State private var isReducingRecommendation = false
@@ -64,27 +60,9 @@ struct TrackRow: View {
     private var needsNetwork: Bool { downloadState.needsNetwork }
     private var showsArtwork: Bool { style != .albumTrack }
 
-    private var hidesLeadingIndex: Bool {
-        #if os(iOS)
-        return isCompact && showsArtwork
-        #else
-        return false
-        #endif
-    }
-
-    private var isCompact: Bool {
-        #if os(iOS)
-        return UIDevice.current.userInterfaceIdiom == .phone || horizontalSizeClass == .compact
-        #else
-        return false
-        #endif
-    }
-
     var body: some View {
         HStack(spacing: 12) {
-            if !hidesLeadingIndex {
-                leadingIndicator
-            }
+            leadingIndicator
 
             if showsArtwork {
                 artwork
@@ -93,10 +71,10 @@ struct TrackRow: View {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     Text(track.name)
-                        .font(isCompact ? .callout.weight(.medium) : .system(size: 13, weight: .medium))
+                        .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(isCurrent ? Theme.accent : .primary)
                         .lineLimit(1)
-                    if let subtitle = track.subtitle, !isCompact {
+                    if let subtitle = track.subtitle {
                         Text("(\(subtitle))")
                             .font(.system(size: 12))
                             .foregroundStyle(.tertiary)
@@ -110,7 +88,7 @@ struct TrackRow: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
-            if style == .full && !isCompact {
+            if style == .full {
                 if track.album.id > 0, !track.album.name.isEmpty {
                     Button {
                         openDestination(.album(track.album.id))
@@ -148,10 +126,10 @@ struct TrackRow: View {
             }
 
             likeAndDuration
-                .padding(.leading, isCompact ? 12 : 0)
+                .padding(.leading, 0)
         }
         .padding(.horizontal, 10)
-        .padding(.vertical, isCompact ? 6 : 5)
+        .padding(.vertical, 5)
         // Fixed row height keeps lazy-stack height estimation exact,
         // preventing scroll-offset jumps in long lists (#3).
         .frame(height: rowHeight)
@@ -164,15 +142,9 @@ struct TrackRow: View {
         .onHover { hovering in
             withAnimation(AppAnimation.quick) { isHovering = hovering }
         }
-        #if os(macOS)
         .onTapGesture(count: 2) {
             playSelectedTrack()
         }
-        #else
-        .onTapGesture {
-            playSelectedTrack()
-        }
-        #endif
         .contextMenu { contextMenuItems }
         .sheet(isPresented: $showAddToPlaylist) {
             AddToPlaylistSheet(track: track)
@@ -186,14 +158,6 @@ struct TrackRow: View {
 
     @ViewBuilder
     private var artwork: some View {
-        #if os(iOS)
-        Button(action: onPlay) {
-            artworkImage
-        }
-        .buttonStyle(.plain)
-        .disabled(!isPlayable)
-        .accessibilityLabel("播放：\(track.name)")
-        #else
         if track.album.id > 0, !track.album.name.isEmpty {
             Button {
                 openDestination(.album(track.album.id))
@@ -205,46 +169,21 @@ struct TrackRow: View {
         } else {
             artworkImage
         }
-        #endif
     }
 
     @ViewBuilder
     private var artworkImage: some View {
-        if isCompact {
-            CachedAsyncImage(url: track.album.picUrl?.resizedImageURL(160), animated: false)
-                .frame(width: compactArtworkSize, height: compactArtworkSize)
-                .overlay(alignment: .bottomTrailing) {
-                    if hidesLeadingIndex, isCurrent {
-                        PlayingIndicator(animating: player.isPlaying && !player.showNowPlaying)
-                            .padding(5)
-                            .background(
-                                .ultraThinMaterial,
-                                in: RoundedRectangle(cornerRadius: 7, style: .continuous)
-                            )
-                            .padding(4)
-                    }
-                }
-                .compositingGroup()
-                .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.small, style: .continuous))
-        } else {
-            CachedAsyncImage(url: track.album.picUrl?.resizedImageURL(96), animated: false)
-                .frame(width: 42, height: 42)
-                .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.small, style: .continuous))
-        }
+        CachedAsyncImage(url: track.album.picUrl?.resizedImageURL(96), animated: false)
+            .frame(width: 42, height: 42)
+            .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.small, style: .continuous))
     }
 
     @ViewBuilder
     private var artistLinks: some View {
-        #if os(iOS)
-        Text(track.artistNames)
-            .font(isCompact ? .footnote : .system(size: 11.5))
-            .foregroundStyle(.secondary)
-            .lineLimit(1)
-        #else
         let artists = track.artists.filter { $0.id > 0 && !$0.name.isEmpty }
         if artists.isEmpty {
             Text(track.artistNames)
-                .font(isCompact ? .footnote : .system(size: 11.5))
+                .font(.system(size: 11.5))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
         } else {
@@ -262,18 +201,17 @@ struct TrackRow: View {
                     .accessibilityLabel("打开歌手：\(artist.name)")
                 }
             }
-            .font(isCompact ? .footnote : .system(size: 11.5))
+            .font(.system(size: 11.5))
             .foregroundStyle(.secondary)
             .lineLimit(1)
         }
-        #endif
     }
 
     private var rowHeight: CGFloat {
         if style == .albumTrack {
-            return isCompact ? compactAlbumRowHeight : 46
+            return 46
         }
-        return isCompact ? compactRowHeight : 52
+        return 52
     }
 
     @ViewBuilder
@@ -299,12 +237,8 @@ struct TrackRow: View {
 
     private var likeAndDuration: some View {
         HStack(spacing: 8) {
-            #if os(macOS)
             // A saved track already keeps the button visible through its own state.
             TrackDownloadButton(track: track, isVisible: isHovering)
-            #else
-            TrackDownloadButton(track: track, isVisible: false)
-            #endif
             let liked = account.isLiked(track.id)
             Button {
                 Task { await account.toggleLike(trackID: track.id) }
@@ -351,7 +285,6 @@ struct TrackRow: View {
                 }
             }
         }
-        #if os(macOS)
         if !account.isLiked(track.id), let onRecommendationReduced {
             Button(String(localized: "减少推荐"), role: .destructive) {
                 guard !isReducingRecommendation else { return }
@@ -369,7 +302,6 @@ struct TrackRow: View {
             }
             .disabled(isReducingRecommendation)
         }
-        #endif
         Divider()
         if track.album.id > 0 {
             Button("查看专辑") {
@@ -411,7 +343,6 @@ struct PlayingIndicator: View {
     }
 }
 
-#if os(macOS)
 private struct SpectrumBars: NSViewRepresentable {
     var animating: Bool
     func makeNSView(context: Context) -> SpectrumBarsView { SpectrumBarsView() }
@@ -422,18 +353,6 @@ private struct SpectrumBars: NSViewRepresentable {
         view.animating = false
     }
 }
-#else
-private struct SpectrumBars: UIViewRepresentable {
-    var animating: Bool
-    func makeUIView(context: Context) -> SpectrumBarsView { SpectrumBarsView() }
-    func updateUIView(_ view: SpectrumBarsView, context: Context) {
-        view.animating = animating
-    }
-    static func dismantleUIView(_ view: SpectrumBarsView, coordinator: ()) {
-        view.animating = false
-    }
-}
-#endif
 
 final class SpectrumBarsView: PlatformView {
     static let minHeight: CGFloat = 3
@@ -457,9 +376,7 @@ final class SpectrumBarsView: PlatformView {
 
     init() {
         super.init(frame: CGRect(x: 0, y: 0, width: Self.width, height: Self.maxHeight))
-        #if os(macOS)
         wantsLayer = true
-        #endif
         buildBars()
     }
 
@@ -487,17 +404,10 @@ final class SpectrumBarsView: PlatformView {
         apply(scaleForAll: Self.minHeight / Self.maxHeight)
     }
 
-    #if os(macOS)
     override func layout() {
         super.layout()
         positionBars()
     }
-    #else
-    override func layoutSubviews() {
-        super.layoutSubviews()
-        positionBars()
-    }
-    #endif
 
     private func positionBars() {
         for (i, bar) in bars.enumerated() {

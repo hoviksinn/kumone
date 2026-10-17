@@ -1,4 +1,3 @@
-#if os(macOS)
 import Carbon
 import AppKit
 import OSLog
@@ -270,4 +269,3 @@ public enum GlobalHotKeyRegistrationResult {
     case invalidShortcut
     case registrationFailed
 }
-#endif

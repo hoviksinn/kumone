@@ -1,4 +1,3 @@
-#if os(macOS)
 import Foundation
 
 // From a score to audio: bars and beats → seconds → per-sample gain lanes.
@@ -1021,4 +1020,3 @@ enum ScoreCompiler {
         return best
     }
 }
-#endif

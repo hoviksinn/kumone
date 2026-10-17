@@ -11,35 +11,69 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  MACOSX_DEPLOYMENT_TARGET: "26.0"
+
 jobs:
   build-and-test:
+    # GitHub's standard macos-26 image is Apple Silicon; fail early if it changes.
     runs-on: macos-26
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
+      - name: Verify Apple Silicon runner and toolchain
+        run: |
+          test "$(uname -m)" = arm64
+          sw_vers
+          xcodebuild -version
+          swift --version
+
       - name: Build
-        run: swift build
+        run: swift build --build-tests --triple arm64-apple-macosx26.0
+
+      - name: Prepare verified MLX Metal kernels for GPU test
+        run: |
+          BIN_PATH="$(swift build --triple arm64-apple-macosx26.0 --show-bin-path)"
+          Scripts/fetch-mlx-metallib.sh "$BIN_PATH"
+          # MLX resolves kernels beside the binary that owns its symbols. A
+          # SwiftPM test runner may live inside an .xctest bundle instead.
+          while IFS= read -r -d '' test_bin; do
+            cp "$BIN_PATH/mlx.metallib" "$test_bin/mlx.metallib"
+          done < <(find "$BIN_PATH" -type d -path '*.xctest/Contents/MacOS' -print0)
 
       - name: Test
-        run: swift test
+        run: swift test --skip-build --triple arm64-apple-macosx26.0
 
-      # No certificate, notarization, release, or update signing secrets.
-      - name: Build app (universal, unsigned)
+      # Ad-hoc signature only. No certificate, notarization, or release secrets.
+      - name: Build app (macOS 26, arm64)
+        run: FETCH_MLX_METALLIB=1 Scripts/build-app.sh release
+
+      - name: Verify packaged architecture, deployment target and isolation
         run: |
-          KUMONE_TEST_BUILD=1 ARCHES="arm64 x86_64" FETCH_MLX_METALLIB=1 \
-            Scripts/build-app.sh release
+          python3 Scripts/verify-app.py .build/app/Kumone.app \
+            --report .build/app-verification.json
 
       - name: Zip test app (preserve bundle metadata)
         run: |
           ditto -c -k --sequesterRsrc --keepParent \
-            .build/app/Kumone.app .build/Kumone-Test-macOS-universal.zip
+            .build/app/Kumone.app .build/Kumone-Test-macOS26-arm64.zip
+          stat -f 'App ZIP bytes: %z' .build/Kumone-Test-macOS26-arm64.zip
+          {
+            echo '### Kumone Test — macOS 26 / arm64'
+            echo 'Build, tests, architecture/deployment checks and packaging passed.'
+            echo 'Download the artifact below, then extract the outer ZIP and App ZIP.'
+            echo 'See app-verification.json inside the artifact for measured bundle metadata.'
+            echo 'Test in a separate macOS user account; updates are disabled.'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload macOS test app
         uses: actions/upload-artifact@v4
         with:
-          name: Kumone-Test-macOS-universal-${{ github.run_number }}-${{ github.run_attempt }}
-          path: .build/Kumone-Test-macOS-universal.zip
+          name: Kumone-Test-macOS26-arm64-${{ github.run_number }}-${{ github.run_attempt }}
+          path: |
+            .build/Kumone-Test-macOS26-arm64.zip
+            .build/app-verification.json
           if-no-files-found: error
           retention-days: 14
           compression-level: 0

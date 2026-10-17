@@ -1,4 +1,3 @@
-#if os(macOS)
 import Foundation
 import Testing
 
@@ -133,4 +132,3 @@ private func exists(_ url: URL) -> Bool {
         #expect(!exists(lyrics))
     }
 }
-#endif

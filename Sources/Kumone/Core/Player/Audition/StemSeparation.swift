@@ -1,4 +1,3 @@
-#if os(macOS)
 import AVFoundation
 import Foundation
 
@@ -337,4 +336,3 @@ public enum VocalStemCache {
         }
     }
 }
-#endif

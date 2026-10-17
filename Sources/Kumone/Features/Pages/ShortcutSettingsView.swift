@@ -1,4 +1,3 @@
-#if os(macOS)
 import SwiftUI
 import AppKit
 
@@ -170,4 +169,3 @@ struct ShortcutRecorderView: NSViewRepresentable {
         }
     }
 }
-#endif

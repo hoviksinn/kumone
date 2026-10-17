@@ -1,56 +1,26 @@
-# Kumone — developer entry points.
-#
-# `make configure` selects which capabilities the iOS build ships with. CarPlay is
-# opt-in because its entitlement needs per-app approval from Apple, so the default
-# configuration — the one CI and every contributor gets — leaves it out entirely.
-# See the CarPlay section of the README.
-#
-# `make project` regenerates ios/KumoneIOS.xcodeproj from ios/project.yml with
-# XcodeGen; it is only needed after editing project.yml, never for CarPlay.
+# Kumone — macOS 26+ / Apple Silicon developer entry points.
 
 .DEFAULT_GOAL := help
-.PHONY: help configure configure-carplay project build test app ios-test ios-uitest clean
+.PHONY: help build test app clean
 
 help: ## Show this help
 	@echo "Kumone make targets:"
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
 		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
 
-configure: ## Configure the iOS build (default: CarPlay disabled)
-	@Scripts/configure-ios.sh
+build: ## Build the macOS arm64 app with SwiftPM
+	@swift build --triple arm64-apple-macosx26.0
 
-configure-carplay: ## Configure the iOS build with the CarPlay capability enabled
-	@Scripts/configure-ios.sh --carplay
+test: ## Build all tests, prepare Metal kernels and run the full arm64 suite
+	@swift build --build-tests --triple arm64-apple-macosx26.0
+	@set -eu; BIN_PATH="$$(swift build --triple arm64-apple-macosx26.0 --show-bin-path)"; \
+	  Scripts/fetch-mlx-metallib.sh "$$BIN_PATH"; \
+	  find "$$BIN_PATH" -type d -path '*.xctest/Contents/MacOS' -exec cp "$$BIN_PATH/mlx.metallib" {} \;
+	@swift test --skip-build --triple arm64-apple-macosx26.0
 
-project: ## Regenerate ios/KumoneIOS.xcodeproj from ios/project.yml (needs xcodegen)
-	@cd ios && xcodegen generate
-
-build: ## Build the macOS app with SwiftPM
-	@swift build
-
-test: ## Run the macOS SwiftPM test suite
-	@swift test
-
-app: ## Build and bundle the macOS .app (Scripts/build-app.sh)
+app: ## Build and bundle the macOS arm64 .app (Scripts/build-app.sh)
 	@Scripts/build-app.sh $(CONFIG)
 
-IOS_DESTINATION ?= platform=iOS Simulator,name=iPhone 17 Pro
-
-ios-test: ## Run the iOS unit tests on a simulator (override with IOS_DESTINATION=...)
-	@# The KumoneIOS scheme only carries the UI test target, so the package's unit
-	@# tests have to be driven through the package's own scheme.
-	@cd ios/KumoneIOSPackage && xcodebuild test \
-		-scheme KumoneIOSFeature \
-		-destination '$(IOS_DESTINATION)'
-
-ios-uitest: ## Run the iOS UI tests on a simulator
-	@xcodebuild test \
-		-workspace ios/KumoneIOS.xcworkspace \
-		-scheme KumoneIOS \
-		-destination '$(IOS_DESTINATION)'
-
-clean: ## Remove build artifacts and generated CarPlay overlays
-	@swift package clean || true
+clean: ## Remove SwiftPM build artifacts
+	@swift package clean
 	@rm -rf .build
-	@rm -f ios/Config/CarPlay.local.xcconfig
-	@rm -rf ios/Config/Generated

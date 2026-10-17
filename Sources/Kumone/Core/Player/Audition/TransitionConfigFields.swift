@@ -1,4 +1,3 @@
-#if os(macOS)
 import Foundation
 
 // The tuning surface's description of `TransitionPlanner.Config`: one entry
@@ -465,4 +464,3 @@ extension TransitionPlanner.Config {
         }
     }
 }
-#endif

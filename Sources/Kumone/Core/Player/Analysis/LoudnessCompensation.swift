@@ -1,4 +1,3 @@
-#if os(macOS)
 import Foundation
 
 /// Cross-track loudness compensation: one constant playback gain per song, so
@@ -210,4 +209,3 @@ enum LoudnessCompensation {
     /// every rendered envelope so far was computed with.
     static func linearGain(_ db: Float) -> Float { db == 0 ? 1 : pow(10, db / 20) }
 }
-#endif

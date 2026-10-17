@@ -1,4 +1,3 @@
-#if os(macOS)
 import AVFoundation
 import Foundation
 
@@ -1130,4 +1129,3 @@ public enum Audition {
         return out
     }
 }
-#endif

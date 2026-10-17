@@ -285,27 +285,8 @@
 "登录失败，请重试" = "Sign-in failed — please try again";
 "只有一台设备？截图二维码，到网易云音乐 App 的扫一扫里选择相册识别，然后回到这里即可" = "Only one device? Screenshot the QR code, pick it from your photo library in the NetEase Cloud Music app’s scanner, then come back here";
 
-/* iOS updates */
-"检查更新" = "Check for Updates";
-"已是最新版本" = "You’re up to date";
-"发现新版本 %@" = "Version %@ available";
-"前往下载" = "Download";
-"iOS 无法自动更新：下载新版 IPA 后用侧载工具重新安装即可，登录状态和设置会保留" = "iOS can’t self-update: download the new IPA and reinstall it with your sideloading tool — sign-in and settings are kept";
-
-/* iOS updater (TrollStore) */
-"正在检查更新…" = "Checking for updates…";
-"当前版本 %@" = "Current version %@";
-"将下载并通过 TrollStore 自动安装" = "Will download and auto-install via TrollStore";
-"下载并安装" = "Download & Install";
-"未检测到 TrollStore，将打开发布页手动侧载" = "TrollStore not found — the release page will open for manual sideloading";
-"稍后" = "Later";
-"正在下载 %lld%%" = "Downloading %lld%%";
-"已移交 TrollStore 安装" = "Handed off to TrollStore";
-"请在 TrollStore 中完成安装" = "Finish the install in TrollStore";
-"已下载，请用侧载工具安装" = "Downloaded — install with your sideloading tool";
+/* Shared actions and login guidance */
 "完成" = "Done";
-"检测到 TrollStore：可在应用内下载并自动安装新版本" = "TrollStore detected: new versions download and install in-app";
-"未检测到 TrollStore：检查更新会打开发布页，需用侧载工具重新安装（登录状态与设置保留）" = "No TrollStore: Check for Updates opens the release page; reinstall with your sideloading tool (sign-in and settings are kept)";
 "可能被网易云风控拦截而不可用，推荐使用扫码登录" = "May be blocked by NetEase risk control and unavailable — QR sign-in is recommended";
 
 /* Output device menu (macOS) */
@@ -357,7 +338,7 @@
 "文件不完整，请重新下载" = "Incomplete file — download it again";
 "校验未通过，请重新下载" = "Verification failed — download it again";
 
-/* Liked playlist search and sorting (iOS) */
+/* Playlist search and sorting */
 "更多" = "More";
 "在歌单内查找" = "Search in Playlist";
 "排序方式" = "Sort By";

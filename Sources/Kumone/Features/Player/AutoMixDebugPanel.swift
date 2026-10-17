@@ -1,10 +1,9 @@
-#if os(macOS) && DEBUG
+#if DEBUG
 import AppKit
 import SwiftUI
 
 // A developer window for listening tests: what AutoMix is doing, right now,
-// without tailing a log while trying to hear a seam. macOS only — there is no
-// AutoMix on iOS (every plan is `.gapless`), so there is nothing to watch.
+// without tailing a log while trying to hear a seam.
 //
 // DEBUG builds only (as is its menu and window scene in `KumoneApp`).
 // `Scripts/build-app.sh` defaults to the `debug` configuration, so the builds

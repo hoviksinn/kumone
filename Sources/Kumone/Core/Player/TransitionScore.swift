@@ -1,4 +1,3 @@
-#if os(macOS)
 import Foundation
 
 // 转场即乐谱 — the data model. See docs/automix-score-predev.md §2.1.
@@ -541,4 +540,3 @@ public struct TransitionScore: Codable, Equatable, Sendable {
         }
     }
 }
-#endif

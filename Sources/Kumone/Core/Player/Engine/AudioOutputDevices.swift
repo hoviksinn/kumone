@@ -1,4 +1,3 @@
-#if os(macOS)
 import CoreAudio
 import Foundation
 
@@ -639,4 +638,3 @@ struct OutputRouteChangeDamper: Equatable {
         return .apply(target)
     }
 }
-#endif

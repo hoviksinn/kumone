@@ -8,12 +8,6 @@ struct SidebarView: View {
     @State private var showNewPlaylist = false
     @State private var newPlaylistName = ""
     @State private var avatarImage: PlatformImage?
-#if os(iOS)
-    // iPad renders this sidebar layout (IOSMainWindow routes .pad to MainWindow)
-    // and, unlike the iPhone tab bar, had no Settings entry — leaving audio
-    // quality and other options unreachable (#67/#59). Surface it in the footer.
-    @State private var showSettings = false
-#endif
 
     var body: some View {
         List {
@@ -163,52 +157,9 @@ struct SidebarView: View {
             HStack(spacing: 0) {
                 accountEntry
                     .frame(maxWidth: .infinity, alignment: .leading)
-#if os(iOS)
-                // iPad-only entries (macOS has toolbar search + the Cmd+, scene).
-                // The desktop toolbar doesn't surface search/settings on iPad, so
-                // put reliable entries in the always-visible footer (#59/#67).
-                Button {
-                    selection = .search
-                } label: {
-                    Image(systemName: "magnifyingglass")
-                        .font(.system(size: 17))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 40, height: 40)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel(Text("搜索"))
-
-                Button {
-                    showSettings = true
-                } label: {
-                    Image(systemName: "gearshape")
-                        .font(.system(size: 17))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 40, height: 40)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .padding(.trailing, 6)
-                .accessibilityLabel(Text("设置"))
-#endif
             }
         }
         .background(.ultraThinMaterial)
-#if os(iOS)
-        .sheet(isPresented: $showSettings) {
-            NavigationStack {
-                SettingsView()
-                    .navigationTitle("设置")
-                    .navigationBarTitleDisplayMode(.inline)
-                    .toolbar {
-                        ToolbarItem(placement: .topBarTrailing) {
-                            Button("完成") { showSettings = false }
-                        }
-                    }
-            }
-        }
-#endif
     }
 
     @ViewBuilder

@@ -1,4 +1,3 @@
-#if os(macOS)
 import Foundation
 import KumoneCore
 import StemKit
@@ -40,4 +39,3 @@ enum StemSetup {
         }, full: full)
     }
 }
-#endif

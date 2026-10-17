@@ -30,11 +30,7 @@ actor OfflineStore {
         self.directory = directory
         self.validateAudio = validateAudio
         self.freeSpace = freeSpace
-        #if os(macOS)
         self.minimumFreeBytes = minimumFreeBytes ?? 2_000_000_000
-        #else
-        self.minimumFreeBytes = minimumFreeBytes ?? 1_000_000_000
-        #endif
     }
 
     func record(id: String) throws -> OfflineAudioRecord? { try preparedDatabase().record(id: id) }
@@ -380,8 +376,5 @@ actor OfflineStore {
         var values = URLResourceValues()
         values.isExcludedFromBackup = true
         try url.setResourceValues(values)
-        #if os(iOS)
-        try FileManager.default.setAttributes([.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication], ofItemAtPath: url.path)
-        #endif
     }
 }

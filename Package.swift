@@ -1,43 +1,13 @@
 // swift-tools-version: 6.2
-import Foundation
 import PackageDescription
 
-// Command Line Tools (no Xcode) ship Testing.framework outside the default
-// search paths. Opt in with KUMONE_CLT_TESTING=1 to wire it up so `swift test`
-// works there; leave it unset with Xcode (and in CI), where these flags are
-// unnecessary.
-//
-// After a full .build wipe on a CLT-only machine, `swift test` needs a
-// two-phase dance (SPM's derived runner compiles without these settings, so
-// its canImport(Testing) fails and it silently runs 0 tests; but exposing
-// the swiftmodule during the test-target compile kills the framework
-// autolink and the link fails with undefined Testing symbols):
-//   1. Build once (KUMONE_CLT_TESTING=1 swift build --build-tests) with NO
-//      Testing.swiftmodule symlink present, so the test objects compile
-//      against the framework (autolink intact).
-//   2. ln -sfn "$CLT/Frameworks/Testing.framework/Versions/A/Modules/\
-//      Testing.swiftmodule" .build/arm64-apple-macosx/debug/Modules/ ,
-//      rm -rf .build/arm64-apple-macosx/debug/KumonePackageTests.derived ,
-//      then KUMONE_CLT_TESTING=1 swift test — the runner regenerates with
-//      Testing visible while the cached test objects keep their autolink
-//      records.
-let cltDeveloperDir = "/Library/Developer/CommandLineTools/Library/Developer"
-let cltHasTesting = ProcessInfo.processInfo.environment["KUMONE_CLT_TESTING"] == "1"
-let cltTestingSwiftSettings: [SwiftSetting] = cltHasTesting
-    ? [.unsafeFlags(["-F", cltDeveloperDir + "/Frameworks"])]
-    : []
-let cltTestingLinkerSettings: [LinkerSetting] = cltHasTesting
-    ? [.unsafeFlags([
-        "-F", cltDeveloperDir + "/Frameworks",
-        "-Xlinker", "-rpath", "-Xlinker", cltDeveloperDir + "/Frameworks",
-        "-Xlinker", "-rpath", "-Xlinker", cltDeveloperDir + "/usr/lib",
-    ])]
-    : []
+// Supported toolchain: Xcode on macOS 26+ / Apple Silicon.
+// Build and test with --triple arm64-apple-macosx26.0 (see CI and Makefile).
 
 let package = Package(
     name: "Kumone",
     defaultLocalization: "zh-Hans",
-    platforms: [.macOS("15.0"), .iOS("16.0")],
+    platforms: [.macOS("26.0")],
     products: [
         .executable(name: "Kumone", targets: ["KumoneLauncher"]),
         .library(name: "KumoneCore", targets: ["KumoneCore"]),
@@ -64,8 +34,8 @@ let package = Package(
         .target(
             name: "KumoneCore",
             dependencies: [
-                .product(name: "Sparkle", package: "Sparkle", condition: .when(platforms: [.macOS])),
-                .target(name: "KumoneObjC", condition: .when(platforms: [.macOS])),
+                .product(name: "Sparkle", package: "Sparkle"),
+                .target(name: "KumoneObjC"),
             ],
             path: "Sources/Kumone",
             exclude: ["Resources"],
@@ -83,13 +53,13 @@ let package = Package(
             name: "KumoneLauncher",
             dependencies: [
                 "KumoneCore",
-                .product(name: "Sparkle", package: "Sparkle", condition: .when(platforms: [.macOS])),
+                .product(name: "Sparkle", package: "Sparkle"),
                 // AutoMix stem hand-overs: KumoneCore stays MLX-free and takes
                 // a separator as a closure, which `StemSetup` installs here.
                 // The built app therefore needs mlx.metallib beside its binary
                 // — see Scripts/fetch-mlx-metallib.sh — and degrades to the
                 // whole-mix transition path without it.
-                .target(name: "StemKit", condition: .when(platforms: [.macOS])),
+                .target(name: "StemKit"),
             ],
             path: "Sources/KumoneLauncher",
             swiftSettings: [
@@ -100,51 +70,49 @@ let package = Package(
                 .unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks"]),
             ]
         ),
-        // Mel-Band RoFormer vocal separation on MLX/Metal. macOS only: mlx-swift
-        // requires iOS 17+, and AutoMix stem work is macOS-first anyway.
+        // Mel-Band RoFormer vocal separation on Apple Silicon MLX/Metal.
         // Model code adapted from xocialize/mel-roformer-mlx-swift (MIT) — see the
         // per-file headers in Sources/StemKit.
         .target(
             name: "StemKit",
             dependencies: [
-                .product(name: "MLX", package: "mlx-swift", condition: .when(platforms: [.macOS])),
+                .product(name: "MLX", package: "mlx-swift"),
                 .product(
-                    name: "MLXNN", package: "mlx-swift", condition: .when(platforms: [.macOS])),
+                    name: "MLXNN", package: "mlx-swift"),
                 .product(
-                    name: "MLXFFT", package: "mlx-swift", condition: .when(platforms: [.macOS])),
+                    name: "MLXFFT", package: "mlx-swift"),
                 .product(
-                    name: "MLXFast", package: "mlx-swift", condition: .when(platforms: [.macOS])),
+                    name: "MLXFast", package: "mlx-swift"),
             ],
             path: "Sources/StemKit",
             swiftSettings: [
                 .swiftLanguageMode(.v5),
             ]
         ),
-        // Everything about a checkpoint that can be checked without one: key
-        // sets, band tables, manifest digests. No weights, no Metal, no
-        // network — see the file's own header for why that is the interesting
-        // layer.
+        // Checkpoint metadata plus a small GPU runtime smoke test (no model
+        // weights/network). CI installs the verified kernels before testing.
         .testTarget(
             name: "StemKitTests",
-            dependencies: [.target(name: "StemKit", condition: .when(platforms: [.macOS]))],
+            dependencies: [
+                "StemKit",
+                .product(name: "MLX", package: "mlx-swift"),
+            ],
             path: "Tests/StemKitTests",
             swiftSettings: [
                 .swiftLanguageMode(.v5),
-            ] + cltTestingSwiftSettings,
-            linkerSettings: cltTestingLinkerSettings
+            ]
         ),
         .testTarget(
             name: "KumoneCoreTests",
             dependencies: [
                 "KumoneCore",
-                .target(name: "KumoneObjC", condition: .when(platforms: [.macOS])),
+                .target(name: "KumoneObjC"),
             ],
             path: "Tests/KumoneCoreTests",
             resources: [.copy("Fixtures")],
             swiftSettings: [
                 .swiftLanguageMode(.v5),
-            ] + cltTestingSwiftSettings,
-            linkerSettings: cltTestingLinkerSettings
+            ]
         ),
     ]
 )

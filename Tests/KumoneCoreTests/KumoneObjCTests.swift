@@ -1,4 +1,3 @@
-#if os(macOS)
 import AVFoundation
 import KumoneObjC
 import Testing
@@ -22,4 +21,3 @@ import Testing
         #expect(ran)
     }
 }
-#endif

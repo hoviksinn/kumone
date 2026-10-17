@@ -108,7 +108,6 @@ final class SettingsManager: ObservableObject {
         static let unblockSources = "settings.enabledUnblockSources"
         static let autoCheckUpdates = "settings.autoCheckUpdates"
         static let desktopLyrics = "settings.showDesktopLyrics"
-        #if os(macOS)
         static let automix = "settings.automixEnabled"
         static let automixTransitions = "settings.automixTransitions"
         static let automixOrder = "settings.automixOrder"
@@ -116,7 +115,6 @@ final class SettingsManager: ObservableObject {
         static let loudnessCompensation = "settings.loudnessCompensation"
         static let audioCacheLimit = "settings.audioCacheLimit"
         static let outputDevice = "settings.outputDeviceUID"
-        #endif
         static let desktopLyricsCentered = "settings.desktopLyricsCentered"
         static let mainWindowAmbientBackground = "settings.showMainWindowAmbientBackground"
         static let mainWindowAmbientBackgroundIntensity = "settings.mainWindowAmbientBackgroundIntensity"
@@ -183,9 +181,7 @@ final class SettingsManager: ObservableObject {
     @Published var autoCheckUpdates: Bool {
         didSet {
             UserDefaults.standard.set(autoCheckUpdates, forKey: Keys.autoCheckUpdates)
-            #if os(macOS)
             UpdaterManager.shared.setAutomaticChecks(autoCheckUpdates)
-            #endif
         }
     }
 
@@ -224,7 +220,6 @@ final class SettingsManager: ObservableObject {
     @Published var showDesktopLyrics: Bool {
         didSet { UserDefaults.standard.set(showDesktopLyrics, forKey: Keys.desktopLyrics) }
     }
-    #if os(macOS)
 
     /// The AutoMix master switch. Off means no per-track analysis at all, and
     /// every sub-setting below is inert. Opt-in: AutoMix costs CPU (analysis),
@@ -284,7 +279,6 @@ final class SettingsManager: ObservableObject {
     @Published var outputDeviceUID: String {
         didSet { UserDefaults.standard.set(outputDeviceUID, forKey: Keys.outputDevice) }
     }
-    #endif
 
     /// Lock the desktop-lyrics capsule to the horizontal centre of the screen
     /// instead of the free-drag position (#48).
@@ -294,11 +288,9 @@ final class SettingsManager: ObservableObject {
 
     static let mainWindowAmbientBackgroundIntensityRange = 0.5...1.5
 
-    #if os(macOS)
     /// Default song-cache ceiling, shared with `AudioCache` so the two cannot
     /// disagree about what "unset" means.
     nonisolated static let defaultAudioCacheLimit: Int64 = 2_147_483_648  // 2 GB
-    #endif
 
     /// Artwork-tinted overlay on the main app interface.
     @Published var showMainWindowAmbientBackground: Bool {
@@ -346,7 +338,6 @@ final class SettingsManager: ObservableObject {
         }
         autoCheckUpdates = defaults.object(forKey: Keys.autoCheckUpdates) as? Bool ?? true
         showDesktopLyrics = defaults.object(forKey: Keys.desktopLyrics) as? Bool ?? false
-        #if os(macOS)
         automixEnabled = defaults.object(forKey: Keys.automix) as? Bool ?? false
         automixTransitionsEnabled =
             defaults.object(forKey: Keys.automixTransitions) as? Bool ?? true
@@ -357,7 +348,6 @@ final class SettingsManager: ObservableObject {
         audioCacheLimit = (defaults.object(forKey: Keys.audioCacheLimit) as? Int64)
             ?? Self.defaultAudioCacheLimit
         outputDeviceUID = defaults.string(forKey: Keys.outputDevice) ?? ""
-        #endif
         desktopLyricsCentered = defaults.object(forKey: Keys.desktopLyricsCentered) as? Bool ?? false
         showMainWindowAmbientBackground = defaults.object(
             forKey: Keys.mainWindowAmbientBackground

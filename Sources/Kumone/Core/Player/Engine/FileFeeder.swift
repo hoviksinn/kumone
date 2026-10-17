@@ -1,4 +1,3 @@
-#if os(macOS)
 import AVFoundation
 import Foundation
 
@@ -291,4 +290,3 @@ final class FileFeeder: @unchecked Sendable {
         }
     }
 }
-#endif

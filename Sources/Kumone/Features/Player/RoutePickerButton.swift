@@ -1,75 +1,27 @@
-import AVKit
 import Combine
 import SwiftUI
 
-/// System AirPlay / output-route picker (`AVRoutePickerView`), styled to sit
-/// among the transport controls. Because playback is audio-only (AVPlayer with
-/// no video track), selecting a route sends audio to the device — it does not
-/// mirror the screen.
+/// CoreAudio output-device picker, styled to sit among the transport controls.
 struct RoutePickerButton: View {
     var diameter: CGFloat = 40
     var glyphSize: CGFloat = 15
-    var request = 0
     /// White-on-glass (now-playing) vs. accent-aware (player bar).
     var tint: Color = .white.opacity(0.8)
     var background: Color = .white.opacity(0.1)
 
     var body: some View {
-        #if os(macOS)
         // macOS shows an in-app output-device picker instead of the system
         // one: `AVRoutePickerView` on the Mac routes an `AVPlayer` /
         // `AVSampleBufferAudioRenderer`, and macOS playback is an
         // AVAudioEngine graph with no AVPlayer since the dual-deck engine
         // landed, so that button was inert — selecting an AirPlay speaker did
         // nothing at all. The Mac equivalent is choosing the CoreAudio output
-        // device the engine renders to; see `AudioOutputDevices`. `request`
-        // is iOS-only (it opens the system route sheet programmatically).
+        // device the engine renders to; see `AudioOutputDevices`.
         OutputDevicePicker(
             diameter: diameter, glyphSize: glyphSize, tint: tint, background: background)
-        #else
-        RoutePickerRepresentable(
-            tint: PlatformColor(tint), glyphSize: glyphSize, request: request
-        )
-            .frame(width: diameter, height: diameter)
-            .background(background, in: Circle())
-            .help("AirPlay")
-        #endif
     }
 }
 
-#if os(iOS)
-private struct RoutePickerRepresentable: UIViewRepresentable {
-    let tint: UIColor
-    let glyphSize: CGFloat
-    let request: Int
-
-    final class Coordinator {
-        var request: Int
-        init(request: Int) { self.request = request }
-    }
-
-    func makeCoordinator() -> Coordinator { Coordinator(request: request) }
-
-    func makeUIView(context: Context) -> AVRoutePickerView {
-        let view = AVRoutePickerView()
-        view.backgroundColor = .clear
-        view.tintColor = tint
-        view.activeTintColor = UIColor(Theme.accent)
-        view.prioritizesVideoDevices = false // audio routing, not screen mirroring
-        return view
-    }
-
-    func updateUIView(_ view: AVRoutePickerView, context: Context) {
-        view.tintColor = tint
-        guard request != context.coordinator.request else { return }
-        context.coordinator.request = request
-        DispatchQueue.main.async {
-            view.subviews.compactMap { $0 as? UIButton }.first?
-                .sendActions(for: .touchUpInside)
-        }
-    }
-}
-#elseif os(macOS)
 import AppKit
 
 /// macOS output picker: a popover modelled on Control Centre's Sound module.
@@ -452,4 +404,3 @@ enum SoundSettings {
         }
     }
 }
-#endif

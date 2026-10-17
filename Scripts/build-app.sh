@@ -9,14 +9,15 @@ cd "$ROOT"
 
 CONF="${1:-debug}"
 APP_NAME="Kumone"
-BUNDLE_ID="im.missuo.Kumone"
-DISPLAY_NAME="$APP_NAME"
-# CI-only identity; the product and bundle path stay Kumone.app.
-TEST_BUILD="${KUMONE_TEST_BUILD:-0}"
-if [ "$TEST_BUILD" = "1" ]; then
-  BUNDLE_ID="com.hoviksinn.kumone.test"
-  DISPLAY_NAME="Kumone Test"
+BUNDLE_ID="com.hoviksinn.kumone.test"
+DISPLAY_NAME="Kumone Test"
+# This fork only packages isolated test builds; upstream updates stay disabled.
+if [ "$(uname -s)" != "Darwin" ] || [ "$(uname -m)" != "arm64" ]; then
+  echo "error: build on Apple Silicon macOS 26+ with Xcode (or use GitHub Actions)." >&2
+  exit 1
 fi
+export MACOSX_DEPLOYMENT_TARGET=26.0
+TRIPLE="arm64-apple-macosx26.0"
 # Version resolution: environment > version.env > defaults.
 ENV_MARKETING_VERSION="${MARKETING_VERSION:-}"
 ENV_BUILD_NUMBER="${BUILD_NUMBER:-}"
@@ -26,61 +27,16 @@ BUILD_NUMBER="1"
 [ -n "$ENV_MARKETING_VERSION" ] && MARKETING_VERSION="$ENV_MARKETING_VERSION"
 [ -n "$ENV_BUILD_NUMBER" ] && BUILD_NUMBER="$ENV_BUILD_NUMBER"
 
-SPARKLE_FEED_URL="https://github.com/missuo/kumone/releases/latest/download/appcast.xml"
-SPARKLE_PUBLIC_ED_KEY="RHEhllstUuuVrVDCPGrbhg/8LivSzpuZB9X3u3xdV5o="
-
 BUILD_DIR="$ROOT/.build/app"
 APP_BUNDLE="$BUILD_DIR/$APP_NAME.app"
 
-# ARCHES="arm64 x86_64" builds a universal binary (CI release); default is
-# the host architecture for fast dev loops. Each architecture is built on its
-# own and the slices are joined with lipo: a multi-`--arch` SwiftPM build
-# switches to XCBuild, which compiles mlx-swift's .metal sources and so needs
-# a Metal Toolchain that GitHub's runners do not reliably provide. The
-# kernels come from the pinned, sha-checked fetch below instead.
-
-# Extra SwiftPM flags from the environment, e.g. on a Command-Line-Tools-only
-# macOS 27 machine: SWIFT_BUILD_FLAGS="--build-system native" together with
-# SDKROOT=…/MacOSX26.5.sdk (the Swift Build backend wants a `metal` compiler
-# CLT does not ship, and the 27 SDK's SwiftUI macros need a plugin it lacks).
-EXTRA_FLAGS=()
-for flag in ${SWIFT_BUILD_FLAGS:-}; do
-  EXTRA_FLAGS+=("$flag")
-done
-
-# ${arr[@]+...} keeps macOS's bash 3.2 happy under set -u with empty arrays
-build_slice() { # [triple] — prints nothing; sets SLICE_BIN_PATH
-  local triple_flags=()
-  [ -n "${1:-}" ] && triple_flags=(--triple "$1")
-  swift build -c "$CONF" ${EXTRA_FLAGS[@]+"${EXTRA_FLAGS[@]}"} \
-    ${triple_flags[@]+"${triple_flags[@]}"} --product "$APP_NAME"
-  SLICE_BIN_PATH="$(swift build -c "$CONF" ${EXTRA_FLAGS[@]+"${EXTRA_FLAGS[@]}"} \
-    ${triple_flags[@]+"${triple_flags[@]}"} --show-bin-path)"
-}
-
-SLICE_BINARIES=()
-if [ -n "${ARCHES:-}" ]; then
-  for arch in $ARCHES; do
-    build_slice "$arch-apple-macosx"
-    SLICE_BINARIES+=("$SLICE_BIN_PATH/$APP_NAME")
-    # Resources and the metallib search below use the first slice's tree;
-    # every slice carries the same resources.
-    BIN_PATH="${BIN_PATH:-$SLICE_BIN_PATH}"
-  done
-else
-  build_slice ""
-  BIN_PATH="$SLICE_BIN_PATH"
-  SLICE_BINARIES+=("$BIN_PATH/$APP_NAME")
-fi
+# One native arm64 build. SwiftPM supplies resources from this same tree.
+swift build -c "$CONF" --triple "$TRIPLE" --product "$APP_NAME"
+BIN_PATH="$(swift build -c "$CONF" --triple "$TRIPLE" --show-bin-path)"
 
 rm -rf "$BUILD_DIR"
 mkdir -p "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Resources"
-
-if [ "${#SLICE_BINARIES[@]}" -gt 1 ]; then
-  lipo -create "${SLICE_BINARIES[@]}" -output "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
-else
-  cp "${SLICE_BINARIES[0]}" "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
-fi
+cp "$BIN_PATH/$APP_NAME" "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 chmod +x "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 
 # Embed Sparkle.framework (SwiftPM binary artifact) into Contents/Frameworks.
@@ -102,9 +58,6 @@ cp -a "$SPARKLE_FW" "$APP_BUNDLE/Contents/Frameworks/"
 #      $BIN_PATH/mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib and
 #      no file named mlx.metallib exists. Built from the pinned sources by
 #      this same invocation, so it cannot be stale.
-#   3. Any other mlx.metallib under .build (e.g. fetched into another
-#      configuration's directory) — fetch-mlx-metallib.sh sha-checks what it
-#      installs, so this is still the pinned MLX version.
 # Without any of them the app would never pre-render stem hand-overs
 # (StemKit.ResidentStemSeparator.isRunnable says no).
 CMLX_METALLIB="$BIN_PATH/mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib"
@@ -113,7 +66,7 @@ if [ -f "$BIN_PATH/mlx.metallib" ]; then
 elif [ -f "$CMLX_METALLIB" ]; then
   METALLIB="$CMLX_METALLIB"
 else
-  METALLIB="$(find "$ROOT/.build" -name 'mlx.metallib' -not -path "$BUILD_DIR/*" -print -quit 2>/dev/null || true)"
+  METALLIB=""
 fi
 if [ -z "$METALLIB" ] && [ "${FETCH_MLX_METALLIB:-0}" = "1" ]; then
   # CI: fetch the pinned, sha-verified kernels rather than compile them.
@@ -163,10 +116,9 @@ if [ -d "$ICON_SOURCE" ]; then
     --notices --warnings --errors \
     --output-partial-info-plist "$BUILD_DIR/icon-partial.plist" \
     --app-icon AppIcon \
-    --enable-on-demand-resources NO \
     --development-region zh-Hans \
     --target-device mac \
-    --minimum-deployment-target 15.0 \
+    --minimum-deployment-target 26.0 \
     --platform macosx >/dev/null
   if [ ! -f "$APP_BUNDLE/Contents/Resources/Assets.car" ]; then
     echo "ERROR: actool did not produce Assets.car" >&2
@@ -206,7 +158,7 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
     <key>CFBundleShortVersionString</key><string>$MARKETING_VERSION</string>
     <key>CFBundleVersion</key><string>$BUILD_NUMBER</string>
     <key>LSApplicationCategoryType</key><string>public.app-category.music</string>
-    <key>LSMinimumSystemVersion</key><string>15.0</string>
+    <key>LSMinimumSystemVersion</key><string>26.0</string>
     <key>NSHumanReadableCopyright</key><string>© 2026 missuo</string>
     <key>NSPrincipalClass</key><string>NSApplication</string>
     <key>NSHighResolutionCapable</key><true/>
@@ -215,28 +167,36 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
         <key>NSAllowsArbitraryLoads</key><true/>
     </dict>
     <key>KumoneGitCommit</key><string>$GIT_COMMIT</string>
-$(if [ "$TEST_BUILD" = "1" ]; then
-  cat <<'TEST_PLIST'
     <key>KumoneDisableUpdates</key><true/>
     <key>SUEnableAutomaticChecks</key><false/>
     <key>SUAllowsAutomaticUpdates</key><false/>
-TEST_PLIST
-else
-  cat <<UPDATE_PLIST
-    <key>SUFeedURL</key><string>$SPARKLE_FEED_URL</string>
-    <key>SUPublicEDKey</key><string>$SPARKLE_PUBLIC_ED_KEY</string>
-    <key>SUEnableAutomaticChecks</key><true/>
-UPDATE_PLIST
-fi)
 </dict>
 </plist>
 PLIST
 
-if [ -n "${ARCHES:-}" ]; then
-  echo "Binary architectures: $(lipo -archs "$APP_BUNDLE/Contents/MacOS/$APP_NAME")"
-fi
+# The prebuilt Sparkle dependency contains helper binaries. Keep only arm64
+# slices in the test bundle, then apply fresh ad-hoc signatures from inside out.
+FRAMEWORK="$APP_BUNDLE/Contents/Frameworks/Sparkle.framework"
+while IFS= read -r -d '' binary; do
+  if file -b "$binary" | grep -q 'Mach-O'; then
+    if [ "$(lipo -archs "$binary")" != "arm64" ]; then
+      lipo "$binary" -thin arm64 -output "$binary.arm64"
+      mv "$binary.arm64" "$binary"
+    fi
+  fi
+done < <(find "$FRAMEWORK" -type f -print0)
 
-xattr -cr "$APP_BUNDLE" 2>/dev/null || true
-codesign --force --sign - "$APP_BUNDLE" >/dev/null 2>&1 || true
+xattr -cr "$APP_BUNDLE"
+for component in \
+  "$FRAMEWORK/Versions/B/XPCServices/Downloader.xpc" \
+  "$FRAMEWORK/Versions/B/XPCServices/Installer.xpc" \
+  "$FRAMEWORK/Versions/B/Autoupdate" \
+  "$FRAMEWORK/Versions/B/Updater.app" \
+  "$FRAMEWORK" \
+  "$APP_BUNDLE/Contents/MacOS/mlx.metallib" \
+  "$APP_BUNDLE"; do
+  codesign --force --sign - "$component"
+done
+codesign --verify --deep --strict "$APP_BUNDLE"
 
 echo "Built $APP_BUNDLE ($CONF, $GIT_COMMIT)"

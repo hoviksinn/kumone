@@ -103,11 +103,7 @@ enum RubyAttributedString {
     ) -> PlatformFont {
         let base = PlatformFont.systemFont(ofSize: size, weight: weight)
         guard rounded, let descriptor = base.fontDescriptor.withDesign(.rounded) else { return base }
-        #if os(macOS)
         return PlatformFont(descriptor: descriptor, size: size) ?? base
-        #else
-        return PlatformFont(descriptor: descriptor, size: size)
-        #endif
     }
 
     /// Size the text needs when laid out no wider than `width`.

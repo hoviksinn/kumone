@@ -1,5 +1,7 @@
 # AutoMix 转场即乐谱 预研
 
+> 上游音频研究档案：保留技术分析、来源及许可记录。文中的 iOS、旧系统及发布方式属于当时背景；本定制版仅支持 macOS 26+ / arm64，当前构建与测试方式以 [测试指南](MACOS_TEST_BUILDS_CN.md) 为准。
+
 > 状态:设计(2026-08-29) · 未写任何产品代码,待听感负责人审阅后动工
 > 前置阅读:[`automix-spec.md`](automix-spec.md) · [`automix-structure-predev.md`](automix-structure-predev.md) · [`automix-queue-predev.md`](automix-queue-predev.md) · [`automix-stems-s1-report.md`](automix-stems-s1-report.md)
 > 注:文中提到的离线工具(`audition`、`vocaleval`、`stemtool`,及 `docs/audition.md`)已从仓库移除,保留在分支历史中(`git log -- Sources/audition docs/audition.md`)。

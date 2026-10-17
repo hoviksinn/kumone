@@ -1,4 +1,3 @@
-#if os(macOS)
 import Foundation
 
 // Pure decision function: two analyses in, one TransitionPlan out (spec §5).
@@ -1115,7 +1114,7 @@ enum TransitionPlanner {
         // `standDown` **is** the plain path, not a shorter version of the
         // AutoMix one: `.plain(.gapless)` is precisely what this function
         // returns for a pair with no analysis and for a track under the
-        // duration floor, and it is what the iOS build and the AutoMix-off
+        // duration floor, and it is what the AutoMix-off
         // player do for every seam. Tail to head, no overlap, no ride, no
         // style — the most conservative path that already exists, reused rather
         // than re-invented.
@@ -1298,7 +1297,7 @@ enum TransitionPlanner {
         style.intent = intent
         // The ride only makes sense over an overlap — it *is* the seconds the
         // two decks share, held at a corrected level. A `.gapless` seam has no
-        // such window (and `.plain(.gapless)`, the AutoMix-off / iOS path, must
+        // such window (and `.plain(.gapless)`, the AutoMix-off path, must
         // stay bit-identical), so every early return above keeps ride 0.
         return finish(PlannedTransition(plan: crossfade.plan, style: style, rideDB: s.rideDB))
     }
@@ -2938,4 +2937,3 @@ enum TransitionPlanner {
         return (.crossfade(duration: fade, outPoint: outPoint, inPoint: inPoint), nil)
     }
 }
-#endif

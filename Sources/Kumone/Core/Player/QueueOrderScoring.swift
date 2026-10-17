@@ -1,4 +1,3 @@
-#if os(macOS)
 import Foundation
 
 // The AutoMix queue-reorder scorer (docs/automix-queue-predev.md §2.3).
@@ -702,4 +701,3 @@ extension QueueOrderConfig {
         return config
     }
 }
-#endif

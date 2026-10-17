@@ -1,4 +1,3 @@
-#if os(macOS)
 import Foundation
 
 // Timed lyrics, read from the `.lrc` sidecar sitting next to a corpus track.
@@ -155,4 +154,3 @@ extension Audition {
         }
     }
 }
-#endif

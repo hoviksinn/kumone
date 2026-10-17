@@ -8,11 +8,7 @@ struct FMView: View {
     @Environment(\.colorScheme) private var colorScheme
 
     private var isPhone: Bool {
-        #if os(iOS)
-        return UIDevice.current.userInterfaceIdiom == .phone
-        #else
         return false
-        #endif
     }
 
     var body: some View {

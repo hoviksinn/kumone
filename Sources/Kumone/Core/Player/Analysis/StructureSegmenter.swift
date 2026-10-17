@@ -1,4 +1,3 @@
-#if os(macOS)
 import Accelerate
 import Foundation
 
@@ -519,4 +518,3 @@ enum StructureSegmenter {
     }
 
 }
-#endif
