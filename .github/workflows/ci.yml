@@ -24,9 +24,22 @@ jobs:
       - name: Test
         run: swift test
 
-      # Same invocation as release.yml, minus signing / notarization: the
-      # script's own ad-hoc signature is all an unsigned build gets.
+      # No certificate, notarization, release, or update signing secrets.
       - name: Build app (universal, unsigned)
         run: |
-          ARCHES="arm64 x86_64" FETCH_MLX_METALLIB=1 \
+          KUMONE_TEST_BUILD=1 ARCHES="arm64 x86_64" FETCH_MLX_METALLIB=1 \
             Scripts/build-app.sh release
+
+      - name: Zip test app (preserve bundle metadata)
+        run: |
+          ditto -c -k --sequesterRsrc --keepParent \
+            .build/app/Kumone.app .build/Kumone-Test-macOS-universal.zip
+
+      - name: Upload macOS test app
+        uses: actions/upload-artifact@v4
+        with:
+          name: Kumone-Test-macOS-universal-${{ github.run_number }}-${{ github.run_attempt }}
+          path: .build/Kumone-Test-macOS-universal.zip
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0

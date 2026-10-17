@@ -10,6 +10,13 @@ cd "$ROOT"
 CONF="${1:-debug}"
 APP_NAME="Kumone"
 BUNDLE_ID="im.missuo.Kumone"
+DISPLAY_NAME="$APP_NAME"
+# CI-only identity; the product and bundle path stay Kumone.app.
+TEST_BUILD="${KUMONE_TEST_BUILD:-0}"
+if [ "$TEST_BUILD" = "1" ]; then
+  BUNDLE_ID="com.hoviksinn.kumone.test"
+  DISPLAY_NAME="Kumone Test"
+fi
 # Version resolution: environment > version.env > defaults.
 ENV_MARKETING_VERSION="${MARKETING_VERSION:-}"
 ENV_BUILD_NUMBER="${BUILD_NUMBER:-}"
@@ -194,7 +201,7 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
     <key>CFBundleIdentifier</key><string>$BUNDLE_ID</string>
     <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
     <key>CFBundleName</key><string>$APP_NAME</string>
-    <key>CFBundleDisplayName</key><string>$APP_NAME</string>
+    <key>CFBundleDisplayName</key><string>$DISPLAY_NAME</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>$MARKETING_VERSION</string>
     <key>CFBundleVersion</key><string>$BUILD_NUMBER</string>
@@ -208,9 +215,19 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
         <key>NSAllowsArbitraryLoads</key><true/>
     </dict>
     <key>KumoneGitCommit</key><string>$GIT_COMMIT</string>
+$(if [ "$TEST_BUILD" = "1" ]; then
+  cat <<'TEST_PLIST'
+    <key>KumoneDisableUpdates</key><true/>
+    <key>SUEnableAutomaticChecks</key><false/>
+    <key>SUAllowsAutomaticUpdates</key><false/>
+TEST_PLIST
+else
+  cat <<UPDATE_PLIST
     <key>SUFeedURL</key><string>$SPARKLE_FEED_URL</string>
     <key>SUPublicEDKey</key><string>$SPARKLE_PUBLIC_ED_KEY</string>
     <key>SUEnableAutomaticChecks</key><true/>
+UPDATE_PLIST
+fi)
 </dict>
 </plist>
 PLIST
