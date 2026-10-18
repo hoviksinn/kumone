@@ -388,6 +388,12 @@ final class PlaybackEngine: @unchecked Sendable {
     private var pausedSegmentElapsed: TimeInterval?
     private var lastPauseCallDuration: TimeInterval = 0
     private var lastResumeStartDuration: TimeInterval = 0
+    private var lastPauseRequestedAt: UInt64 = 0
+    private var lastPauseExecutedAt: UInt64 = 0
+    private var lastPauseCompletedAt: UInt64 = 0
+    private var lastResumeRequestedAt: UInt64 = 0
+    private var lastResumeExecutedAt: UInt64 = 0
+    private var lastResumeCompletedAt: UInt64 = 0
 
     // Stream backpressure: pause the download when this many ~0.5s buffers
     // are scheduled but unplayed, resume below the low mark.
@@ -607,6 +613,7 @@ final class PlaybackEngine: @unchecked Sendable {
     /// Set through `setOutputSampleSink`; kept so the tap can be put back after
     /// a configuration change rebuilds the graph.
     private var outputSampleSink: (@Sendable (AVAudioPCMBuffer) -> Void)?
+    private var outputTimedSampleSinkForTesting: (@Sendable (AVAudioPCMBuffer, AVAudioTime) -> Void)?
 
     // MARK: - Init
 
@@ -904,9 +911,12 @@ final class PlaybackEngine: @unchecked Sendable {
     /// render boundaries: effects can consume a short silent input interval
     /// while the player is paused. Do not add player.pause()/play() here.
     func pause() {
+        let requestedAt = mach_absolute_time()
         queue.async {
             guard !self.isPaused else { return }
             let pauseBegan = mach_absolute_time()
+            self.lastPauseRequestedAt = requestedAt
+            self.lastPauseExecutedAt = pauseBegan
             self.pausedAtHostTime = pauseBegan
             // Snapshot before pause invalidates node clocks, then refresh from
             // the FINAL render frame if the stopped graph still exposes it.
@@ -932,13 +942,17 @@ final class PlaybackEngine: @unchecked Sendable {
             // This can change gain by several dB. It MUST happen after the
             // engine has stopped rendering, never on the audible side of pause.
             for state in self.deckStates.values { self.settleRideLocked(state) }
+            self.lastPauseCompletedAt = mach_absolute_time()
         }
     }
 
     func resume() {
+        let requestedAt = mach_absolute_time()
         queue.async {
             guard self.isPaused else { return }
             let startBegan = mach_absolute_time()
+            self.lastResumeRequestedAt = requestedAt
+            self.lastResumeExecutedAt = startBegan
             self.ensureEngineRunningLocked()
             self.lastResumeStartDuration = AVAudioTime.seconds(forHostTime:
                 mach_absolute_time() &- startBegan)
@@ -960,6 +974,7 @@ final class PlaybackEngine: @unchecked Sendable {
             for state in self.deckStates.values {
                 self.startNodeIfNeededLocked(state)
             }
+            self.lastResumeCompletedAt = mach_absolute_time()
         }
     }
 
@@ -1450,6 +1465,16 @@ final class PlaybackEngine: @unchecked Sendable {
         var fader: Float
         var renderHostTime: UInt64?
         var resumeClockPending: Bool
+        var nodeRenderFrames: AVAudioFramePosition?
+        var sampleOnlyPlayerFrames: AVAudioFramePosition?
+        var hostOnlyPlayerFrames: AVAudioFramePosition?
+        var observedAtHostTime: UInt64
+        var lastPauseRequestedAt: UInt64
+        var lastPauseExecutedAt: UInt64
+        var lastPauseCompletedAt: UInt64
+        var lastResumeRequestedAt: UInt64
+        var lastResumeExecutedAt: UInt64
+        var lastResumeCompletedAt: UInt64
     }
 
     func transportSnapshotForTesting(_ deck: Deck) -> TransportSnapshot {
@@ -1458,6 +1483,15 @@ final class PlaybackEngine: @unchecked Sendable {
             let renderTime = Self.renderedNodeTime(state.player)
             let rawPlayerFrames = renderTime.flatMap {
                 state.player.playerTime(forNodeTime: $0)?.sampleTime
+            }
+            let sampleOnlyPlayerFrames = renderTime.flatMap { time -> AVAudioFramePosition? in
+                guard time.isSampleTimeValid, time.sampleRate > 0 else { return nil }
+                return state.player.playerTime(forNodeTime:
+                    AVAudioTime(sampleTime: time.sampleTime, atRate: time.sampleRate))?.sampleTime
+            }
+            let hostOnlyPlayerFrames = renderTime.flatMap { time -> AVAudioFramePosition? in
+                guard time.isHostTimeValid else { return nil }
+                return state.player.playerTime(forNodeTime: AVAudioTime(hostTime: time.hostTime))?.sampleTime
             }
             return TransportSnapshot(paused: isPaused, engineRunning: engine.isRunning,
                                      nodePlaying: state.player.isPlaying, generation: state.generation,
@@ -1470,7 +1504,17 @@ final class PlaybackEngine: @unchecked Sendable {
                                      hasPendingFaderFlush: state.pendingFaderRestore != nil,
                                      fader: state.fader,
                                      renderHostTime: renderTime.flatMap { $0.isHostTimeValid ? $0.hostTime : nil },
-                                     resumeClockPending: state.resumedClockNotBeforeHostTime != nil)
+                                     resumeClockPending: state.resumedClockNotBeforeHostTime != nil,
+                                     nodeRenderFrames: renderTime.flatMap { $0.isSampleTimeValid ? $0.sampleTime : nil },
+                                     sampleOnlyPlayerFrames: sampleOnlyPlayerFrames,
+                                     hostOnlyPlayerFrames: hostOnlyPlayerFrames,
+                                     observedAtHostTime: mach_absolute_time(),
+                                     lastPauseRequestedAt: lastPauseRequestedAt,
+                                     lastPauseExecutedAt: lastPauseExecutedAt,
+                                     lastPauseCompletedAt: lastPauseCompletedAt,
+                                     lastResumeRequestedAt: lastResumeRequestedAt,
+                                     lastResumeExecutedAt: lastResumeExecutedAt,
+                                     lastResumeCompletedAt: lastResumeCompletedAt)
         }
     }
 
@@ -1503,6 +1547,15 @@ final class PlaybackEngine: @unchecked Sendable {
         }
     }
 
+    /// Measurement-only consumer of the existing final-output tap. Never
+    /// read the engine queue from this callback: it runs on the render thread.
+    func setOutputTimedSampleSinkForTesting(_ block: (@Sendable (AVAudioPCMBuffer, AVAudioTime) -> Void)?) {
+        queue.sync {
+            outputTimedSampleSinkForTesting = block
+            installOutputSampleSinkLocked()
+        }
+    }
+
     /// An AVAudioNode allows **one** tap per bus — installing a second raises
     /// an NSException and takes the process down, which is exactly the crash
     /// 0179744 shipped: the underwater-hunt capture installed its own tap on
@@ -1513,11 +1566,13 @@ final class PlaybackEngine: @unchecked Sendable {
         let mixer = outputTapNode
         if mixerTapInstalled { mixer.removeTap(onBus: 0); mixerTapInstalled = false }
         let sink = outputSampleSink
+        let timedSink = outputTimedSampleSinkForTesting
         let capture = tapCapture
         let capturing = capture.withLock { $0.file != nil }
-        guard sink != nil || capturing else { return }
+        guard sink != nil || timedSink != nil || capturing else { return }
         mixer.installTap(onBus: 0, bufferSize: 1024, format: nil) { buffer, when in
             sink?(buffer)
+            timedSink?(buffer, when)
             capture.tee(buffer, at: when)
         }
         mixerTapInstalled = true

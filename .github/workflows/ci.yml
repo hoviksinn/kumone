@@ -77,6 +77,7 @@ jobs:
             .build/QieTing-Test-macOS26-arm64.zip
             .build/app-verification.json
             .build/transport-validation.json
+            .build/media-clock-diagnostic.json
           if-no-files-found: error
           retention-days: 14
           compression-level: 0
