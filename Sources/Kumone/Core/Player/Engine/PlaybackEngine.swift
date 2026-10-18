@@ -1566,6 +1566,9 @@ final class PlaybackEngine: @unchecked Sendable {
         var sourceProcessingLatency: TimeInterval
         var sourceOutputPresentationLatency: TimeInterval
         var actualSourceRenderLeadFrames: AVAudioFramePosition?
+        /// Already-scheduled converted/stream buffers, observed on the engine
+        /// queue so offline diagnostics can wait for real feeder preparation.
+        var queuedSourceBufferCount: Int
     }
 
     func transportSnapshotForTesting(_ deck: Deck) -> TransportSnapshot {
@@ -1611,7 +1614,8 @@ final class PlaybackEngine: @unchecked Sendable {
                                      sourceProcessingLatency: state.timePitch.auAudioUnit.latency
                                         + state.eq.auAudioUnit.latency + state.delay.auAudioUnit.latency,
                                      sourceOutputPresentationLatency: state.player.outputPresentationLatency,
-                                     actualSourceRenderLeadFrames: actualSourceRenderLeadFramesLocked(state))
+                                     actualSourceRenderLeadFrames: actualSourceRenderLeadFramesLocked(state),
+                                     queuedSourceBufferCount: state.pendingStreamBuffers)
         }
     }
 
