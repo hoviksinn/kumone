@@ -163,10 +163,14 @@ final class PlaybackEngine: @unchecked Sendable {
         /// Media time (seconds) of player sample 0 for the current schedule;
         /// position = startOffset + playerTime. Reset by every (re)schedule.
         var startOffset: TimeInterval = 0
-        /// A surviving source paused only AFTER the complete graph freezes.
-        /// Its own player timeline now excludes pauses; no host-time debt is
-        /// added to or subtracted from media time.
-        var needsTransportResume = false
+        /// Source-frame observations precede time-pitch, so a slowed AutoMix
+        /// deck counts the frames actually consumed, not output frames × rate.
+        var sourceRenderClock: SourceRenderClock?
+        var sourceClockAnchor: (renderedFrames: UInt64, playerFrames: AVAudioFramePosition)?
+        var sourceFrameOriginAtStart: UInt64 = 0
+        /// Current native/player mapping, measured from rendered source frames.
+        /// Both media->native scheduling and native->media reads use this bias.
+        var nativeClockBiasFrames: AVAudioFramePosition = 0
         /// AVAudioEngine may expose its preceding render timestamp immediately
         /// after restart. Wait for a DIFFERENT native frame, not a wall-clock
         /// deadline. This cannot accumulate paused seconds into the playhead.
@@ -650,6 +654,10 @@ final class PlaybackEngine: @unchecked Sendable {
             connectChainLocked(state, format: graphFormat)
         }
         connectChainLocked(segmentState, format: graphFormat)
+        for state in deckStates.values {
+            state.sourceRenderClock = SourceRenderClock(unit: state.player.auAudioUnit)
+        }
+        segmentState.sourceRenderClock = SourceRenderClock(unit: segmentState.player.auAudioUnit)
         segmentState.fader = 0
         connectMasterChainLocked()
 
@@ -676,7 +684,7 @@ final class PlaybackEngine: @unchecked Sendable {
         removeOverloadListenerLocked()
         // A test observer's raw C context must outlive the last callback.
         // Ordinary app instances have no observer and take no extra action.
-        if deckStates.values.contains(where: { $0.renderCaptureForTesting != nil }) {
+        if deckStates.values.contains(where: { $0.sourceRenderClock != nil || $0.renderCaptureForTesting != nil }) {
             engine.pause()
             for state in deckStates.values { state.renderCaptureForTesting?.remove() }
         }
@@ -738,6 +746,14 @@ final class PlaybackEngine: @unchecked Sendable {
 
     /// Hook a feeder's chunk delivery into the deck's buffer bookkeeping —
     /// the same path streamed audio uses.
+    private var completionCallbackTypeLocked: AVAudioPlayerNodeCompletionCallbackType {
+        // Apple documents dataPlayedBack for device rendering only. Offline
+        // rendering has no device presentation callback; its real completion
+        // is dataRendered, routed through the SAME generation/EOF handlers.
+        engine.isInManualRenderingMode && engine.manualRenderingMode == .offline
+            ? .dataRendered : .dataPlayedBack
+    }
+
     private func wireFeederLocked(_ feeder: FileFeeder, deck: Deck) {
         feeder.onBuffer = { [weak self, weak feeder] buffer in
             guard let self, let feeder,
@@ -753,7 +769,7 @@ final class PlaybackEngine: @unchecked Sendable {
                               Double(buffer.frameLength), Double(generation),
                               Double(state.pendingStreamBuffers))
             state.player.scheduleBuffer(buffer, at: nil, options: [],
-                                        completionCallbackType: .dataPlayedBack) { [weak self] _ in
+                                        completionCallbackType: self.completionCallbackTypeLocked) { [weak self] _ in
                 guard let self else { return }
                 self.queue.async {
                     feeder.bufferPlayed()
@@ -902,11 +918,10 @@ final class PlaybackEngine: @unchecked Sendable {
         }
     }
 
-    /// Freeze the complete DSP graph BEFORE pausing its surviving sources.
-    /// A source-only pause while the graph is still running drains time-pitch /
-    /// EQ / delay through a different boundary. A graph-only pause, however,
-    /// does not pause AVAudioPlayerNode's documented player timeline. Keep
-    /// schedules and DSP, and explicitly freeze both layers in this order.
+    /// Freeze the complete DSP graph and keep every source schedule intact.
+    /// Native player.pause/play discards 3072 prefetched source frames in the
+    /// production offline graph (strict PCM regression). Source render-frame
+    /// observations, rather than host elapsed time, keep media clocks frozen.
     func pause() {
         let requestedAt = mach_absolute_time()
         queue.async {
@@ -924,6 +939,16 @@ final class PlaybackEngine: @unchecked Sendable {
             self.engine.pause()
             self.lastPauseCallDuration = AVAudioTime.seconds(forHostTime:
                 mach_absolute_time() &- pauseBegan)
+            self.capturePauseClocksLocked()
+            // An immediate pause may precede this schedule's first IO cycle.
+            // Do not bootstrap its media zero from a later native timestamp
+            // whose host mapping already includes a long paused interval.
+            for state in self.deckStates.values where state.isPlaying && state.sourceClockAnchor == nil {
+                state.sourceClockAnchor = (state.sourceFrameOriginAtStart, 0)
+            }
+            if self.transition?.phase == .segmentPlaying, self.segmentState.sourceClockAnchor == nil {
+                self.segmentState.sourceClockAnchor = (self.segmentState.sourceFrameOriginAtStart, 0)
+            }
             self.capturePauseClocksLocked()
             self.isPaused = true
             self.seamMeasurementEpoch &+= 1
@@ -944,16 +969,6 @@ final class PlaybackEngine: @unchecked Sendable {
             // engine has stopped rendering, never on the audible side of pause.
             for state in self.deckStates.values {
                 self.settleRideLocked(state)
-                guard state.isPlaying else { continue }
-                if state.player.isPlaying {
-                    state.needsTransportResume = true
-                    state.player.pause()
-                }
-            }
-            if self.transition?.phase == .segmentPlaying,
-               self.segmentState.player.isPlaying {
-                self.segmentState.needsTransportResume = true
-                self.segmentState.player.pause()
             }
             self.lastPauseCompletedAt = mach_absolute_time()
         }
@@ -977,11 +992,11 @@ final class PlaybackEngine: @unchecked Sendable {
                 // of this stopped interval has sounded, including a retry.
                 return
             }
-            // Only native player pause/play changes a player's timeline.
-            // There is no wall-time subtraction and no synthetic position jump.
+            // Surviving nodes keep their scheduled PCM. Source-frame clocks
+            // advance only when the restarted graph actually renders them.
             self.isPaused = false
             self.resumeSurvivingNodesLocked()
-            PlaybackJournal.note(String(format: "transport resume native-player start=%.2fms",
+            PlaybackJournal.note(String(format: "transport resume source-frames start=%.2fms",
                 AVAudioTime.seconds(forHostTime: mach_absolute_time() &- startBegan) * 1000))
             self.lastResumeCompletedAt = mach_absolute_time()
         }
@@ -1001,14 +1016,29 @@ final class PlaybackEngine: @unchecked Sendable {
         }
     }
 
-    private func nativeClockSnapshotLocked(_ state: DeckState) -> (position: TimeInterval, frame: NativeRenderFrame)? {
-        guard let nodeTime = Self.renderedNodeTime(state.player),
-              let playerTime = state.player.playerTime(forNodeTime: nodeTime),
-              playerTime.sampleRate > 0, playerTime.sampleTime >= 0 else { return nil }
+    private func nativeClockSnapshotLocked(_ state: DeckState, requireNativeMapping: Bool = false)
+        -> (position: TimeInterval, frame: NativeRenderFrame)? {
+        guard let source = state.sourceRenderClock?.snapshot,
+              let nodeTime = source.audioTime(sampleRate: graphFormat.sampleRate) else { return nil }
         let frame = NativeRenderFrame(nodeTime)
         if state.renderFrameBeforeResume == frame { return nil }
+        let playerTime = state.player.playerTime(forNodeTime: nodeTime)
+        if requireNativeMapping {
+            guard let playerTime, playerTime.sampleRate > 0, playerTime.sampleTime >= 0 else { return nil }
+        }
+        if state.sourceClockAnchor == nil {
+            guard let playerTime, playerTime.sampleRate > 0, playerTime.sampleTime >= 0 else { return nil }
+            state.sourceClockAnchor = (source.framesAtStart, playerTime.sampleTime)
+        }
         state.renderFrameBeforeResume = nil
-        let position = state.startOffset + Double(playerTime.sampleTime) / playerTime.sampleRate
+        let anchor = state.sourceClockAnchor!
+        guard source.framesAtStart >= anchor.renderedFrames else { return nil }
+        let rendered = AVAudioFramePosition(source.framesAtStart - anchor.renderedFrames)
+        let mediaFrames = anchor.playerFrames + rendered
+        if let playerTime, playerTime.sampleRate > 0, playerTime.sampleTime >= 0 {
+            state.nativeClockBiasFrames = playerTime.sampleTime - mediaFrames
+        }
+        let position = state.startOffset + Double(mediaFrames) / graphFormat.sampleRate
         return (position, frame)
     }
 
@@ -1035,7 +1065,9 @@ final class PlaybackEngine: @unchecked Sendable {
     /// Every explicit schedule gets a fresh media origin; a prior native
     /// transport pause or stale-render guard belongs to the replaced schedule.
     private func resetMediaClockLocked(_ state: DeckState) {
-        state.needsTransportResume = false
+        state.sourceClockAnchor = nil
+        state.sourceFrameOriginAtStart = state.sourceRenderClock?.snapshot?.framesAtEnd ?? 0
+        state.nativeClockBiasFrames = 0
         state.renderFrameBeforeResume = nil
     }
 
@@ -1434,6 +1466,19 @@ final class PlaybackEngine: @unchecked Sendable {
         queue.sync { transportCommandRecords ?? [] }
     }
 
+    /// Exercise AutoMix's production media->native inverse through both native
+    /// AVAudioPlayerNode conversion APIs. This is not a simulated clock.
+    func roundTripMediaTimeForTesting(on deck: Deck, mediaTime: TimeInterval) -> TimeInterval? {
+        queue.sync {
+            let state = deckStates[deck]!
+            guard let frame = playerFrameLocked(state, mediaTime: mediaTime),
+                  let nodeTime = state.player.nodeTime(forPlayerTime:
+                    AVAudioTime(sampleTime: frame, atRate: graphFormat.sampleRate)),
+                  let time = state.player.playerTime(forNodeTime: nodeTime), time.sampleRate > 0 else { return nil }
+            return state.startOffset + Double(time.sampleTime - state.nativeClockBiasFrames) / time.sampleRate
+        }
+    }
+
     private func beginTransportCommandRecordLocked(_ command: String, requestedAt: UInt64,
                                                    accepted: Bool) -> TransportCommandRecord? {
         guard transportCommandRecords != nil else { return nil }
@@ -1485,6 +1530,10 @@ final class PlaybackEngine: @unchecked Sendable {
         var lastResumeRequestedAt: UInt64
         var lastResumeExecutedAt: UInt64
         var lastResumeCompletedAt: UInt64
+        var renderedSourceFrames: UInt64
+        var nativeClockBiasFrames: AVAudioFramePosition
+        var sourceProcessingLatency: TimeInterval
+        var sourceOutputPresentationLatency: TimeInterval
     }
 
     func transportSnapshotForTesting(_ deck: Deck) -> TransportSnapshot {
@@ -1524,7 +1573,12 @@ final class PlaybackEngine: @unchecked Sendable {
                                      lastPauseCompletedAt: lastPauseCompletedAt,
                                      lastResumeRequestedAt: lastResumeRequestedAt,
                                      lastResumeExecutedAt: lastResumeExecutedAt,
-                                     lastResumeCompletedAt: lastResumeCompletedAt)
+                                     lastResumeCompletedAt: lastResumeCompletedAt,
+                                     renderedSourceFrames: state.sourceRenderClock?.snapshot?.framesAtStart ?? 0,
+                                     nativeClockBiasFrames: state.nativeClockBiasFrames,
+                                     sourceProcessingLatency: state.timePitch.auAudioUnit.latency
+                                        + state.eq.auAudioUnit.latency + state.delay.auAudioUnit.latency,
+                                     sourceOutputPresentationLatency: state.player.outputPresentationLatency)
         }
     }
 
@@ -2281,7 +2335,12 @@ final class PlaybackEngine: @unchecked Sendable {
     }
 
     private func markFrameBeforeNativeStartLocked(_ state: DeckState) {
-        if let time = Self.renderedNodeTime(state.player) {
+        if let source = state.sourceRenderClock?.snapshot {
+            if state.sourceClockAnchor == nil { state.sourceFrameOriginAtStart = source.framesAtEnd }
+            if let time = source.audioTime(sampleRate: graphFormat.sampleRate) {
+                state.renderFrameBeforeResume = NativeRenderFrame(time)
+            }
+        } else if let time = Self.renderedNodeTime(state.player) {
             state.renderFrameBeforeResume = NativeRenderFrame(time)
         }
     }
@@ -2299,7 +2358,6 @@ final class PlaybackEngine: @unchecked Sendable {
         // again shortly; every guard above is re-checked on retry.
         markFrameBeforeNativeStartLocked(state)
         guard let exception = KumoneCatchException({ state.player.play() }) else {
-            state.needsTransportResume = false
             return
         }
         if attempt < Self.playRetries {
@@ -2316,36 +2374,7 @@ final class PlaybackEngine: @unchecked Sendable {
     /// and future host releases remain under their own scheduler's control.
     private func resumeSurvivingNodesLocked() {
         for state in deckStates.values where state.isPlaying {
-            if state.needsTransportResume {
-                state.scheduledStartHostTime = nil
-                state.startCheck = nil
-            }
             startNodeIfNeededLocked(state)
-        }
-        if transition?.phase == .segmentPlaying, segmentState.needsTransportResume {
-            resumeSegmentNodeIfNeededLocked(generation: segmentState.generation)
-        }
-    }
-
-    private func resumeSegmentNodeIfNeededLocked(generation: Int, attempt: Int = 0) {
-        guard !isPaused, engine.isRunning, transition?.phase == .segmentPlaying,
-              segmentState.generation == generation, segmentState.needsTransportResume else { return }
-        if segmentState.player.isPlaying {
-            segmentState.needsTransportResume = false
-            return
-        }
-        markFrameBeforeNativeStartLocked(segmentState)
-        guard let exception = KumoneCatchException({ self.segmentState.player.play() }) else {
-            segmentState.needsTransportResume = false
-            return
-        }
-        if attempt < Self.playRetries {
-            queue.asyncAfter(deadline: .now() + Self.playRetryInterval) { [weak self] in
-                self?.resumeSegmentNodeIfNeededLocked(generation: generation, attempt: attempt + 1)
-            }
-        } else {
-            PlaybackJournal.note("segment resume failed after \(attempt + 1) tries: "
-                + "\(exception.reason ?? exception.name.rawValue)")
         }
     }
 
@@ -2393,7 +2422,7 @@ final class PlaybackEngine: @unchecked Sendable {
     /// (including one deliberately ringing an `.echoOut` tail) is never reset.
     private func resetChainDSPLocked(_ state: DeckState, _ by: TraceReason,
                                      keepingEchoTail: Bool = false) {
-        guard DeckChain.shouldResetDSPState(playerIsPlaying: state.player.isPlaying || state.needsTransportResume,
+        guard DeckChain.shouldResetDSPState(playerIsPlaying: state.player.isPlaying,
                                             keepingEchoTail: keepingEchoTail) else { return }
         trace.record(.neutralize, state.traceDeck, .auReset, Double(state.timePitch.rate))
         state.timePitch.reset()
@@ -3729,6 +3758,7 @@ final class PlaybackEngine: @unchecked Sendable {
         let resume = max(position, state.startOffset)
         scheduleSegmentLocked(state, file: file, from: resume, deck: deck, .stallRestart)
         trace.record(.play, state.traceDeck, .stallRestart, resume)
+        markFrameBeforeNativeStartLocked(state)
         if let exception = KumoneCatchException({ state.player.play() }) {
             PlaybackJournal.note("deck stall restart raised deck=\(deck.rawValue) "
                 + "(\(exception.reason ?? exception.name.rawValue))")
@@ -4055,9 +4085,9 @@ final class PlaybackEngine: @unchecked Sendable {
     /// within a few buffers), and muting it here would put a hole at the start
     /// of every gapless hand-over.
     private func beginFaderFlushLocked(_ state: DeckState) {
-        // A native-paused source still holds the old DSP pipeline. An explicit
+        // A graph-paused source still holds the old DSP pipeline. An explicit
         // seek while paused must flush it just like a sounding seek does.
-        guard state.player.isPlaying || state.needsTransportResume else { return }
+        guard state.player.isPlaying else { return }
         if state.pendingFaderRestore == nil {
             state.pendingFaderRestore = state.player.volume
         }
@@ -4320,7 +4350,7 @@ final class PlaybackEngine: @unchecked Sendable {
         }
         state.player.scheduleSegment(
             file, startingFrame: startFrame, frameCount: AVAudioFrameCount(remaining),
-            at: nil, completionCallbackType: .dataPlayedBack
+            at: nil, completionCallbackType: completionCallbackTypeLocked
         ) { [weak self] _ in
             // Fires on stop()/interruption too; the generation check filters those.
             guard let self else { return }
@@ -4356,7 +4386,7 @@ final class PlaybackEngine: @unchecked Sendable {
                      Double(buffer.frameLength), Double(generation),
                      Double(state.pendingStreamBuffers))
         state.player.scheduleBuffer(buffer, at: nil, options: [],
-                                    completionCallbackType: .dataPlayedBack) { [weak self] _ in
+                                    completionCallbackType: completionCallbackTypeLocked) { [weak self] _ in
             guard let self else { return }
             self.queue.async { self.streamBufferPlayedLocked(deck: deck, generation: generation) }
         }
@@ -4618,6 +4648,10 @@ final class PlaybackEngine: @unchecked Sendable {
             updateTempoRampLocked(tr, position: position)
             let rate = Double(max(from.timePitch.rate, 0.01))
             if let segment = tr.segment {
+                // The first post-resume IO cycle establishes the fresh native
+                // mapping. Keep the segment and retry on the existing tick;
+                // do not schedule it through an obsolete pre-pause mapping.
+                guard from.renderFrameBeforeResume == nil else { return }
                 // A pre-rendered hand-over starts one head window early, and on
                 // the render clock rather than on this tick.
                 if position < segment.spliceStart - Self.segmentArmLead {
@@ -4903,11 +4937,13 @@ final class PlaybackEngine: @unchecked Sendable {
         return snapshot.position
     }
 
-    /// Inverse of startOffset + native player frames / sampleRate. Native
-    /// player.pause accounts for transport pauses in BOTH directions, so a
-    /// future seam never inherits a second, host-derived coordinate system.
-    private func playerFrameLocked(_ state: DeckState, mediaTime: TimeInterval) -> AVAudioFramePosition {
-        AVAudioFramePosition(((mediaTime - state.startOffset) * graphFormat.sampleRate).rounded())
+    /// Inverse of the SAME measured source/native mapping used by media reads.
+    /// No host-time compensation or independent AutoMix timeline is introduced.
+    private func playerFrameLocked(_ state: DeckState, mediaTime: TimeInterval) -> AVAudioFramePosition? {
+        // Refresh the native/source mapping before scheduling the inverse.
+        guard nativeClockSnapshotLocked(state, requireNativeMapping: true) != nil else { return nil }
+        return AVAudioFramePosition(((mediaTime - state.startOffset) * graphFormat.sampleRate).rounded())
+            + state.nativeClockBiasFrames
     }
 
     /// Put the segment on the render clock so its first sample lands exactly
@@ -4918,7 +4954,7 @@ final class PlaybackEngine: @unchecked Sendable {
                                   segment: TransitionSegment) -> Bool {
         let from = deckStates[tr.from]!
         let sampleRate = graphFormat.sampleRate
-        let frame = playerFrameLocked(from, mediaTime: segment.spliceStart)
+        guard let frame = playerFrameLocked(from, mediaTime: segment.spliceStart) else { return false }
         let now = mach_absolute_time()
         guard frame >= 0, from.player.isPlaying,
               let start = from.player.nodeTime(
@@ -5071,7 +5107,6 @@ final class PlaybackEngine: @unchecked Sendable {
     private func parkSegmentLocked() {
         pausedSegmentElapsed = nil
         segmentState.renderFrameBeforeResume = nil
-        segmentState.needsTransportResume = false
         segmentState.generation += 1
         segmentState.fader = 0
         segmentState.faderRequest = 0
@@ -5261,7 +5296,7 @@ final class PlaybackEngine: @unchecked Sendable {
             return
         }
         let sampleRate = graphFormat.sampleRate
-        let frame = playerFrameLocked(segmentState, mediaTime: segment.handoffOutStart)
+        guard let frame = playerFrameLocked(segmentState, mediaTime: segment.handoffOutStart) else { return }
         guard let start = segmentState.player.nodeTime(
                 forPlayerTime: AVAudioTime(sampleTime: frame, atRate: sampleRate)),
               start.isHostTimeValid, start.hostTime > mach_absolute_time()

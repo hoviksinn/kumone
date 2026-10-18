@@ -623,7 +623,7 @@ enum PlaybackRescheduleCheck {
 }
 
 /// Historical graph-only-pause workaround, retained with its arithmetic tests.
-/// Production now uses native player pause/play and never calls this helper.
+/// Production now uses actual source-render frames and never calls this helper.
 ///
 /// **The field bug.** `AVAudioEngine.pause()` freezes rendering, and while it
 /// is paused `AVAudioPlayerNode.lastRenderTime` is nil — so far so good. But
@@ -646,7 +646,7 @@ enum PlaybackRescheduleCheck {
 /// and its skew goes back to zero with it — the skew only ever describes the
 /// gap between *this* anchor and the node clock that is still counting from it.
 // Historical arithmetic retained with its regression tests. Production
-// transport now pauses AVAudioPlayerNode itself and does NOT use this helper;
+// transport now observes actual source-render frames and does NOT use this helper;
 // wall-clock subtraction cannot establish the actual rendered media position.
 enum PausedClockSkew {
 

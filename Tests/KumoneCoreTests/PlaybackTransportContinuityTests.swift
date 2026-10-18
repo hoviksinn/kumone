@@ -109,7 +109,7 @@ struct PlaybackTransportContinuityTests {
                 subject.pause()
                 let paused = subject.transportSnapshotForTesting(.a)
                 #expect(paused.paused && !paused.engineRunning)
-                #expect(!paused.nodePlaying, "freeze the DSP graph first, then the native source clock")
+                #expect(paused.nodePlaying, "freeze the complete graph without discarding prefetched source PCM")
                 Thread.sleep(forTimeInterval: 0.025)
                 let stillPaused = subject.transportSnapshotForTesting(.a)
                 #expect(stillPaused.position == paused.position)
@@ -134,10 +134,15 @@ struct PlaybackTransportContinuityTests {
                     "clock must agree in both directions, including after multiple pauses")
         }
         #expect(maximumSignal > 0.1, "a silent capture must never pass a PCM comparison")
+        let futureMediaTime = subject.position(of: .a) + 0.125
+        let roundTrip = try #require(subject.roundTripMediaTimeForTesting(on: .a, mediaTime: futureMediaTime))
+        #expect(abs(roundTrip - futureMediaTime) <= 2 / Self.sampleRate,
+            "AutoMix's native inverse must retain the same media coordinates after repeated pauses")
         try TransportEvidence.record([
             "name": "repeatedPauseResume", "decks": bothDecks ? 2 : 1, "pauseCycles": 3,
             "comparedFramesPerChannel": 48 * Int(Self.quantum), "maximumSignal": maximumSignal,
             "maximumSampleError": maximumSampleError, "maximumClockErrorFrames": maximumClockErrorFrames,
+            "nativeInverseRoundTripErrorFrames": abs(roundTrip - futureMediaTime) * Self.sampleRate,
         ])
     }
 
@@ -259,7 +264,7 @@ struct PlaybackTransportContinuityTests {
         for _ in 0..<8 { _ = try samples(subject); _ = try samples(reference) }
         let originalB = subject.transportSnapshotForTesting(.b)
         subject.pause()
-        #expect(!subject.transportSnapshotForTesting(.b).nodePlaying)
+        #expect(subject.transportSnapshotForTesting(.b).nodePlaying)
         subject.play(deck: .a, from: 1.75)
         reference.play(deck: .a, from: 1.75)
         let resumedB = subject.transportSnapshotForTesting(.b)
@@ -299,6 +304,30 @@ struct PlaybackTransportContinuityTests {
         #expect(!subject.transportSnapshotForTesting(.b).nodePlaying)
         try TransportEvidence.record(["name": "stoppedDeckIsNotResurrected", "maximumSampleError": maximumError,
             "comparedFramesPerChannel": 16 * Int(Self.quantum)])
+    }
+
+    @Test(arguments: [0.1, 1.0, 5.0, 10.0])
+    func pauseBeforeTheFirstRenderKeepsTheScheduleMediaOrigin(heldSeconds: Double) throws {
+        let url = try fixture()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let subject = try engine(playing: url)
+        let reference = try engine(playing: url)
+        defer { subject.stopAll(); reference.stopAll() }
+        // No offline frame has been pulled, and no native clock has rendered.
+        subject.pause()
+        let paused = subject.transportSnapshotForTesting(.a)
+        #expect(paused.position == 0)
+        Thread.sleep(forTimeInterval: heldSeconds)
+        #expect(subject.transportSnapshotForTesting(.a).position == 0)
+        subject.resume()
+        var maximumError: Float = 0
+        for chunk in 0..<24 {
+            maximumError = max(maximumError,
+                expectSamePCM(try samples(subject), try samples(reference), context: "first-render pause chunk \(chunk)"))
+            #expect(abs(subject.position(of: .a) - reference.position(of: .a)) <= 2 / Self.sampleRate)
+        }
+        try TransportEvidence.record(["name": "pauseBeforeFirstRender", "heldSeconds": heldSeconds,
+            "maximumSampleError": maximumError, "comparedFramesPerChannel": 24 * Int(Self.quantum)])
     }
 
 }

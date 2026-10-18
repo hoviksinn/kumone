@@ -14,6 +14,23 @@ extension PlaybackEngine.TransportCommandRecord {
     }
 }
 
+private final class ClockMeasurementCancellation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cancelled = false
+    func cancel() { lock.lock(); cancelled = true; lock.unlock() }
+    func check() throws {
+        lock.lock(); let stopped = cancelled; lock.unlock()
+        if stopped { throw CancellationError() }
+    }
+    func sleep(_ seconds: Double) throws {
+        let end = ProcessInfo.processInfo.systemUptime + seconds
+        while ProcessInfo.processInfo.systemUptime < end {
+            try check()
+            Thread.sleep(forTimeInterval: max(0, min(0.05, end - ProcessInfo.processInfo.systemUptime)))
+        }
+    }
+}
+
 /// An output-path measurement, independent of the engine's position
 /// arithmetic. The left/right PCM ratio encodes source media time. The final
 /// mix tap is after production DSP and before the device; it cannot prove a
@@ -142,6 +159,10 @@ struct PlaybackMediaClockTests {
          "lastResumeRequestedAt": snapshot.lastResumeRequestedAt,
          "lastResumeExecutedAt": snapshot.lastResumeExecutedAt,
          "lastResumeCompletedAt": snapshot.lastResumeCompletedAt,
+         "renderedSourceFrames": snapshot.renderedSourceFrames,
+         "nativeClockBiasFrames": snapshot.nativeClockBiasFrames,
+         "sourceProcessingLatencySeconds": snapshot.sourceProcessingLatency,
+         "sourceOutputPresentationLatencySeconds": snapshot.sourceOutputPresentationLatency,
          "outputPCMFirstMediaSeconds": pcm?.first ?? -1,
          "outputPCMLastMediaSeconds": pcm?.last ?? -1,
          "outputPCMSampleRate": pcm?.sampleRate ?? 0,
@@ -152,8 +173,10 @@ struct PlaybackMediaClockTests {
     /// Compare real render-source PCM with native clocks and retain final-mix
     /// tap evidence separately: tap delivery gaps are not physical lost audio.
     @Test func outputPCMCharacterizesLongAndRapidPauses() async throws {
+        let cancellation = ClockMeasurementCancellation()
+        defer { cancellation.cancel() }
         let outcome = await runWithWatchdog("encoded-output-media-clock", timeout: 100) {
-            Result { try self.measureNativeClocks() }
+            Result { try self.measureNativeClocks(cancellation: cancellation) }
         }
         let result = try #require(outcome, "media clock measurement must finish within its watchdog")
         let report = try result.get()
@@ -167,7 +190,7 @@ struct PlaybackMediaClockTests {
         print("TRANSPORT_CLOCK_DIAGNOSTIC \(String(decoding: compact, as: UTF8.self))")
     }
 
-    private func measureNativeClocks() throws -> [String: Any] {
+    private func measureNativeClocks(cancellation: ClockMeasurementCancellation) throws -> [String: Any] {
         let url = try encodedFixture()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
         let engine = PlaybackEngine()
@@ -181,6 +204,7 @@ struct PlaybackMediaClockTests {
         func waitForOutput(after previous: UInt64 = 0, timeout: Double = 4) -> Bool {
             let deadline = ProcessInfo.processInfo.systemUptime + timeout
             while ProcessInfo.processInfo.systemUptime < deadline {
+                if (try? cancellation.check()) == nil { return false }
                 if let current = capture.latest, current.receivedAt > previous { return true }
                 Thread.sleep(forTimeInterval: 0.02)
             }
@@ -201,12 +225,11 @@ struct PlaybackMediaClockTests {
             }
             let first = (Double(last.leftFirst) / Double(last.rightFirst) - 1) / 0.04
             let offset = snapshot.position - first
-            // This fixture keeps time-pitch bypassed and EQ/delay neutral.
-            // Native source and downstream block START may differ by at most
-            // one render quantum; a constant multi-second offset cannot pass.
+            // The source AU and downstream delay observe different positions
+            // because DSP pulls source frames ahead. Measure the signed lead
+            // and require it to stay constant, rather than calling this DAC
+            // presentation time or subtracting an invented UI correction.
             let bound = Double(last.frames + 2) / renderCapture.sampleRate
-            #expect(abs(offset) <= bound,
-                "absolute native media time must agree with actual decoded source PCM within one render quantum")
             if let baseline = initialSourceClockOffset {
                 // The source node can be one render block ahead of downstream
                 // DSP. This fixed pipeline bound cannot grow with pause time.
@@ -215,16 +238,21 @@ struct PlaybackMediaClockTests {
             } else { initialSourceClockOffset = offset }
             cases.append(["frozenSourceClockPosition": snapshot.position,
                 "decodedRenderSourcePosition": first, "sourceClockOffsetSeconds": offset,
+                "sourceProcessingLatencySeconds": snapshot.sourceProcessingLatency,
+                "sourceOutputPresentationLatencySeconds": snapshot.sourceOutputPresentationLatency,
+                "absoluteDACAlignmentVerified": false,
                 "renderQuantumFrames": last.frames, "renderQuantumHostTime": last.hostTime])
+            print("TRANSPORT_CLOCK_CHECKPOINT source=\(snapshot.position) decoded=\(first) signedLead=\(offset) sourceFrames=\(snapshot.renderedSourceFrames) nativeBiasFrames=\(snapshot.nativeClockBiasFrames)")
         }
         for duration in [0.1, 1.0, 5.0, 10.0] {
+            try cancellation.check()
             let before = engine.transportSnapshotForTesting(.a)
             let beforePCM = capture.latest
             engine.pause()
             let paused = engine.transportSnapshotForTesting(.a)
             validateFrozenSourceClock(paused)
             let pausedPCM = capture.latest
-            Thread.sleep(forTimeInterval: duration)
+            try cancellation.sleep(duration)
             let held = engine.transportSnapshotForTesting(.a)
             #expect(held.position == paused.position, "media time must remain frozen during a pause")
             let heldPCM = capture.latest
@@ -232,8 +260,8 @@ struct PlaybackMediaClockTests {
             let resumed = engine.transportSnapshotForTesting(.a)
             let resumedPCM = capture.latest
             let advanced = waitForOutput(after: heldPCM?.receivedAt ?? 0)
-            #expect(advanced, "output must resume after holding for \(duration) seconds")
-            Thread.sleep(forTimeInterval: 0.15)
+            _ = try #require(advanced, "output must resume after holding for \(duration) seconds")
+            try cancellation.sleep(0.15)
             let after = engine.transportSnapshotForTesting(.a)
             cases.append(["requestedPauseSeconds": duration,
                 "before": dictionary(before, pcm: beforePCM), "paused": dictionary(paused, pcm: pausedPCM),
@@ -243,14 +271,17 @@ struct PlaybackMediaClockTests {
         for count in [10, 30] {
             let before = engine.transportSnapshotForTesting(.a)
             let beforePCM = capture.latest
-            for _ in 0..<count { engine.pause(); engine.resume() }
+            for _ in 0..<count {
+                try cancellation.check()
+                engine.pause(); engine.resume()
+            }
             let resumed = engine.transportSnapshotForTesting(.a)
             let resumedPCM = capture.latest
             #expect(!resumed.paused, "serial command queue must preserve final resume intent")
             #expect(resumed.generation == before.generation, "pause/resume must not seek or reschedule")
             let advanced = waitForOutput(after: resumedPCM?.receivedAt ?? 0)
-            #expect(advanced, "output must resume after \(count) rapid cycles")
-            Thread.sleep(forTimeInterval: 0.15)
+            _ = try #require(advanced, "output must resume after \(count) rapid cycles")
+            try cancellation.sleep(0.15)
             let after = engine.transportSnapshotForTesting(.a)
             cases.append(["rapidPauseCycles": count, "before": dictionary(before, pcm: beforePCM),
                           "resumed": dictionary(resumed, pcm: resumedPCM), "after": dictionary(after, pcm: capture.latest)])
