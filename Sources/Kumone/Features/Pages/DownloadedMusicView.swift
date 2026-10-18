@@ -22,7 +22,11 @@ struct DownloadedMusicView: View {
         let displayed = tracks
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                if isSelecting { selectionHeader(tracks: displayed) } else { header(tracks: displayed) }
+                if SongDownloadUI.isAvailable, isSelecting {
+                    selectionHeader(tracks: displayed)
+                } else {
+                    header(tracks: displayed)
+                }
 
                 if !downloads.isReady, downloads.errorMessage == nil {
                     ProgressView().frame(maxWidth: .infinity, minHeight: 300)
@@ -31,10 +35,13 @@ struct DownloadedMusicView: View {
                         .frame(minHeight: 300)
                 } else if displayed.isEmpty {
                     EmptyStateView(icon: "arrow.down.circle", title: "还没有下载歌曲",
-                                   subtitle: "在歌曲菜单或歌单页面选择下载，即可离线收听")
+                                   subtitle: SongDownloadUI.isAvailable
+                                       ? "在歌曲菜单或歌单页面选择下载，即可离线收听"
+                                       : "歌曲下载暂不可用，已有音乐文件和播放缓存会继续保留")
                         .frame(minHeight: 300)
                 } else {
-                    TrackListView(tracks: displayed, source: .none, selection: isSelecting ? $selectedIDs : nil)
+                    TrackListView(tracks: displayed, source: .none,
+                                  selection: SongDownloadUI.isAvailable && isSelecting ? $selectedIDs : nil)
                         .disabled(isRemoving)
                         .padding(.horizontal, Theme.Layout.contentInset - 10)
                 }
@@ -47,14 +54,19 @@ struct DownloadedMusicView: View {
         .background(Platform.windowBackgroundColor)
         .navigationTitle(collection?.name ?? String(localized: "已下载"))
         .task { await downloads.start(); await downloads.refreshLibrary() }
-        .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                Button(isSelecting ? String(localized: "完成") : String(localized: "选择")) {
-                    selectedIDs = []
-                    isSelecting.toggle()
+        .safeAreaInset(edge: .top, spacing: 0) {
+            if SongDownloadUI.isAvailable {
+                HStack {
+                    Spacer()
+                    Button(isSelecting ? String(localized: "完成") : String(localized: "选择")) {
+                        selectedIDs = []
+                        isSelecting.toggle()
+                    }
+                    .disabled(isRemoving || (!isSelecting && displayed.isEmpty))
+                    .accessibilityIdentifier("select-downloads")
                 }
-                .disabled(isRemoving || (!isSelecting && displayed.isEmpty))
-                .accessibilityIdentifier("select-downloads")
+                .padding(.horizontal, Theme.Layout.contentInset)
+                .padding(.vertical, 8)
             }
         }
         .onChange(of: displayed.map(\.id)) { ids in
@@ -156,7 +168,14 @@ struct DownloadedMusicView: View {
         .fixedSize(horizontal: true, vertical: false)
     }
 
+    @ViewBuilder
     private var downloadQueueButton: some View {
+        if SongDownloadUI.isAvailable {
+            availableDownloadQueueButton
+        }
+    }
+
+    private var availableDownloadQueueButton: some View {
         Button {
             openDestination(.downloadTasks)
         } label: {
@@ -195,6 +214,18 @@ struct DownloadedMusicView: View {
 
 /// Secondary download controls follow the music pages' spacing and row styling.
 struct DownloadTasksView: View {
+    var body: some View {
+        if SongDownloadUI.isAvailable {
+            AvailableDownloadTasksView()
+        } else {
+            EmptyStateView(icon: "arrow.down.circle", title: "歌曲下载暂不可用",
+                           subtitle: "已有音乐文件、下载记录和播放缓存会继续保留")
+                .navigationTitle("下载任务")
+        }
+    }
+}
+
+private struct AvailableDownloadTasksView: View {
     @ObservedObject private var downloads = DownloadManager.shared
     @State private var confirmCancelAll = false
 
@@ -352,6 +383,17 @@ private struct DownloadTaskRow: View {
 struct TrackDownloadActions: View {
     let track: Track
     var showsIcons = false
+
+    var body: some View {
+        if SongDownloadUI.isAvailable {
+            AvailableTrackDownloadActions(track: track, showsIcons: showsIcons)
+        }
+    }
+}
+
+private struct AvailableTrackDownloadActions: View {
+    let track: Track
+    var showsIcons = false
     @ObservedObject private var downloads = DownloadManager.shared
     @EnvironmentObject private var account: AccountStore
     @EnvironmentObject private var settings: SettingsManager
@@ -399,6 +441,21 @@ struct TrackDownloadActions: View {
 }
 
 struct DownloadCollectionButton: View {
+    let tracks: [Track]
+    let owner: String
+    let name: String
+    var enabled = true
+    var compact = false
+
+    var body: some View {
+        if SongDownloadUI.isAvailable {
+            AvailableDownloadCollectionButton(tracks: tracks, owner: owner, name: name,
+                                              enabled: enabled, compact: compact)
+        }
+    }
+}
+
+private struct AvailableDownloadCollectionButton: View {
     let tracks: [Track]
     let owner: String
     let name: String

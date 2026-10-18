@@ -44,7 +44,7 @@ struct SkeletonShelf: View {
             SkeletonView(cornerRadius: 4).frame(width: 120, height: 20)
             GeometryReader { geometry in
                 let cardSize = Theme.Layout.fittedShelfCardSize(availableWidth: geometry.size.width, leadingInset: 0)
-                ScrollView(.horizontal, showsIndicators: false) {
+                ScrollView(.horizontal) {
                     HStack(spacing: 16) {
                         ForEach(0..<6, id: \.self) { _ in
                             SkeletonCardView(size: cardSize)

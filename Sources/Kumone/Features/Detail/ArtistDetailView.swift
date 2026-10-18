@@ -40,7 +40,7 @@ struct ArtistDetailView: View {
                         SectionHeader(title: "专辑")
                             .padding(.horizontal, Theme.Layout.contentInset)
 
-                        ScrollView(.horizontal, showsIndicators: false) {
+                        ScrollView(.horizontal) {
                             HStack(spacing: 16) {
                                 Spacer().frame(width: (Theme.Layout.contentInset) - 16)
                                 ForEach(albums) { album in
@@ -55,7 +55,7 @@ struct ArtistDetailView: View {
                         SectionHeader(title: "EP 与单曲")
                             .padding(.horizontal, Theme.Layout.contentInset)
 
-                        ScrollView(.horizontal, showsIndicators: false) {
+                        ScrollView(.horizontal) {
                             HStack(spacing: 16) {
                                 Spacer().frame(width: (Theme.Layout.contentInset) - 16)
                                 ForEach(epsAndSingles) { album in
@@ -70,7 +70,7 @@ struct ArtistDetailView: View {
                         SectionHeader(title: "相似歌手")
                             .padding(.horizontal, Theme.Layout.contentInset)
 
-                        ScrollView(.horizontal, showsIndicators: false) {
+                        ScrollView(.horizontal) {
                             HStack(spacing: 16) {
                                 Spacer().frame(width: (Theme.Layout.contentInset) - 16)
                                 ForEach(similar) { sim in

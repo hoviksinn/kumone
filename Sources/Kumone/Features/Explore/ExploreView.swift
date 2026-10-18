@@ -132,7 +132,7 @@ struct ExploreView: View {
     }
 
     private var categoryChips: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
+        ScrollView(.horizontal) {
             HStack(spacing: 8) {
                 Spacer().frame(width: Theme.Layout.contentInset - 8)
                 ForEach(ExploreViewModel.categories, id: \.self) { category in

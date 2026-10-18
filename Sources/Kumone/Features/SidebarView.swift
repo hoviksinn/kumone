@@ -17,7 +17,7 @@ struct SidebarView: View {
                 row(.fm, title: "漫游", icon: "wave.3.right.circle.fill")
             }
 
-            if !account.hasAuthCookie {
+            if !account.hasAuthCookie, SongDownloadUI.isAvailable {
                 Section("我的") {
                     row(.downloaded, title: "已下载", icon: "arrow.down.circle.fill")
                 }
@@ -25,7 +25,9 @@ struct SidebarView: View {
             if account.hasAuthCookie {
                 Section("我的") {
                     row(.likedSongs, title: "我喜欢的音乐", icon: "heart.fill")
-                    row(.downloaded, title: "已下载", icon: "arrow.down.circle.fill")
+                    if SongDownloadUI.isAvailable {
+                        row(.downloaded, title: "已下载", icon: "arrow.down.circle.fill")
+                    }
                     row(.daily, title: "每日推荐", icon: "calendar")
                     row(.recents, title: "最近播放", icon: "clock.fill")
                     row(.collections, title: "我的收藏", icon: "star.fill")

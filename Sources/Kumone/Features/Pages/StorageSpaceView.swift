@@ -77,20 +77,24 @@ struct StorageSpaceView: View {
             }
 
             Section {
-                Button(action: onManageDownloads) {
-                    HStack {
-                        Label("下载的音乐", systemImage: "arrow.down.circle")
-                        Spacer()
-                        Text(size(.downloads)).foregroundStyle(.secondary).monospacedDigit()
-                        Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(.tertiary)
+                if SongDownloadUI.isAvailable {
+                    Button(action: onManageDownloads) {
+                        HStack {
+                            Label("下载的音乐", systemImage: "arrow.down.circle")
+                            Spacer()
+                            Text(size(.downloads)).foregroundStyle(.secondary).monospacedDigit()
+                            Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(.tertiary)
+                        }
+                        .foregroundStyle(.primary)
+                        .contentShape(Rectangle())
                     }
-                    .foregroundStyle(.primary)
-                    .contentShape(Rectangle())
+                    .buttonStyle(.plain)
+                } else {
+                    usageRow("已保留的音乐文件", icon: "arrow.down.circle", category: .downloads)
                 }
-                .buttonStyle(.plain)
             } footer: {
                 if let other = model.snapshot?.otherAccountDownloads, other > 0 {
-                    Text("包含其他账号的 \(format(other)) 下载。管理页显示当前账号的歌曲。")
+                    Text("包含其他账号的 \(format(other)) 音乐文件。现有文件会继续保留。")
                 }
             }
 

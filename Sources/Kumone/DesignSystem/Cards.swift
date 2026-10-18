@@ -110,7 +110,7 @@ struct Shelf<Content: View>: View {
         VStack(alignment: .leading, spacing: 14) {
             SectionHeader(title: title, action: seeAll)
                 .padding(.horizontal, Theme.Layout.contentInset)
-            ScrollView(.horizontal, showsIndicators: false) {
+            ScrollView(.horizontal) {
                 cards
                     .padding(.vertical, 6)
             }
