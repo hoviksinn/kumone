@@ -622,8 +622,8 @@ enum PlaybackRescheduleCheck {
     }
 }
 
-/// **What a global pause does to a player node's clock**, as arithmetic that
-/// can be checked without an engine.
+/// Historical graph-only-pause workaround, retained with its arithmetic tests.
+/// Production now uses native player pause/play and never calls this helper.
 ///
 /// **The field bug.** `AVAudioEngine.pause()` freezes rendering, and while it
 /// is paused `AVAudioPlayerNode.lastRenderTime` is nil — so far so good. But
@@ -640,11 +640,14 @@ enum PlaybackRescheduleCheck {
 /// is past the transition's out point (230.6 s) — so the crossfade fired the
 /// instant playback came back.
 ///
-/// **The fix.** Every pause that a node's schedule survives adds its wall
+/// **The former workaround.** Every pause that a node's schedule survives adds its wall
 /// duration to that deck's `pauseSkew`, and every position read subtracts it.
 /// A deck that is re-cued or started fresh gets a new anchor (`startOffset`)
 /// and its skew goes back to zero with it — the skew only ever describes the
 /// gap between *this* anchor and the node clock that is still counting from it.
+// Historical arithmetic retained with its regression tests. Production
+// transport now pauses AVAudioPlayerNode itself and does NOT use this helper;
+// wall-clock subtraction cannot establish the actual rendered media position.
 enum PausedClockSkew {
 
     /// Accumulate: two pauses in one schedule are two lots of wall clock the

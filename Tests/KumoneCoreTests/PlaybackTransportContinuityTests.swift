@@ -109,7 +109,7 @@ struct PlaybackTransportContinuityTests {
                 subject.pause()
                 let paused = subject.transportSnapshotForTesting(.a)
                 #expect(paused.paused && !paused.engineRunning)
-                #expect(paused.nodePlaying, "the entire graph freezes; do not pause individual sources")
+                #expect(!paused.nodePlaying, "freeze the DSP graph first, then the native source clock")
                 Thread.sleep(forTimeInterval: 0.025)
                 let stillPaused = subject.transportSnapshotForTesting(.a)
                 #expect(stillPaused.position == paused.position)
@@ -149,6 +149,7 @@ struct PlaybackTransportContinuityTests {
         defer { reference.stopAll(); subject.stopAll() }
         for _ in 0..<8 { _ = try samples(reference); _ = try samples(subject) }
         let before = subject.transportSnapshotForTesting(.a)
+        subject.enableTransportCommandTraceForTesting()
         // The public asynchronous command queue is exercised, including commands
         // queued before the preceding command has finished.
         for _ in 0..<24 {
@@ -160,6 +161,15 @@ struct PlaybackTransportContinuityTests {
         #expect(after.startOffset == before.startOffset)
         #expect(!after.hasPendingPause && after.pauseSkew == 0)
         #expect(abs(after.position - before.position) <= 2 / Self.sampleRate)
+        let commands = subject.transportCommandTraceForTesting()
+        #expect(commands.count == 96)
+        for (index, command) in commands.enumerated() {
+            #expect(command.sequence == UInt64(index + 1))
+            #expect(command.command == (index % 4 < 2 ? "pause" : "resume"))
+            #expect(command.accepted == (index % 2 == 0), "duplicate commands must be harmless no-ops")
+            #expect(command.requestedAt <= command.executedAt && command.executedAt <= command.completedAt)
+            if index > 0 { #expect(commands[index - 1].completedAt <= command.executedAt) }
+        }
         var maximumSampleError: Float = 0
         for chunk in 0..<24 {
             maximumSampleError = max(maximumSampleError,
@@ -169,6 +179,7 @@ struct PlaybackTransportContinuityTests {
             "name": "rapidAndDuplicateCommands", "pauseCycles": 24, "commands": 96,
             "comparedFramesPerChannel": 24 * Int(Self.quantum), "maximumSampleError": maximumSampleError,
             "immediateClockErrorFrames": abs(after.position - before.position) * Self.sampleRate,
+            "executedCommandRecords": commands.map(\.evidence),
         ])
     }
 
@@ -238,4 +249,56 @@ struct PlaybackTransportContinuityTests {
             "referenceFlushPending": uninterrupted.hasPendingFaderFlush,
         ])
     }
+
+    @Test func explicitPlayFromAPausedSessionResumesTheOtherSurvivingDeck() throws {
+        let url = try fixture()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let subject = try engine(playing: url, bothDecks: true)
+        let reference = try engine(playing: url, bothDecks: true)
+        defer { subject.stopAll(); reference.stopAll() }
+        for _ in 0..<8 { _ = try samples(subject); _ = try samples(reference) }
+        let originalB = subject.transportSnapshotForTesting(.b)
+        subject.pause()
+        #expect(!subject.transportSnapshotForTesting(.b).nodePlaying)
+        subject.play(deck: .a, from: 1.75)
+        reference.play(deck: .a, from: 1.75)
+        let resumedB = subject.transportSnapshotForTesting(.b)
+        #expect(resumedB.nodePlaying && !resumedB.paused)
+        #expect(resumedB.generation == originalB.generation, "surviving deck must not be rescheduled")
+        #expect(resumedB.startOffset == originalB.startOffset)
+        var maximumError: Float = 0
+        for chunk in 0..<24 {
+            maximumError = max(maximumError,
+                expectSamePCM(try samples(subject), try samples(reference), context: "explicit-play survivor chunk \(chunk)"))
+            #expect(abs(subject.position(of: .b) - reference.position(of: .b)) <= 2 / Self.sampleRate)
+        }
+        try TransportEvidence.record(["name": "explicitPlayResumesSurvivingDeck", "decks": 2,
+            "maximumSampleError": maximumError, "comparedFramesPerChannel": 24 * Int(Self.quantum)])
+    }
+
+    @Test func aDeckStoppedDuringGlobalPauseIsNotResurrected() throws {
+        let url = try fixture()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let subject = try engine(playing: url, bothDecks: true)
+        let reference = try engine(playing: url, bothDecks: true)
+        defer { subject.stopAll(); reference.stopAll() }
+        for _ in 0..<8 { _ = try samples(subject); _ = try samples(reference) }
+        let originalA = subject.transportSnapshotForTesting(.a)
+        subject.pause()
+        subject.stop(deck: .b)
+        subject.resume()
+        reference.stop(deck: .b)
+        let stopped = subject.transportSnapshotForTesting(.b)
+        #expect(!stopped.nodePlaying && stopped.position == 0)
+        #expect(subject.transportSnapshotForTesting(.a).generation == originalA.generation)
+        var maximumError: Float = 0
+        for chunk in 0..<16 {
+            maximumError = max(maximumError,
+                expectSamePCM(try samples(subject), try samples(reference), context: "stopped deck chunk \(chunk)"))
+        }
+        #expect(!subject.transportSnapshotForTesting(.b).nodePlaying)
+        try TransportEvidence.record(["name": "stoppedDeckIsNotResurrected", "maximumSampleError": maximumError,
+            "comparedFramesPerChannel": 16 * Int(Self.quantum)])
+    }
+
 }

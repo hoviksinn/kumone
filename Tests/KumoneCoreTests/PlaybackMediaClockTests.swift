@@ -3,7 +3,18 @@ import Foundation
 import Testing
 @testable import KumoneCore
 
-/// A physical-output-path measurement, independent of the engine's position
+extension PlaybackEngine.TransportCommandRecord {
+    var evidence: [String: Any] {
+        ["sequence": sequence, "command": command,
+         "requestedAtHostTime": requestedAt, "executedAtHostTime": executedAt,
+         "completedAtHostTime": completedAt, "accepted": accepted,
+         "pausedAfter": pausedAfter, "engineRunningAfter": engineRunningAfter,
+         "deckAPlayingAfter": deckAPlayingAfter, "deckBPlayingAfter": deckBPlayingAfter,
+         "segmentPlayingAfter": segmentPlayingAfter]
+    }
+}
+
+/// An output-path measurement, independent of the engine's position
 /// arithmetic. The left/right PCM ratio encodes source media time. The final
 /// mix tap is after production DSP and before the device; it cannot prove a
 /// speaker, Bluetooth device or DAC is heard correctly.
@@ -23,12 +34,20 @@ private final class EncodedMediaCapture: @unchecked Sendable {
     private var validFrames = 0
     private var bufferCount = 0
     private var maximumPeak: Float = 0
+    private var totalFrames = 0
+    private var rejectedBuffers = 0
 
     func receive(_ buffer: AVAudioPCMBuffer, when: AVAudioTime) {
+        lock.lock()
+        totalFrames += Int(buffer.frameLength)
+        lock.unlock()
         // No engine call from a tap; only a tiny measurement is handed to the
         // worker. The lock is test-only, never a production transport clock.
         guard buffer.format.channelCount >= 2, let data = buffer.floatChannelData,
-              buffer.frameLength > 8, buffer.format.sampleRate > 0 else { return }
+              buffer.frameLength > 8, buffer.format.sampleRate > 0 else {
+            lock.lock(); rejectedBuffers += 1; lock.unlock()
+            return
+        }
         let count = Int(buffer.frameLength)
         func decode(_ frame: Int) -> Double? {
             let denominator = Double(data[1][frame])
@@ -37,7 +56,10 @@ private final class EncodedMediaCapture: @unchecked Sendable {
             return seconds >= -0.02 && seconds <= 31 ? seconds : nil
         }
         guard let first = decode(4), let last = decode(count - 5),
-              last >= first else { return }
+              last >= first else {
+            lock.lock(); rejectedBuffers += 1; lock.unlock()
+            return
+        }
         let measurement = Measurement(first: first - 4 / buffer.format.sampleRate,
             last: last + 4 / buffer.format.sampleRate,
             frames: count, sampleRate: buffer.format.sampleRate,
@@ -60,11 +82,18 @@ private final class EncodedMediaCapture: @unchecked Sendable {
     var summary: [String: Any] {
         lock.lock(); defer { lock.unlock() }
         return ["validOutputFrames": validFrames, "validOutputBuffers": bufferCount,
-                "maximumPCMSkipSeconds": maximumGap, "maximumPCMRepeatSeconds": maximumRepeat,
+                "totalOutputFrames": totalFrames, "rejectedOutputBuffers": rejectedBuffers,
+                "sampleRate": latestValue?.sampleRate ?? 0,
+                "maximumTapDeliveryGapSeconds": maximumGap, "maximumTapDeliveryRepeatSeconds": maximumRepeat,
+                "boundary": "AVAudioNode tap aggregation may discard pending tap delivery at engine restart; use renderQuanta for source continuity",
                 "maximumSignal": maximumPeak]
     }
 }
 
+// Native-output tests share CoreAudio with the existing transport/transition
+// suite. Inherit its serialization so a diagnostic does not reconfigure a
+// second real-time graph while another live-output regression is running.
+extension PlaybackEngineSmokeTests {
 @Suite("Actual PCM and media clocks", .serialized)
 struct PlaybackMediaClockTests {
     /// Monotonic, non-periodic stereo PCM: channel R is a reference level,
@@ -115,14 +144,13 @@ struct PlaybackMediaClockTests {
          "lastResumeCompletedAt": snapshot.lastResumeCompletedAt,
          "outputPCMFirstMediaSeconds": pcm?.first ?? -1,
          "outputPCMLastMediaSeconds": pcm?.last ?? -1,
+         "outputPCMSampleRate": pcm?.sampleRate ?? 0,
          "outputPCMHostTime": pcm?.host ?? 0,
          "outputPCMReceivedAtHostTime": pcm?.receivedAt ?? 0]
     }
 
-    /// Characterize the native clock before changing its mapping. Full,
-    /// sample-only and host-only AVAudioTime conversions are measured against
-    /// actual final-output PCM, not another instance of the same clock code.
-    /// Diagnostic values are deliberately not repaired by tolerance changes.
+    /// Compare real render-source PCM with native clocks and retain final-mix
+    /// tap evidence separately: tap delivery gaps are not physical lost audio.
     @Test func outputPCMCharacterizesLongAndRapidPauses() async throws {
         let outcome = await runWithWatchdog("encoded-output-media-clock", timeout: 100) {
             Result { try self.measureNativeClocks() }
@@ -144,6 +172,8 @@ struct PlaybackMediaClockTests {
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
         let engine = PlaybackEngine()
         let capture = EncodedMediaCapture()
+        let renderCapture = try engine.captureRenderQuantaForTesting(on: .a)
+        engine.enableTransportCommandTraceForTesting()
         engine.setOutputTimedSampleSinkForTesting { buffer, when in capture.receive(buffer, when: when) }
         defer { engine.stopAll(); engine.setOutputTimedSampleSinkForTesting(nil) }
         _ = try engine.loadFile(at: url, on: .a)
@@ -162,11 +192,37 @@ struct PlaybackMediaClockTests {
                     "reason": "no advancing stereo final-output tap"]
         }
         var cases: [[String: Any]] = []
+        var initialSourceClockOffset: Double?
+        func validateFrozenSourceClock(_ snapshot: PlaybackEngine.TransportSnapshot) {
+            let records = renderCapture.records
+            guard let last = records.last(where: { $0.validStereo && $0.rightFirst > 0.005 }) else {
+                Issue.record("native render quanta must contain the encoded non-silent source")
+                return
+            }
+            let first = (Double(last.leftFirst) / Double(last.rightFirst) - 1) / 0.04
+            let offset = snapshot.position - first
+            // This fixture keeps time-pitch bypassed and EQ/delay neutral.
+            // Native source and downstream block START may differ by at most
+            // one render quantum; a constant multi-second offset cannot pass.
+            let bound = Double(last.frames + 2) / renderCapture.sampleRate
+            #expect(abs(offset) <= bound,
+                "absolute native media time must agree with actual decoded source PCM within one render quantum")
+            if let baseline = initialSourceClockOffset {
+                // The source node can be one render block ahead of downstream
+                // DSP. This fixed pipeline bound cannot grow with pause time.
+                #expect(abs(offset - baseline) <= bound,
+                    "native media time must stay aligned with decoded source PCM, not elapsed pause duration")
+            } else { initialSourceClockOffset = offset }
+            cases.append(["frozenSourceClockPosition": snapshot.position,
+                "decodedRenderSourcePosition": first, "sourceClockOffsetSeconds": offset,
+                "renderQuantumFrames": last.frames, "renderQuantumHostTime": last.hostTime])
+        }
         for duration in [0.1, 1.0, 5.0, 10.0] {
             let before = engine.transportSnapshotForTesting(.a)
             let beforePCM = capture.latest
             engine.pause()
             let paused = engine.transportSnapshotForTesting(.a)
+            validateFrozenSourceClock(paused)
             let pausedPCM = capture.latest
             Thread.sleep(forTimeInterval: duration)
             let held = engine.transportSnapshotForTesting(.a)
@@ -198,9 +254,97 @@ struct PlaybackMediaClockTests {
             let after = engine.transportSnapshotForTesting(.a)
             cases.append(["rapidPauseCycles": count, "before": dictionary(before, pcm: beforePCM),
                           "resumed": dictionary(resumed, pcm: resumedPCM), "after": dictionary(after, pcm: capture.latest)])
+            engine.pause()
+            validateFrozenSourceClock(engine.transportSnapshotForTesting(.a))
+            engine.resume()
+        }
+        engine.pause()
+        let finalSnapshot = engine.transportSnapshotForTesting(.a)
+        validateFrozenSourceClock(finalSnapshot)
+        let quantumReport = validateRenderQuanta(renderCapture)
+        let commands = engine.transportCommandTraceForTesting()
+        for (index, command) in commands.enumerated() {
+            #expect(command.sequence == UInt64(index + 1))
+            #expect(command.requestedAt <= command.executedAt && command.executedAt <= command.completedAt)
+            if index > 0 { #expect(commands[index - 1].completedAt <= command.executedAt) }
         }
         return ["scope": "real-time final mix output before physical device; stereo ratio encodes source media time",
                 "available": true, "sourceSampleRate": DeckChain.format.sampleRate,
-                "cases": cases, "pcm": capture.summary]
+                "cases": cases, "pcm": capture.summary, "renderQuanta": quantumReport,
+                "executedCommandRecords": commands.map(\.evidence)]
     }
+
+    private func validateRenderQuanta(_ capture: PlaybackEngine.RenderQuantumCaptureForTesting) -> [String: Any] {
+        let records = capture.records
+        var previousLast: Double?
+        var validFrames = 0
+        var invalidBuffers = 0
+        var invalidTimestamps = 0
+        var renderErrors = 0
+        var silenceFlaggedBuffers = 0
+        var silenceFrames = 0
+        var consecutiveSilence = 0
+        var maximumSilence = 0
+        var maximumGap = 0.0
+        var maximumRepeat = 0.0
+        var maximumDurationErrorFrames = 0.0
+        var largestQuantum: UInt32 = 0
+        for record in records {
+            largestQuantum = max(largestQuantum, record.frames)
+            if !record.validSampleTime || !record.validHostTime { invalidTimestamps += 1 }
+            if record.renderError { renderErrors += 1 }
+            if record.outputIsSilence { silenceFlaggedBuffers += 1 }
+            guard record.validStereo else { invalidBuffers += 1; continue }
+            if abs(record.leftFirst) < 0.000_01 && abs(record.rightFirst) < 0.000_01,
+               abs(record.leftLast) < 0.000_01 && abs(record.rightLast) < 0.000_01 {
+                if previousLast != nil {
+                    silenceFrames += Int(record.frames)
+                    consecutiveSilence += Int(record.frames)
+                    maximumSilence = max(maximumSilence, consecutiveSilence)
+                }
+                continue
+            }
+            consecutiveSilence = 0
+            guard record.rightFirst > 0.005, record.rightLast > 0.005 else {
+                invalidBuffers += 1
+                continue
+            }
+            let first = (Double(record.leftFirst) / Double(record.rightFirst) - 1) / 0.04
+            let last = (Double(record.leftLast) / Double(record.rightLast) - 1) / 0.04
+            guard first.isFinite, last.isFinite, last >= first else {
+                invalidBuffers += 1
+                continue
+            }
+            let durationError = abs((last - first) * capture.sampleRate - Double(record.frames - 1))
+            maximumDurationErrorFrames = max(maximumDurationErrorFrames, durationError)
+            if let previousLast {
+                let gap = first - previousLast - 1 / capture.sampleRate
+                maximumGap = max(maximumGap, gap)
+                maximumRepeat = max(maximumRepeat, -gap)
+            }
+            previousLast = last
+            validFrames += Int(record.frames)
+        }
+        #expect(capture.overflowCount == 0, "measurement cannot silently drop render records")
+        #expect(invalidTimestamps == 0 && renderErrors == 0, "all render evidence needs valid native timestamps and successful rendering")
+        #expect(validFrames > 4096, "silent or absent render output cannot prove continuity")
+        #expect(invalidBuffers == 0, "all non-silent render records must decode; never ignore failed PCM measurements")
+        #expect(maximumDurationErrorFrames <= 2, "each rendered block must contain exactly its source frame span")
+        #expect(maximumGap * capture.sampleRate <= 2, "no source PCM may be skipped across native pause/resume")
+        #expect(maximumRepeat * capture.sampleRate <= 2, "no source PCM may be repeated across native pause/resume")
+        // A restart may issue its first IO quantum before player.play executes.
+        // Record every such frame; a multi-quantum silent gap is a regression.
+        #expect(maximumSilence <= Int(largestQuantum), "resume must not insert multiple silent render quanta")
+        return ["scope": "existing deck delay AudioUnit post-render; before mixer/device, not DAC",
+            "sampleRate": capture.sampleRate, "totalBuffers": records.count,
+            "validSourceFrames": validFrames, "invalidBuffers": invalidBuffers,
+            "invalidTimestamps": invalidTimestamps, "renderErrors": renderErrors,
+            "silenceFlaggedBuffers": silenceFlaggedBuffers,
+            "overflowRecords": capture.overflowCount, "silenceFramesAfterSourceStarted": silenceFrames,
+            "maximumConsecutiveSilenceFrames": maximumSilence,
+            "maximumSourceGapFrames": maximumGap * capture.sampleRate,
+            "maximumSourceRepeatFrames": maximumRepeat * capture.sampleRate,
+            "maximumBlockDurationErrorFrames": maximumDurationErrorFrames]
+    }
+}
 }
