@@ -156,6 +156,67 @@ struct PlayerServiceClockTests {
         print("SERVICE_CLOCK pauseSeconds=\(pauseSeconds) issued=\(pauseIssued) confirmed=\(pauseConfirmed) resumeIssued=\(resumeIssued) resumeConfirmed=\(resumeConfirmed) frozen=\(frozen.seconds) resumed=\(resumed.seconds) pcmError=\(maximumError) finalEngine=\(subject.position(of: .a)) finalService=\(player.progress) finalLyrics=\(player.lyricsCursor.mediaTime)")
     }
 
+    @Test func pausedGraphDrainsDSPWhileEveryPublishedMediaClockStaysFrozen() async throws {
+        let url = try fixture()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let reference = try engine(url)
+        let subject = try engine(url)
+        defer { subject.stopAll(); reference.stopAll() }
+        let golden = try TransportPCMReference(engine: reference, quantum: quantum)
+        let player = try service(subject)
+        for _ in 0..<8 { try golden.compare(subject.renderOfflineForTesting(quantum)) }
+        _ = try await assertSameClock(player, engine: subject)
+        player.pause()
+        let frozen = try await assertSameClock(player, engine: subject)
+        let paused = subject.transportSnapshotForTesting(.a)
+        #expect(paused.paused && paused.engineRunning && !paused.nodePlaying)
+        // Model the hardware IO that continues during a native source pause.
+        // The production DSP's already-buffered output must be measured, not
+        // silently muted or discarded to manufacture an immediate stop.
+        var tailPeak: Float = 0
+        var settledPeak: Float = 0
+        for chunk in 0..<24 {
+            let output = try subject.renderOfflineForTesting(quantum)
+            try golden.compare(output, allowingIntentionalSilence: true)
+            let channels = try #require(output.floatChannelData)
+            let peak = (0..<Int(output.format.channelCount)).map { channel in
+                (0..<Int(output.frameLength)).map { abs(channels[channel][$0]) }.max() ?? 0
+            }.max() ?? 0
+            tailPeak = max(tailPeak, peak)
+            if chunk >= 20 { settledPeak = max(settledPeak, peak) }
+            let held = try await assertSameClock(player, engine: subject)
+            #expect(held.seconds == frozen.seconds)
+            #expect(!player.isPlaying)
+        }
+        #expect(tailPeak > 0.01, "retain and observe the actual DSP tail")
+        #expect(settledPeak < 0.000_001, "neutral DSP must settle to paused silence")
+        player.togglePlayPause()
+        _ = try await assertSameClock(player, engine: subject)
+        var refillSilence = 0
+        for _ in 0..<24 {
+            refillSilence += try golden.compare(subject.renderOfflineForTesting(quantum),
+                                                allowingIntentionalSilence: true)
+            _ = try await assertSameClock(player, engine: subject)
+        }
+        #expect(golden.maximumSampleError < 0.000_01,
+                "every audible tail/resume frame must match the next uninterrupted golden frame")
+        #expect(refillSilence <= Int(ceil(paused.sourceProcessingLatency * sampleRate)) + 2 * Int(quantum),
+                "resume silence must stay within the measured DSP pipeline bound")
+        #expect(player.isPlaying)
+        #expect(abs(player.progress - frozen.seconds - 24 * Double(quantum) / sampleRate) <= 2 / sampleRate,
+                "paused IO frames must not become media time after resume")
+        try ServiceClockEvidence.record([
+            "name": "pausedDSPRendering", "pausedMediaSeconds": frozen.seconds,
+            "pausedOutputFramesPerChannel": 24 * Int(quantum),
+            "tailPeak": tailPeak, "settledPeak": settledPeak,
+            "comparedSourceFrames": golden.comparedFrames, "maximumPCMError": golden.maximumSampleError,
+            "intentionalSilenceFrames": golden.intentionalSilenceFrames,
+            "refillSilenceFrames": refillSilence, "measuredProcessingLatencySeconds": paused.sourceProcessingLatency,
+            "finalEngineSeconds": subject.position(of: .a), "finalServiceSeconds": player.progress,
+            "finalLyricsSeconds": player.lyricsCursor.mediaTime,
+        ])
+    }
+
     @Test func thirtyRapidServiceTogglesPreservePCMAndEveryConsumer() async throws {
         let url = try fixture()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
@@ -282,6 +343,51 @@ struct PlayerServiceClockTests {
         #expect(player.currentTrack?.id == 12345)
     }
 
+
+    @Test func queuedAutoMixMidpointPreservesTheUsersLaterPause() async throws {
+        let outgoing = try fixture(duration: 0.3)
+        let incoming = try fixture(duration: 4)
+        defer {
+            try? FileManager.default.removeItem(at: outgoing.deletingLastPathComponent())
+            try? FileManager.default.removeItem(at: incoming.deletingLastPathComponent())
+        }
+        let subject = try engine(outgoing)
+        defer { subject.stopAll() }
+        _ = try subject.loadFile(at: incoming, on: .b)
+        let first = try JSONDecoder().decode(Track.self, from: Data(
+            #"{"id":12345,"name":"Outgoing","dt":300}"#.utf8))
+        let next = try JSONDecoder().decode(Track.self, from: Data(
+            #"{"id":54321,"name":"Incoming","dt":4000}"#.utf8))
+        let player = PlayerService(playbackEngineForTesting: subject, track: first,
+                                   lyrics: ParsedLyrics(lines: []),
+                                   pendingTransitionTrackForTesting: next)
+        subject.scheduleTransition(.plain(.gapless), from: .a, to: .b)
+        // Keep the main actor occupied while the genuine source completion
+        // queues its midpoint. Its event consumer cannot adopt metadata yet.
+        for _ in 0..<80 {
+            _ = try samples(subject)
+            if !subject.hasPendingTransition { break }
+        }
+        #expect(!subject.hasPendingTransition, "the real render callback must finish the handover")
+        #expect(player.currentTrack?.id == first.id)
+        player.pause()
+        for _ in 0..<100 where player.currentTrack?.id != next.id {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(player.currentTrack?.id == next.id, "consume the real queued midpoint")
+        #expect(!player.isPlaying, "metadata adoption must not undo a newer pause intent")
+        let held = subject.transportSnapshotForTesting(.b)
+        #expect(held.paused && !held.nodePlaying)
+        let frozen = try #require(await player.samplePlaybackTime())
+        #expect(player.progress == frozen.seconds)
+        #expect(player.lyricsCursor.mediaTime == frozen.seconds)
+        player.togglePlayPause()
+        _ = try await player.samplePlaybackTime()
+        let resumed = subject.transportSnapshotForTesting(.b)
+        #expect(player.isPlaying && resumed.nodePlaying && !resumed.paused)
+        #expect(resumed.generation == held.generation, "resume the same incoming PCM schedule")
+        #expect(player.currentTrack?.id == next.id)
+    }
 
     @Test func completionDeliveredAfterPauseDoesNotAdvanceOrResumeADrainedNode() async throws {
         let url = try fixture(duration: 0.3)

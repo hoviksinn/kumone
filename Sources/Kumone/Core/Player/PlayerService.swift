@@ -435,10 +435,12 @@ final class PlayerService: ObservableObject {
 
     /// Uses the actual production sampler/publisher with a caller-owned engine
     /// and no account, persistence, network, timer or system-media registration.
-    init(playbackEngineForTesting engine: PlaybackEngine, track: Track, lyrics: ParsedLyrics) {
+    init(playbackEngineForTesting engine: PlaybackEngine, track: Track, lyrics: ParsedLyrics,
+         pendingTransitionTrackForTesting next: Track? = nil) {
         self.engine = engine
         observesSystemPlayback = false
-        queue = [track]
+        queue = [track] + (next.map { [$0] } ?? [])
+        pendingTransitionTrack = next
         currentIndex = 0
         currentTrack = track
         self.lyrics = lyrics
@@ -2696,6 +2698,9 @@ final class PlayerService: ObservableObject {
 
     private func adoptTransitionedTrack(on deck: Deck) {
         guard let next = pendingTransitionTrack else { return }
+        // The render queue can have emitted a midpoint before the main actor
+        // handles the user's pause. Adopting metadata must preserve that intent.
+        let wasPlaying = isPlaying
         // A hand-over is an automatic advance, and the outgoing download is done.
         releaseOfflineLease()
         currentWasAdvanced = true
@@ -2733,13 +2738,15 @@ final class PlayerService: ObservableObject {
         currentAnalysis = prefetchedNext?.analysis
         servedQuality = prefetchedNext?.level
         // Same telemetry as the direct-start path: most tracks arrive here.
-        PlaybackJournal.note(
-            "now playing id=\(next.id) level=\(prefetchedNext?.level ?? "?") "
-            + "wanted=\(SettingsManager.shared.audioQuality.rawValue) via=handover")
-        scheduleAudioUnitReadback()
+        if observesSystemPlayback {
+            PlaybackJournal.note(
+                "now playing id=\(next.id) level=\(prefetchedNext?.level ?? "?") "
+                + "wanted=\(SettingsManager.shared.audioQuality.rawValue) via=handover")
+            scheduleAudioUnitReadback()
+        }
         unblockSource = prefetchedNext?.unblockSource
         isTrial = false
-        isPlaying = true
+        isPlaying = wasPlaying
         progress = engine.position(of: deck)
         duration = engine.duration(of: deck) ?? next.duration
         lyrics = nil
@@ -2757,15 +2764,19 @@ final class PlayerService: ObservableObject {
         autoMixStaleDeadlineNoted = false
         // The song that was "next" is now "now"; `schedulePrefetch` (via
         // transitionCompleted) fills the group in again a moment later.
-        AutoMixDebugModel.shared.clearNext()
-        publishDebugNow()
+        if observesSystemPlayback {
+            AutoMixDebugModel.shared.clearNext()
+            publishDebugNow()
+        }
 
         resolveGeneration += 1
         let generation = resolveGeneration
-        NowPlayingManager.shared.updateMetadata(for: next, duration: duration)
-        NowPlayingManager.shared.updateElapsed(progress, rate: 1)
-        persistState()
-        Task { await loadLyrics(for: next, generation: generation) }
+        if observesSystemPlayback {
+            NowPlayingManager.shared.updateMetadata(for: next, duration: duration)
+            NowPlayingManager.shared.updateElapsed(progress, rate: isPlaying ? 1 : 0)
+            persistState()
+            Task { await loadLyrics(for: next, generation: generation) }
+        }
 
         if isFMMode, fmUpcoming.count < 1 {
             Task {
