@@ -358,6 +358,7 @@ struct PlayerServiceClockTests {
         }
         let subject = try engine(outgoing)
         defer { subject.stopAll() }
+        subject.enableTransportCommandTraceForTesting()
         _ = try subject.loadFile(at: incoming, on: .b)
         let first = try JSONDecoder().decode(Track.self, from: Data(
             #"{"id":12345,"name":"Outgoing","dt":300}"#.utf8))
@@ -387,11 +388,37 @@ struct PlayerServiceClockTests {
         #expect(player.progress == frozen.seconds)
         #expect(player.lyricsCursor.mediaTime == frozen.seconds)
         player.togglePlayPause()
-        _ = try await player.samplePlaybackTime()
+        // A real device keeps pulling IO while paused. This manual graph
+        // must do the same: B may have been adopted before its first source
+        // render, and a native resume can legitimately await that first IO.
+        // Merely querying its clock cannot produce a render timestamp.
+        var renderedBuffers = 0
+        var maximumOutput: Float = 0
+        for _ in 0..<100 {
+            let output = try samples(subject)
+            maximumOutput = max(maximumOutput, output.map(abs).max() ?? 0)
+            renderedBuffers += 1
+            _ = try await player.samplePlaybackTime()
+            let current = subject.transportSnapshotForTesting(.b)
+            if current.nodePlaying && current.position > frozen.seconds { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        let resumedSample = try #require(await player.samplePlaybackTime())
         let resumed = subject.transportSnapshotForTesting(.b)
         #expect(player.isPlaying && resumed.nodePlaying && !resumed.paused)
         #expect(resumed.generation == held.generation, "resume the same incoming PCM schedule")
+        #expect(resumed.position > frozen.seconds, "real IO must advance the incoming source")
+        #expect(maximumOutput > 0.01, "a silent or unrendered graph must not count as a recovery")
+        #expect(player.progress == resumedSample.seconds)
+        #expect(player.lyricsCursor.mediaTime == resumedSample.seconds)
         #expect(player.currentTrack?.id == next.id)
+        try ServiceClockEvidence.record([
+            "name": "queuedMidpointPreservesPause", "incomingTrackID": next.id,
+            "heldGeneration": held.generation, "resumedGeneration": resumed.generation,
+            "pausedMediaSeconds": frozen.seconds, "resumedMediaSeconds": resumedSample.seconds,
+            "renderedResumeBuffers": renderedBuffers, "maximumOutput": maximumOutput,
+            "nativeResumeAnchors": subject.transportResumeAnchorTraceForTesting().map(\.evidence),
+        ])
     }
 
     @Test func completionDeliveredAfterPauseDoesNotAdvanceOrResumeADrainedNode() async throws {

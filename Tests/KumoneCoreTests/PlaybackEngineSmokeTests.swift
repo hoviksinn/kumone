@@ -349,9 +349,13 @@ private final class EventLog: @unchecked Sendable {
         // them queue for the cooperative pool (about 30 s of backlog on CI).
         // At .high the consumer goes to the front of that queue, so an event
         // is not late just because other suites are busy.
-        task = Task(priority: .high) {
-            for await event in engine.events {
-                self.append(event)
+        // Keep the stream, not its owner. Capturing engine and self here
+        // would retain both until the stream finishes in engine.deinit,
+        // preventing that deinit (and this task's cancellation) forever.
+        let stream = engine.events
+        task = Task(priority: .high) { [weak self] in
+            for await event in stream {
+                self?.append(event)
             }
         }
     }
@@ -453,6 +457,26 @@ private func pollPosition(_ engine: PlaybackEngine, deck: Deck, past target: Tim
 
 @Suite("PlaybackEngineSmoke", .serialized)
 struct PlaybackEngineSmokeTests {
+
+    @Test func eventCollectorReleasesItselfAndItsEngine() async throws {
+        var engine: PlaybackEngine? = PlaybackEngine()
+        var collector: EventLog? = EventLog(try #require(engine))
+        weak var observedEngine = engine
+        weak var observedCollector = collector
+        // Exercise the consumer while it waits for a real engine stream;
+        // no file, audio output device, or playback probe is required.
+        for _ in 0..<4 { await Task.yield() }
+        collector = nil
+        engine = nil
+        // An already executing callback or configuration notification may
+        // briefly own the objects. The old task cycle never releases them.
+        for _ in 0..<100 {
+            if observedCollector == nil && observedEngine == nil { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(observedCollector == nil, "the event task must not retain its collector across await")
+        #expect(observedEngine == nil, "the event task must not retain an engine waiting for its own deinit")
+    }
 
     // (a) Local file deck: position advances, deckFinished on natural end.
     @Test func filePlaybackAdvancesAndFinishes() async throws {

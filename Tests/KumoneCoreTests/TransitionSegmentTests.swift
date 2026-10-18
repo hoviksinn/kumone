@@ -74,6 +74,108 @@ private let failingSeparator: VocalStemProvider = { _ in
     throw StemTechniqueLayer.StemError.emptyWindow
 }
 
+/// Persist actual event paths and clock domains even if a later assertion or
+/// watchdog fails. These are observations before the physical audio device;
+/// a host/sample mismatch must not be relabelled as a successful stem splice.
+private final class SegmentValidationEvidence: @unchecked Sendable {
+    private final class Store: @unchecked Sendable {
+        let lock = NSLock()
+        var cases: [String: [String: Any]] = [:]
+        func write(_ name: String, report: [String: Any]) {
+            lock.lock(); defer { lock.unlock() }
+            cases[name] = report
+            let root = ProcessInfo.processInfo.environment["GITHUB_WORKSPACE"]
+                ?? FileManager.default.currentDirectoryPath
+            let destination = URL(fileURLWithPath: root)
+                .appendingPathComponent(".build/transition-segment-validation.json")
+            do {
+                try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(),
+                                                        withIntermediateDirectories: true)
+                let report: [String: Any] = [
+                    "scope": "Production AutoMix segment event paths and native clock observations; not DAC or listening validation",
+                    "cases": cases.keys.sorted().compactMap { cases[$0] }]
+                try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
+                    .write(to: destination, options: .atomic)
+            } catch { print("TRANSITION_SEGMENT_EVIDENCE_WRITE_FAILED \(error)") }
+        }
+    }
+    private static let store = Store()
+    private let lock = NSLock()
+    private let name: String
+    private var report: [String: Any]
+
+    init(_ name: String) {
+        self.name = name
+        var timebase = mach_timebase_info_data_t()
+        mach_timebase_info(&timebase)
+        report = ["name": name, "checkpoints": [[String: Any]](),
+                  "events": [[String: Any]](), "machTimebaseNumerator": timebase.numer,
+                  "machTimebaseDenominator": timebase.denom,
+                  "avAudioHostTicksPerSecond": AVAudioTime.hostTime(forSeconds: 1),
+                  "machAbsoluteAtStart": mach_absolute_time(),
+                  "systemUptimeAtStartSeconds": ProcessInfo.processInfo.systemUptime]
+        Self.store.write(name, report: report)
+    }
+
+    func values(_ values: [String: Any]) {
+        lock.lock(); defer { lock.unlock() }
+        for (key, value) in values { report[key] = value }
+        Self.store.write(name, report: report)
+    }
+
+    private func dictionary(_ value: PlaybackEngine.TransportSnapshot) -> [String: Any] {
+        ["mediaSeconds": value.position, "startOffsetSeconds": value.startOffset,
+         "nativePlayerFrames": value.rawPlayerFrames ?? -1,
+         "nodeSampleFrames": value.nodeRenderFrames ?? -1,
+         "nodeHostTime": value.renderHostTime ?? 0,
+         "machObservedAt": value.observedAtHostTime,
+         "nodeHostMinusMachObservedTicks": Double(value.renderHostTime ?? 0) - Double(value.observedAtHostTime),
+         "sourceAURequestedFramesIncludingSilence": value.renderedSourceFrames,
+         "sourceProcessingLatencySeconds": value.sourceProcessingLatency,
+         "paused": value.paused, "nodePlaying": value.nodePlaying,
+         "engineRunning": value.engineRunning, "generation": value.generation,
+         "resumeClockPending": value.resumeClockPending]
+    }
+
+    func checkpoint(_ phase: String, engine: PlaybackEngine) {
+        let observation: [String: Any] = ["phase": phase,
+            "machObservedAt": mach_absolute_time(),
+            "systemUptimeSeconds": ProcessInfo.processInfo.systemUptime,
+            "deckA": dictionary(engine.transportSnapshotForTesting(.a)),
+            "deckB": dictionary(engine.transportSnapshotForTesting(.b)),
+            "hasArmedSegment": engine.hasArmedSegment,
+            "segmentIsPlaying": engine.segmentIsPlaying,
+            "hasPendingTransition": engine.hasPendingTransition,
+            "segmentDecline": engine.lastSegmentDecline?.rawValue ?? "none"]
+        lock.lock(); defer { lock.unlock() }
+        var checkpoints = report["checkpoints"] as? [[String: Any]] ?? []
+        checkpoints.append(observation)
+        report["checkpoints"] = checkpoints
+        Self.store.write(name, report: report)
+    }
+
+    func event(_ event: PlaybackEngineEvent) {
+        var value: [String: Any] = ["machReceivedAt": mach_absolute_time()]
+        switch event {
+        case let .transitionMidpoint(from, to, via):
+            value["event"] = "transitionMidpoint"
+            value["from"] = from.rawValue; value["to"] = to.rawValue
+            value["actualPath"] = via.path.rawValue
+            value["actualPlan"] = String(describing: via.plan)
+        case let .transitionCompleted(from, to):
+            value["event"] = "transitionCompleted"
+            value["from"] = from.rawValue; value["to"] = to.rawValue
+        case let .deckFinished(deck):
+            value["event"] = "deckFinished"; value["deck"] = deck.rawValue
+        default: return
+        }
+        lock.lock(); defer { lock.unlock() }
+        var events = report["events"] as? [[String: Any]] ?? []
+        events.append(value); report["events"] = events
+        Self.store.write(name, report: report)
+    }
+}
+
 private func plan(overlap: TimeInterval = 2, outPoint: TimeInterval = 5,
                   inPoint: TimeInterval = 0,
                   technique: StemTechnique? = .vocalDuck(depthDB: -9)) -> PlannedTransition {
@@ -375,6 +477,7 @@ struct TransitionSegmentTests {
     // splice that failed to silence one side would look like.
     @Test func aSplicedHandOverIsContinuousAndNeverDoubled() async throws {
         guard await audioOutputAvailable.value else { return }
+        let evidence = SegmentValidationEvidence("continuous-native-splice")
         let planned = plan(overlap: 2, outPoint: 4)
         let segment = try TransitionSegmentRenderer.render(request(planned),
                                                            provider: silentVocals)
@@ -397,7 +500,7 @@ struct TransitionSegmentTests {
         let result = await withWatchdog("splice", timeout: 45) {
             () -> ([(TimeInterval, Int, Float)], Bool, TimeInterval) in
             let engine = PlaybackEngine()
-            let events = SegmentEventLog(engine)
+            let events = SegmentEventLog(engine, evidence: evidence)
             defer {
                 engine.setOutputMonitor(on: .a, nil)
                 engine.setOutputMonitor(on: .b, nil)
@@ -415,13 +518,18 @@ struct TransitionSegmentTests {
             engine.play(deck: .a, from: 1.5)
             engine.scheduleTransition(planned, from: .a, to: .b)
             Thread.sleep(forTimeInterval: 0.3)
+            evidence.checkpoint("before-offer", engine: engine)
             engine.armTransitionSegment(segment)
+            evidence.checkpoint("after-offer", engine: engine)
             let completed = events.wait(timeout: 20) {
                 if case .transitionCompleted(from: .a, to: .b) = $0 { return true }
                 return false
             }
             let completedAt = Date().timeIntervalSince(recorder.start)
+            evidence.values(["completed": completed])
+            evidence.checkpoint("completion-wait-returned", engine: engine)
             Thread.sleep(forTimeInterval: 0.5)
+            evidence.checkpoint("after-tail", engine: engine)
             return (recorder.snapshot(), completed, completedAt)
         }
         guard let (samples, completed, completedAt) = result, !samples.isEmpty else {
@@ -432,6 +540,7 @@ struct TransitionSegmentTests {
 
         // The segment really carried the middle of the hand-over.
         let segmentPeak = samples.filter { $0.1 == 2 }.map(\.2).max() ?? 0
+        evidence.values(["maximumSegmentPeak": segmentPeak, "monitorSampleCount": samples.count])
         #expect(segmentPeak > 0.05, "the segment never sounded (peak \(segmentPeak))")
 
         // Per-source level over time. The three taps fire independently, so a
@@ -473,6 +582,7 @@ struct TransitionSegmentTests {
                 "the output went silent at \(silent.map { Double($0) / 10 })")
         #expect(doubled.isEmpty,
                 "two sources were at full level at once at \(doubled.map { Double($0) / 10 })")
+        evidence.values(["silentBuckets": silent, "doubledBuckets": doubled])
     }
 
     // MARK: - Rate and pad hygiene across the splice
@@ -547,11 +657,12 @@ struct TransitionSegmentTests {
         let segment = try TransitionSegmentRenderer.render(req, provider: silentVocals)
 
         for ending in Ending.allCases {
+            let evidence = SegmentValidationEvidence("splice-hygiene-\(ending.rawValue)")
             let result = await withWatchdog("spliceHygiene-\(ending.rawValue)",
                                             timeout: 70) { () -> [(String, Deck, Worst)]? in
                 var observations: [(String, Deck, Worst)] = []
                 let engine = PlaybackEngine()
-                let events = SegmentEventLog(engine)
+                let events = SegmentEventLog(engine, evidence: evidence)
                 defer { engine.stopAll() }
                 guard (try? engine.loadFile(at: SegmentFixtures.outgoing, on: .a,
                                             peakDBFS: 0)) != nil,
@@ -591,16 +702,46 @@ struct TransitionSegmentTests {
                 engine.play(deck: .a, from: 3.0)
                 engine.scheduleTransition(planned, from: .a, to: .b)
                 Thread.sleep(forTimeInterval: 0.3)
+                evidence.checkpoint("before-offer", engine: engine)
                 engine.armTransitionSegment(segment)
-                guard engine.hasArmedSegment else { return nil }
+                evidence.checkpoint("after-offer", engine: engine)
+                guard engine.hasArmedSegment else {
+                    evidence.values(["failure": "matching segment was not accepted"])
+                    return nil
+                }
 
                 // Teeth: everything below is only worth asserting if the deck
                 // the segment is about to replace really is bent and padded
                 // when it hands over. Recorded, not assumed — a plan whose ramp
                 // silently resolved away would make every check that follows
                 // pass by doing nothing.
-                Thread.sleep(forTimeInterval: 1.2)
+                guard let ramp = TransitionAutomation.tempoRamp(for: planned.plan) else {
+                    evidence.values(["failure": "fixture did not provide its required tempo ramp"])
+                    return nil
+                }
+                let target = ramp.start + 0.25 * ramp.leadSeconds
+                evidence.values(["rampWindowStartSeconds": ramp.start,
+                    "rampWindowEndSeconds": ramp.end])
+                let bendDeadline = Date().addingTimeInterval(12)
+                var reachedRampPosition = false
+                while Date() < bendDeadline {
+                    let position = engine.position(of: .a)
+                    if position >= target, position < ramp.end, !engine.segmentIsPlaying {
+                        reachedRampPosition = true
+                        break
+                    }
+                    if position >= ramp.end || engine.segmentIsPlaying || !engine.hasPendingTransition { break }
+                    Thread.sleep(forTimeInterval: 0.02)
+                }
                 let bent = engine.effectSnapshot(of: .a)
+                evidence.values(["rampObservationTargetSeconds": target,
+                    "reachedRequiredRampPosition": reachedRampPosition,
+                    "observedBendDeviation": abs(bent.rate - 1), "observedBendPadDB": bent.ratePadDB])
+                evidence.checkpoint("pre-splice-ramp-observation", engine: engine)
+                guard reachedRampPosition else {
+                    evidence.values(["failure": "outgoing media did not reach the required ramp position before splice/timeout"])
+                    return nil
+                }
                 observations.append(("\(ending.rawValue)/PRE-SPLICE BEND", .a, Worst(
                     rateDeviation: abs(bent.rate - 1), padTargetDB: bent.ratePadTargetDB,
                     padDB: bent.ratePadDB, neutral: bent.effectsAreNeutral,
@@ -611,7 +752,12 @@ struct TransitionSegmentTests {
                     guard events.wait(timeout: 25, for: {
                         if case .transitionCompleted(from: .a, to: .b) = $0 { return true }
                         return false
-                    }) else { return nil }
+                    }) else {
+                        evidence.checkpoint("completion-timeout", engine: engine)
+                        evidence.values(["failure": "transition completion was not delivered"])
+                        return nil
+                    }
+                    evidence.checkpoint("completed", engine: engine)
                 case .cancelledMidSegment, .playRetiredDeckMidSegment:
                     // Wait until the segment is actually sounding and past its
                     // head crossfade, i.e. deck A has been retired.
@@ -619,7 +765,12 @@ struct TransitionSegmentTests {
                     while Date() < deadline, !engine.segmentIsPlaying {
                         Thread.sleep(forTimeInterval: 0.05)
                     }
-                    guard engine.segmentIsPlaying else { return nil }
+                    guard engine.segmentIsPlaying else {
+                        evidence.checkpoint("segment-start-timeout", engine: engine)
+                        evidence.values(["failure": "segment did not start before timeout"])
+                        return nil
+                    }
+                    evidence.checkpoint("segment-playing", engine: engine)
                     Thread.sleep(forTimeInterval: 1.2)
                     if ending == .playRetiredDeckMidSegment {
                         engine.play(deck: .a, from: 1.0)
@@ -634,6 +785,7 @@ struct TransitionSegmentTests {
                     Thread.sleep(forTimeInterval: 0.05)
                 }
                 Thread.sleep(forTimeInterval: 1.0)
+                evidence.checkpoint("after-splice-settle", engine: engine)
                 poll("\(ending.rawValue)/after the splice", seconds: 1.5)
 
                 // The alternation check: the next track lands on whichever deck
@@ -645,7 +797,10 @@ struct TransitionSegmentTests {
                 poll("\(ending.rawValue)/next track on \(spent)", seconds: 1.5)
                 return observations
             }
-            guard let observations = result ?? nil else { continue }
+            guard let observations = result ?? nil else {
+                Issue.record("Splice hygiene \(ending.rawValue) did not reach its required phase; see transition-segment-validation.json")
+                continue
+            }
 
             for (label, deck, worst) in observations {
                 let here = "\(label): deck \(deck)"
@@ -694,6 +849,7 @@ struct TransitionSegmentTests {
     /// did the incoming deck come back at the position the segment handed it.
     @Test func aHiResIncomingDeckIsSplicedAndResumesWhereTheSegmentLeftIt() async throws {
         guard await audioOutputAvailable.value else { return }
+        let evidence = SegmentValidationEvidence("hi-res-incoming-splice")
         let planned = plan(overlap: 2, outPoint: 4)
         let segment = try TransitionSegmentRenderer.render(
             request(planned, incoming: SegmentFixtures.incomingHiRes),
@@ -711,7 +867,7 @@ struct TransitionSegmentTests {
         let result = await withWatchdog("hiResSplice", timeout: 45) { () -> Outcome? in
             var outcome = Outcome()
             let engine = PlaybackEngine()
-            let events = SegmentEventLog(engine)
+            let events = SegmentEventLog(engine, evidence: evidence)
             defer { engine.stopAll() }
             guard (try? engine.loadFile(at: SegmentFixtures.outgoing, on: .a)) != nil,
                   (try? engine.loadFile(at: SegmentFixtures.incomingHiRes, on: .b)) != nil
@@ -720,9 +876,12 @@ struct TransitionSegmentTests {
             engine.play(deck: .a, from: 1.5)
             engine.scheduleTransition(planned, from: .a, to: .b)
             Thread.sleep(forTimeInterval: 0.3)
+            evidence.checkpoint("before-offer", engine: engine)
             engine.armTransitionSegment(segment)
             outcome.declined = engine.lastSegmentDecline
             outcome.armed = engine.hasArmedSegment
+            evidence.values(["accepted": outcome.armed, "decline": outcome.declined?.rawValue ?? "none"])
+            evidence.checkpoint("after-offer", engine: engine)
             guard outcome.armed else { return outcome }
             outcome.completed = events.wait(timeout: 25) {
                 if case .transitionCompleted(from: .a, to: .b) = $0 { return true }
@@ -731,6 +890,10 @@ struct TransitionSegmentTests {
             // Read the hand-back position first and the chains after: the
             // position is the perishable one.
             outcome.positionAtCompletion = engine.position(of: .b)
+            evidence.values(["completed": outcome.completed,
+                "incomingPositionAtCompletionSeconds": outcome.positionAtCompletion,
+                "expectedIncomingPositionSeconds": segment.incomingResume + segment.handoffOut])
+            evidence.checkpoint("completion-wait-returned", engine: engine)
             Thread.sleep(forTimeInterval: 1.0)
             outcome.deckA = engine.effectSnapshot(of: .a)
             outcome.deckB = engine.effectSnapshot(of: .b)
@@ -864,20 +1027,38 @@ private final class SegmentEventLog: @unchecked Sendable {
     private let lock = NSLock()
     private var events: [PlaybackEngineEvent] = []
     private var task: Task<Void, Never>?
+    private let evidence: SegmentValidationEvidence?
+    private weak var observedEngine: PlaybackEngine?
 
-    init(_ engine: PlaybackEngine) {
+    init(_ engine: PlaybackEngine, evidence: SegmentValidationEvidence? = nil) {
+        self.evidence = evidence
+        observedEngine = engine
         // .high for the same reason as the smoke suite's `EventLog`: ahead
         // of the medium-priority tests queued for the pool.
-        task = Task(priority: .high) {
-            for await event in engine.events { self.append(event) }
+        // Retain only the stream across suspension. Capturing the engine or
+        // this owner strongly would keep its graph alive after every test.
+        let stream = engine.events
+        task = Task(priority: .high) { [weak self] in
+            for await event in stream { self?.append(event) }
         }
     }
 
     deinit { task?.cancel() }
 
     private func append(_ event: PlaybackEngineEvent) {
-        lock.lock(); defer { lock.unlock() }
+        lock.lock()
         events.append(event)
+        lock.unlock()
+        evidence?.event(event)
+        if let evidence, let engine = observedEngine {
+            switch event {
+            case let .transitionMidpoint(_, _, via):
+                evidence.checkpoint("event-midpoint-\(via.path.rawValue)", engine: engine)
+            case .transitionCompleted:
+                evidence.checkpoint("event-completed", engine: engine)
+            default: break
+            }
+        }
     }
 
     func wait(timeout: TimeInterval, for predicate: (PlaybackEngineEvent) -> Bool) -> Bool {

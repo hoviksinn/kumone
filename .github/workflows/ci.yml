@@ -81,6 +81,7 @@ jobs:
             .build/transport-validation.json
             .build/media-clock-diagnostic.json
             .build/service-clock-validation.json
+            .build/transition-segment-validation.json
           if-no-files-found: error
           retention-days: 14
           compression-level: 0
@@ -94,5 +95,6 @@ jobs:
             .build/transport-validation.json
             .build/media-clock-diagnostic.json
             .build/service-clock-validation.json
+            .build/transition-segment-validation.json
           if-no-files-found: warn
           retention-days: 14
