@@ -47,6 +47,29 @@ struct MainWindow: View {
     private var hidesTopChrome: Bool { player.showNowPlaying || sidebarCollapsed }
 
     var body: some View {
+        chromeObservedWindow
+            .onDisappear { chromeTask?.cancel() }
+            .sheet(isPresented: $showLogin) { LoginSheet() }
+            .alert("窗口空间不足", isPresented: $panels.insufficientSpace) {
+                Button("知道了", role: .cancel) {}
+            } message: {
+                Text("完整单排播放栏与右侧面板需要更多空间。请放大窗口，或手动收起左侧导航栏后再打开歌词或播放队列。")
+            }
+            .overlay(alignment: .top) {
+                if let toast = toasts.current {
+                    ToastView(toast: toast)
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                        .padding(.top, 12)
+                }
+            }
+            .animation(reduceMotion ? nil : .spring(response: 0.38, dampingFraction: 1), value: panels.insideReveal)
+            .animation(reduceMotion ? nil : AppAnimation.smooth, value: player.showNowPlaying)
+            .animation(reduceMotion ? nil : AppAnimation.quick, value: topChromeVisible)
+    }
+
+    /// Opaque, statically typed stages keep the compiler's inference local.
+    /// State and the unique player remain owned by this same MainWindow.
+    private var windowLayout: some View {
         GeometryReader { geometry in
             let outside = panels.mode == .expandedOutside
             let reveal = outside
@@ -85,6 +108,10 @@ struct MainWindow: View {
                 }
             }
         }
+    }
+
+    private var configuredWindow: some View {
+        windowLayout
         .scrollIndicators(.automatic)
         .toolbar(.hidden, for: .windowToolbar)
         .background(MainWindowConfigurator(
@@ -102,6 +129,10 @@ struct MainWindow: View {
         .environment(\.openLogin, { showLogin = true })
         .environment(\.openDestination, openDestination)
         .environmentObject(artworkStore)
+    }
+
+    private var panelObservedWindow: some View {
+        configuredWindow
         .onReceive(NotificationCenter.default.publisher(for: .showDownloadedMusic)) { _ in
             guard SongDownloadUI.isAvailable else { return }
             player.showNowPlaying = false
@@ -129,6 +160,10 @@ struct MainWindow: View {
             if insufficient { player.activePanel = nil }
         }
         .onChange(of: reduceMotion) { _, value in panels.reduceMotion = value }
+    }
+
+    private var artworkObservedWindow: some View {
+        panelObservedWindow
         .onChange(of: voiceOverEnabled) { _, _ in revealChrome() }
         .onChange(of: settings.showDesktopLyrics) { _, _ in
             guard testing == nil else { return }
@@ -144,6 +179,10 @@ struct MainWindow: View {
             if testing == nil { artworkStore.setArtworkNeeded(needsCurrentArtwork) }
             revealChrome()
         }
+    }
+
+    private var chromeObservedWindow: some View {
+        artworkObservedWindow
         .onChange(of: columnVisibility) { _, _ in revealChrome() }
         .onChange(of: searchFocused) { _, _ in revealChrome() }
         .onChange(of: topControlsFocused) { _, _ in revealChrome() }
@@ -155,27 +194,10 @@ struct MainWindow: View {
             menuTracking = false
             revealChrome()
         }
-        .onKeyPress { _ in
+        .onKeyPress(phases: .down) { (_: KeyPress) -> KeyPress.Result in
             if hidesTopChrome { revealChrome() }
-            return .ignored
+            return KeyPress.Result.ignored
         }
-        .onDisappear { chromeTask?.cancel() }
-        .sheet(isPresented: $showLogin) { LoginSheet() }
-        .alert("窗口空间不足", isPresented: $panels.insufficientSpace) {
-            Button("知道了", role: .cancel) {}
-        } message: {
-            Text("完整单排播放栏与右侧面板需要更多空间。请放大窗口，或手动收起左侧导航栏后再打开歌词或播放队列。")
-        }
-        .overlay(alignment: .top) {
-            if let toast = toasts.current {
-                ToastView(toast: toast)
-                    .transition(.move(edge: .top).combined(with: .opacity))
-                    .padding(.top, 12)
-            }
-        }
-        .animation(reduceMotion ? nil : .spring(response: 0.38, dampingFraction: 1), value: panels.insideReveal)
-        .animation(reduceMotion ? nil : AppAnimation.smooth, value: player.showNowPlaying)
-        .animation(reduceMotion ? nil : AppAnimation.quick, value: topChromeVisible)
     }
 
     private var navigationColumns: some View {
