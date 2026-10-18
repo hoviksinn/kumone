@@ -2,10 +2,11 @@ import AVFoundation
 import AudioToolbox
 import Synchronization
 
-/// A bounded, allocation-free render observer on the EXISTING source AU.
-/// The seqlock publishes a paired timestamp and cumulative source frame
-/// count. Pauses contribute zero frames, even if the native player clock's
-/// host mapping jumps. It remains correct before time-pitch at any rate.
+/// Opt-in diagnostic observer on the EXISTING source AU, before time-pitch.
+/// The seqlock publishes paired timestamps and cumulative render requests.
+/// A source paused inside a running graph renders silence: those AU requests
+/// are NOT song media frames. Production transport uses AVAudioPlayerNode's
+/// own native pause/play timeline, never this diagnostic counter.
 final class SourceRenderClock: @unchecked Sendable {
     struct Snapshot {
         var framesAtStart: UInt64

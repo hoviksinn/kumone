@@ -108,8 +108,8 @@ struct PlaybackTransportContinuityTests {
             if [7, 19, 33].contains(chunk) {
                 subject.pause()
                 let paused = subject.transportSnapshotForTesting(.a)
-                #expect(paused.paused && !paused.engineRunning)
-                #expect(paused.nodePlaying, "freeze the complete graph without discarding prefetched source PCM")
+                #expect(paused.paused && paused.engineRunning)
+                #expect(!paused.nodePlaying, "native source pauses while the DSP graph remains live")
                 Thread.sleep(forTimeInterval: 0.025)
                 let stillPaused = subject.transportSnapshotForTesting(.a)
                 #expect(stillPaused.position == paused.position)
@@ -264,7 +264,7 @@ struct PlaybackTransportContinuityTests {
         for _ in 0..<8 { _ = try samples(subject); _ = try samples(reference) }
         let originalB = subject.transportSnapshotForTesting(.b)
         subject.pause()
-        #expect(subject.transportSnapshotForTesting(.b).nodePlaying)
+        #expect(!subject.transportSnapshotForTesting(.b).nodePlaying)
         subject.play(deck: .a, from: 1.75)
         reference.play(deck: .a, from: 1.75)
         let resumedB = subject.transportSnapshotForTesting(.b)
@@ -328,6 +328,49 @@ struct PlaybackTransportContinuityTests {
         }
         try TransportEvidence.record(["name": "pauseBeforeFirstRender", "heldSeconds": heldSeconds,
             "maximumSampleError": maximumError, "comparedFramesPerChannel": 24 * Int(Self.quantum)])
+    }
+
+    @Test(arguments: [false, true])
+    func aRunningGraphDrainsPausedDSPWithoutLosingSourcePCM(bothDecks: Bool) throws {
+        let url = try fixture()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let reference = try engine(playing: url, bothDecks: bothDecks)
+        let subject = try engine(playing: url, bothDecks: bothDecks)
+        defer { reference.stopAll(); subject.stopAll() }
+        let golden = try TransportPCMReference(engine: reference, quantum: Self.quantum)
+        for _ in 0..<8 { try golden.compare(subject.renderOfflineForTesting(Self.quantum)) }
+        subject.pause()
+        let paused = subject.transportSnapshotForTesting(.a)
+        #expect(paused.paused && paused.engineRunning && !paused.nodePlaying)
+        let sourceFramesBeforeDrain = golden.comparedFrames
+        for _ in 0..<12 {
+            try golden.compare(subject.renderOfflineForTesting(Self.quantum), allowingIntentionalSilence: true)
+            #expect(subject.position(of: .a) == paused.position,
+                "rendering the paused DSP tail and silence must not advance source media time")
+        }
+        let tailFrames = golden.comparedFrames - sourceFramesBeforeDrain
+        let latencyBound = Int(ceil(paused.sourceProcessingLatency * Self.sampleRate)) + 2 * Int(Self.quantum)
+        #expect(tailFrames <= latencyBound, "the natural DSP tail is bounded by measured AU latency")
+        subject.resume()
+        let resumed = subject.transportSnapshotForTesting(.a)
+        #expect(resumed.generation == paused.generation && resumed.startOffset == paused.startOffset)
+        #expect(abs(resumed.position - paused.position) <= 2 / Self.sampleRate)
+        let refillBuffers = Int(ceil(Double(latencyBound) / Double(Self.quantum)))
+        var refillSilenceFrames = 0
+        for chunk in 0..<24 {
+            refillSilenceFrames += try golden.compare(subject.renderOfflineForTesting(Self.quantum),
+                allowingIntentionalSilence: chunk < refillBuffers)
+        }
+        #expect(refillSilenceFrames <= latencyBound,
+            "only measured DSP refill latency may insert silence after native source resume")
+        #expect(golden.maximumSampleError < 0.000_01,
+            "every non-silent source frame must match the next uninterrupted golden frame; no skip or repeat")
+        #expect(golden.maximumSignal > 0.1 && golden.comparedFrames > 24 * Int(Self.quantum))
+        try TransportEvidence.record(["name": "pausedDSPDrainAndRefill", "decks": bothDecks ? 2 : 1,
+            "pausedRenderedFrames": 12 * Int(Self.quantum), "naturalDSPTailFrames": tailFrames,
+            "resumeDSPRefillSilenceFrames": refillSilenceFrames, "measuredAULatencySeconds": paused.sourceProcessingLatency,
+            "latencyBoundFrames": latencyBound, "comparedSourceFrames": golden.comparedFrames,
+            "maximumSampleError": golden.maximumSampleError, "maximumSignal": golden.maximumSignal])
     }
 
 }

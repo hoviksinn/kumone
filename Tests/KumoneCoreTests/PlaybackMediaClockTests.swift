@@ -125,7 +125,10 @@ struct PlaybackMediaClockTests {
         let format = DeckChain.format
         let file = try AVAudioFile(forWriting: url, settings: format.settings,
                                    commonFormat: .pcmFormatFloat32, interleaved: false)
-        let buffer = try #require(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 4096))
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 4096) else {
+            throw NSError(domain: "PlaybackMediaClock", code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "Could not allocate encoded fixture PCM"])
+        }
         var offset = 0
         let total = Int(30 * format.sampleRate)
         while offset < total {
@@ -159,7 +162,7 @@ struct PlaybackMediaClockTests {
          "lastResumeRequestedAt": snapshot.lastResumeRequestedAt,
          "lastResumeExecutedAt": snapshot.lastResumeExecutedAt,
          "lastResumeCompletedAt": snapshot.lastResumeCompletedAt,
-         "renderedSourceFrames": snapshot.renderedSourceFrames,
+         "renderedSourceAUFramesIncludingSilence": snapshot.renderedSourceFrames,
          "nativeClockBiasFrames": snapshot.nativeClockBiasFrames,
          "sourceProcessingLatencySeconds": snapshot.sourceProcessingLatency,
          "sourceOutputPresentationLatencySeconds": snapshot.sourceOutputPresentationLatency,
@@ -188,6 +191,8 @@ struct PlaybackMediaClockTests {
         try data.write(to: url, options: .atomic)
         let compact = try JSONSerialization.data(withJSONObject: report, options: [.sortedKeys])
         print("TRANSPORT_CLOCK_DIAGNOSTIC \(String(decoding: compact, as: UTF8.self))")
+        let failures = report["validationFailures"] as? [String] ?? []
+        #expect(failures.isEmpty, "\(failures.joined(separator: "; "))")
     }
 
     private func measureNativeClocks(cancellation: ClockMeasurementCancellation) throws -> [String: Any] {
@@ -216,11 +221,25 @@ struct PlaybackMediaClockTests {
                     "reason": "no advancing stereo final-output tap"]
         }
         var cases: [[String: Any]] = []
+        var failures: [String] = []
+        func check(_ condition: Bool, _ message: String) { if !condition { failures.append(message) } }
+        func persistCheckpoint() {
+            let root = ProcessInfo.processInfo.environment["GITHUB_WORKSPACE"] ?? FileManager.default.currentDirectoryPath
+            let destination = URL(fileURLWithPath: root).appendingPathComponent(".build/media-clock-diagnostic.json")
+            let partial: [String: Any] = ["available": true, "incomplete": true,
+                "scope": "partial live render observation; test has not completed validation",
+                "cases": cases, "pcm": capture.summary, "validationFailures": failures]
+            do {
+                try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try JSONSerialization.data(withJSONObject: partial, options: [.prettyPrinted, .sortedKeys])
+                    .write(to: destination, options: .atomic)
+            } catch { failures.append("Could not persist partial audio clock evidence: \(error)") }
+        }
         var initialSourceClockOffset: Double?
         func validateFrozenSourceClock(_ snapshot: PlaybackEngine.TransportSnapshot) {
             let records = renderCapture.records
             guard let last = records.last(where: { $0.validStereo && $0.rightFirst > 0.005 }) else {
-                Issue.record("native render quanta must contain the encoded non-silent source")
+                check(false, "native render quanta must contain the encoded non-silent source")
                 return
             }
             let first = (Double(last.leftFirst) / Double(last.rightFirst) - 1) / 0.04
@@ -233,8 +252,8 @@ struct PlaybackMediaClockTests {
             if let baseline = initialSourceClockOffset {
                 // The source node can be one render block ahead of downstream
                 // DSP. This fixed pipeline bound cannot grow with pause time.
-                #expect(abs(offset - baseline) <= bound,
-                    "native media time must stay aligned with decoded source PCM, not elapsed pause duration")
+                check(abs(offset - baseline) <= bound,
+                    "native/PCM drift \(offset - baseline)s exceeds one quantum \(bound)s")
             } else { initialSourceClockOffset = offset }
             cases.append(["frozenSourceClockPosition": snapshot.position,
                 "decodedRenderSourcePosition": first, "sourceClockOffsetSeconds": offset,
@@ -243,6 +262,7 @@ struct PlaybackMediaClockTests {
                 "absoluteDACAlignmentVerified": false,
                 "renderQuantumFrames": last.frames, "renderQuantumHostTime": last.hostTime])
             print("TRANSPORT_CLOCK_CHECKPOINT source=\(snapshot.position) decoded=\(first) signedLead=\(offset) sourceFrames=\(snapshot.renderedSourceFrames) nativeBiasFrames=\(snapshot.nativeClockBiasFrames)")
+            persistCheckpoint()
         }
         for duration in [0.1, 1.0, 5.0, 10.0] {
             try cancellation.check()
@@ -254,13 +274,16 @@ struct PlaybackMediaClockTests {
             let pausedPCM = capture.latest
             try cancellation.sleep(duration)
             let held = engine.transportSnapshotForTesting(.a)
-            #expect(held.position == paused.position, "media time must remain frozen during a pause")
+            check(held.position == paused.position, "media time advanced during \(duration)s native pause")
             let heldPCM = capture.latest
             engine.resume()
             let resumed = engine.transportSnapshotForTesting(.a)
             let resumedPCM = capture.latest
             let advanced = waitForOutput(after: heldPCM?.receivedAt ?? 0)
-            _ = try #require(advanced, "output must resume after holding for \(duration) seconds")
+            guard advanced else {
+                throw NSError(domain: "PlaybackMediaClock", code: 2,
+                    userInfo: [NSLocalizedDescriptionKey: "Output did not resume after \(duration)s pause"])
+            }
             try cancellation.sleep(0.15)
             let after = engine.transportSnapshotForTesting(.a)
             cases.append(["requestedPauseSeconds": duration,
@@ -277,10 +300,13 @@ struct PlaybackMediaClockTests {
             }
             let resumed = engine.transportSnapshotForTesting(.a)
             let resumedPCM = capture.latest
-            #expect(!resumed.paused, "serial command queue must preserve final resume intent")
-            #expect(resumed.generation == before.generation, "pause/resume must not seek or reschedule")
+            check(!resumed.paused, "rapid commands lost final resume intent")
+            check(resumed.generation == before.generation, "pause/resume changed source schedule generation")
             let advanced = waitForOutput(after: resumedPCM?.receivedAt ?? 0)
-            _ = try #require(advanced, "output must resume after \(count) rapid cycles")
+            guard advanced else {
+                throw NSError(domain: "PlaybackMediaClock", code: 3,
+                    userInfo: [NSLocalizedDescriptionKey: "Output did not resume after \(count) rapid cycles"])
+            }
             try cancellation.sleep(0.15)
             let after = engine.transportSnapshotForTesting(.a)
             cases.append(["rapidPauseCycles": count, "before": dictionary(before, pcm: beforePCM),
@@ -292,90 +318,141 @@ struct PlaybackMediaClockTests {
         engine.pause()
         let finalSnapshot = engine.transportSnapshotForTesting(.a)
         validateFrozenSourceClock(finalSnapshot)
-        let quantumReport = validateRenderQuanta(renderCapture)
         let commands = engine.transportCommandTraceForTesting()
+        let quantumReport = validateRenderQuanta(renderCapture, commands: commands, latency: finalSnapshot.sourceProcessingLatency, failures: &failures)
         for (index, command) in commands.enumerated() {
-            #expect(command.sequence == UInt64(index + 1))
-            #expect(command.requestedAt <= command.executedAt && command.executedAt <= command.completedAt)
-            if index > 0 { #expect(commands[index - 1].completedAt <= command.executedAt) }
+            check(command.sequence == UInt64(index + 1), "transport command sequence is not FIFO")
+            check(command.requestedAt <= command.executedAt && command.executedAt <= command.completedAt, "command timestamps are unordered")
+            if index > 0 { check(commands[index - 1].completedAt <= command.executedAt, "transport commands overlapped") }
         }
         return ["scope": "real-time final mix output before physical device; stereo ratio encodes source media time",
                 "available": true, "sourceSampleRate": DeckChain.format.sampleRate,
                 "cases": cases, "pcm": capture.summary, "renderQuanta": quantumReport,
-                "executedCommandRecords": commands.map(\.evidence)]
+                "executedCommandRecords": commands.map(\.evidence), "validationFailures": failures]
     }
 
-    private func validateRenderQuanta(_ capture: PlaybackEngine.RenderQuantumCaptureForTesting) -> [String: Any] {
+    private func validateRenderQuanta(_ capture: PlaybackEngine.RenderQuantumCaptureForTesting,
+        commands: [PlaybackEngine.TransportCommandRecord], latency: Double,
+        failures: inout [String]) -> [String: Any] {
         let records = capture.records
+        var pauseWindows: [(UInt64, UInt64)] = []
+        var pauseBegan: UInt64?
+        for command in commands where command.accepted {
+            if command.command == "pause" { pauseBegan = command.executedAt }
+            if command.command == "resume", let start = pauseBegan {
+                pauseWindows.append((start, command.completedAt))
+                pauseBegan = nil
+            }
+        }
+        if let pauseBegan { pauseWindows.append((pauseBegan, .max)) }
+        func intentionalPause(_ record: PlaybackEngine.RenderQuantumCaptureForTesting.Record) -> Bool {
+            pauseWindows.contains { record.receivedAt >= $0.0 && record.receivedAt <= $0.1 }
+        }
         var previousLast: Double?
         var validFrames = 0
         var invalidBuffers = 0
         var invalidTimestamps = 0
         var renderErrors = 0
         var silenceFlaggedBuffers = 0
-        var silenceFrames = 0
-        var consecutiveSilence = 0
-        var maximumSilence = 0
+        var pausedSilenceFrames = 0
+        var resumeSilenceFrames = 0
+        var currentRefillSilence = 0
+        var maximumRefillSilence = 0
         var maximumGap = 0.0
         var maximumRepeat = 0.0
         var maximumDurationErrorFrames = 0.0
         var largestQuantum: UInt32 = 0
+        var failedRecords: [[String: Any]] = []
+        func evidence(_ record: PlaybackEngine.RenderQuantumCaptureForTesting.Record, reason: String) -> [String: Any] {
+            ["reason": reason, "frames": record.frames, "firstActiveFrame": record.firstActiveFrame,
+             "activeFrames": record.activeFrames, "sampleTime": record.sampleTime,
+             "hostTime": record.hostTime, "receivedAtHostTime": record.receivedAt,
+             "leftFirst": record.leftFirst, "rightFirst": record.rightFirst,
+             "leftLast": record.leftLast, "rightLast": record.rightLast,
+             "outputIsSilence": record.outputIsSilence, "validStereo": record.validStereo,
+             "renderError": record.renderError]
+        }
         for record in records {
             largestQuantum = max(largestQuantum, record.frames)
             if !record.validSampleTime || !record.validHostTime { invalidTimestamps += 1 }
             if record.renderError { renderErrors += 1 }
             if record.outputIsSilence { silenceFlaggedBuffers += 1 }
-            guard record.validStereo else { invalidBuffers += 1; continue }
-            if abs(record.leftFirst) < 0.000_01 && abs(record.rightFirst) < 0.000_01,
-               abs(record.leftLast) < 0.000_01 && abs(record.rightLast) < 0.000_01 {
-                if previousLast != nil {
-                    silenceFrames += Int(record.frames)
-                    consecutiveSilence += Int(record.frames)
-                    maximumSilence = max(maximumSilence, consecutiveSilence)
-                }
+            guard record.validStereo else {
+                invalidBuffers += 1
+                if failedRecords.count < 12 { failedRecords.append(evidence(record, reason: "missing stereo PCM")) }
                 continue
             }
-            consecutiveSilence = 0
+            let silent = Int(record.frames - record.activeFrames)
+            if intentionalPause(record) {
+                pausedSilenceFrames += silent
+                currentRefillSilence = 0
+            } else if previousLast != nil {
+                resumeSilenceFrames += silent
+                currentRefillSilence += Int(record.firstActiveFrame)
+                if record.activeFrames == 0 {
+                    // firstActiveFrame already contains the whole zero block.
+                    maximumRefillSilence = max(maximumRefillSilence, currentRefillSilence)
+                } else {
+                    maximumRefillSilence = max(maximumRefillSilence, currentRefillSilence)
+                    currentRefillSilence = Int(record.frames - record.firstActiveFrame - record.activeFrames)
+                }
+            }
+            guard record.activeFrames > 0 else { continue }
             guard record.rightFirst > 0.005, record.rightLast > 0.005 else {
                 invalidBuffers += 1
+                if failedRecords.count < 12 { failedRecords.append(evidence(record, reason: "nonzero boundary failed decoding")) }
                 continue
             }
             let first = (Double(record.leftFirst) / Double(record.rightFirst) - 1) / 0.04
             let last = (Double(record.leftLast) / Double(record.rightLast) - 1) / 0.04
             guard first.isFinite, last.isFinite, last >= first else {
                 invalidBuffers += 1
+                if failedRecords.count < 12 { failedRecords.append(evidence(record, reason: "nonfinite or reversed source labels")) }
                 continue
             }
-            let durationError = abs((last - first) * capture.sampleRate - Double(record.frames - 1))
+            let durationError = abs((last - first) * capture.sampleRate - Double(record.activeFrames - 1))
             maximumDurationErrorFrames = max(maximumDurationErrorFrames, durationError)
+            var gap = 0.0
             if let previousLast {
-                let gap = first - previousLast - 1 / capture.sampleRate
+                gap = first - previousLast - 1 / capture.sampleRate
                 maximumGap = max(maximumGap, gap)
                 maximumRepeat = max(maximumRepeat, -gap)
             }
+            if (durationError > 2 || abs(gap) * capture.sampleRate > 2), failedRecords.count < 12 {
+                var raw = evidence(record, reason: "source frame span or boundary discontinuity")
+                raw["decodedFirstSeconds"] = first
+                raw["decodedLastSeconds"] = last
+                raw["previousDecodedLastSeconds"] = previousLast ?? -1
+                raw["gapFrames"] = gap * capture.sampleRate
+                raw["durationErrorFrames"] = durationError
+                failedRecords.append(raw)
+            }
             previousLast = last
-            validFrames += Int(record.frames)
+            validFrames += Int(record.activeFrames)
         }
-        #expect(capture.overflowCount == 0, "measurement cannot silently drop render records")
-        #expect(invalidTimestamps == 0 && renderErrors == 0, "all render evidence needs valid native timestamps and successful rendering")
-        #expect(validFrames > 4096, "silent or absent render output cannot prove continuity")
-        #expect(invalidBuffers == 0, "all non-silent render records must decode; never ignore failed PCM measurements")
-        #expect(maximumDurationErrorFrames <= 2, "each rendered block must contain exactly its source frame span")
-        #expect(maximumGap * capture.sampleRate <= 2, "no source PCM may be skipped across native pause/resume")
-        #expect(maximumRepeat * capture.sampleRate <= 2, "no source PCM may be repeated across native pause/resume")
-        // A restart may issue its first IO quantum before player.play executes.
-        // Record every such frame; a multi-quantum silent gap is a regression.
-        #expect(maximumSilence <= Int(largestQuantum), "resume must not insert multiple silent render quanta")
+        let refillBound = Int(ceil(latency * capture.sampleRate)) + 2 * Int(largestQuantum)
+        func check(_ condition: Bool, _ message: String) { if !condition { failures.append(message) } }
+        check(capture.overflowCount == 0, "render observer overflowed")
+        check(invalidTimestamps == 0 && renderErrors == 0, "render evidence has invalid timestamps or render errors")
+        check(validFrames > 4096, "insufficient non-silent render PCM to prove continuity")
+        check(invalidBuffers == 0, "\(invalidBuffers) non-silent render records failed decoding")
+        check(maximumDurationErrorFrames <= 2, "rendered block source span error \(maximumDurationErrorFrames) frames")
+        check(maximumGap * capture.sampleRate <= 2, "source skipped \(maximumGap * capture.sampleRate) frames")
+        check(maximumRepeat * capture.sampleRate <= 2, "source repeated \(maximumRepeat * capture.sampleRate) frames")
+        check(maximumRefillSilence <= refillBound, "resume silence \(maximumRefillSilence) exceeds measured DSP latency bound \(refillBound)")
         return ["scope": "existing deck delay AudioUnit post-render; before mixer/device, not DAC",
             "sampleRate": capture.sampleRate, "totalBuffers": records.count,
             "validSourceFrames": validFrames, "invalidBuffers": invalidBuffers,
             "invalidTimestamps": invalidTimestamps, "renderErrors": renderErrors,
-            "silenceFlaggedBuffers": silenceFlaggedBuffers,
-            "overflowRecords": capture.overflowCount, "silenceFramesAfterSourceStarted": silenceFrames,
-            "maximumConsecutiveSilenceFrames": maximumSilence,
+            "silenceFlaggedBuffers": silenceFlaggedBuffers, "overflowRecords": capture.overflowCount,
+            "intentionalPausedSilenceFrames": pausedSilenceFrames,
+            "postResumeDSPRefillSilenceFrames": resumeSilenceFrames,
+            "maximumConsecutiveDSPRefillSilenceFrames": maximumRefillSilence,
+            "DSPRefillLatencyBoundFrames": refillBound, "measuredAULatencySeconds": latency,
             "maximumSourceGapFrames": maximumGap * capture.sampleRate,
             "maximumSourceRepeatFrames": maximumRepeat * capture.sampleRate,
-            "maximumBlockDurationErrorFrames": maximumDurationErrorFrames]
+            "maximumBlockDurationErrorFrames": maximumDurationErrorFrames,
+            "failedRenderRecords": failedRecords]
     }
 }
 }
