@@ -48,6 +48,9 @@ jobs:
           test -s .build/transport-validation.json
           test -s .build/media-clock-diagnostic.json
           test -s .build/service-clock-validation.json
+          test -s .build/transition-segment-validation.json
+          test -s .build/window-navigation-validation.json
+          test -s .build/playback-boundary-diagnostic.json
 
       # Ad-hoc signature only. No certificate, notarization, or release secrets.
       - name: Build app (macOS 26, arm64)
@@ -82,19 +85,23 @@ jobs:
             .build/media-clock-diagnostic.json
             .build/service-clock-validation.json
             .build/transition-segment-validation.json
+            .build/window-navigation-validation.json
+            .build/playback-boundary-diagnostic.json
           if-no-files-found: error
           retention-days: 14
           compression-level: 0
 
-      - name: Upload audio clock diagnostics on failure
-        if: failure()
+      - name: Upload validation diagnostics
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: QieTing-AudioClock-Evidence-${{ github.run_number }}-${{ github.run_attempt }}
+          name: QieTing-Validation-Evidence-${{ github.run_number }}-${{ github.run_attempt }}
           path: |
             .build/transport-validation.json
             .build/media-clock-diagnostic.json
             .build/service-clock-validation.json
             .build/transition-segment-validation.json
+            .build/window-navigation-validation.json
+            .build/playback-boundary-diagnostic.json
           if-no-files-found: warn
           retention-days: 14
