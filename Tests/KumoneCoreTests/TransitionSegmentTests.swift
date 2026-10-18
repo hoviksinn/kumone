@@ -719,27 +719,46 @@ struct TransitionSegmentTests {
                     evidence.values(["failure": "fixture did not provide its required tempo ramp"])
                     return nil
                 }
-                let target = ramp.start + 0.25 * ramp.leadSeconds
+                // Observe the geometric midpoint of the fixture's source-time
+                // ramp, independently of the rate assertion below. The first
+                // control tick anchors the real glide at its observed media
+                // position, and effectSnapshot reads the latest parameter
+                // write, so a sample just past the first quarter can still
+                // describe the entry tick rather than a developed bend.
+                // Bound the observation to the central part of the ramp;
+                // never wait until an expected rate happens to appear.
+                let target = ramp.start + 0.5 * ramp.leadSeconds
+                let observationEnd = ramp.start + 0.625 * ramp.leadSeconds
                 evidence.values(["rampWindowStartSeconds": ramp.start,
-                    "rampWindowEndSeconds": ramp.end])
+                    "rampWindowEndSeconds": ramp.end,
+                    "rampObservationBasis": "source-media geometric midpoint; no rate-threshold polling",
+                    "rampObservationWindowStartSeconds": target,
+                    "rampObservationWindowEndSeconds": observationEnd,
+                    "nominalExpectedRateAtTarget": ramp.rate(at: target)])
                 let bendDeadline = Date().addingTimeInterval(12)
                 var reachedRampPosition = false
                 while Date() < bendDeadline {
                     let position = engine.position(of: .a)
-                    if position >= target, position < ramp.end, !engine.segmentIsPlaying {
+                    if position >= target, position <= observationEnd, !engine.segmentIsPlaying {
                         reachedRampPosition = true
                         break
                     }
-                    if position >= ramp.end || engine.segmentIsPlaying || !engine.hasPendingTransition { break }
+                    if position > observationEnd || engine.segmentIsPlaying || !engine.hasPendingTransition { break }
                     Thread.sleep(forTimeInterval: 0.02)
                 }
+                let observedPositionBeforeRead = engine.position(of: .a)
                 let bent = engine.effectSnapshot(of: .a)
+                let observedPositionAfterRead = engine.position(of: .a)
                 evidence.values(["rampObservationTargetSeconds": target,
                     "reachedRequiredRampPosition": reachedRampPosition,
+                    "observedMediaBeforeRateReadSeconds": observedPositionBeforeRead,
+                    "observedMediaAfterRateReadSeconds": observedPositionAfterRead,
+                    "nominalExpectedRateAtObservedMedia": ramp.rate(at: observedPositionBeforeRead),
+                    "observedRate": bent.rate,
                     "observedBendDeviation": abs(bent.rate - 1), "observedBendPadDB": bent.ratePadDB])
                 evidence.checkpoint("pre-splice-ramp-observation", engine: engine)
                 guard reachedRampPosition else {
-                    evidence.values(["failure": "outgoing media did not reach the required ramp position before splice/timeout"])
+                    evidence.values(["failure": "outgoing media did not reach the midpoint observation window before splice/timeout"])
                     return nil
                 }
                 observations.append(("\(ending.rawValue)/PRE-SPLICE BEND", .a, Worst(

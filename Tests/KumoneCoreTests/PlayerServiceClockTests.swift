@@ -394,13 +394,19 @@ struct PlayerServiceClockTests {
         // Merely querying its clock cannot produce a render timestamp.
         var renderedBuffers = 0
         var maximumOutput: Float = 0
+        var firstAudibleBuffer: Int?
         for _ in 0..<100 {
             let output = try samples(subject)
-            maximumOutput = max(maximumOutput, output.map(abs).max() ?? 0)
+            let outputPeak = output.map(abs).max() ?? 0
+            maximumOutput = max(maximumOutput, outputPeak)
             renderedBuffers += 1
+            if outputPeak > 0.01 && firstAudibleBuffer == nil { firstAudibleBuffer = renderedBuffers }
             _ = try await player.samplePlaybackTime()
             let current = subject.transportSnapshotForTesting(.b)
-            if current.nodePlaying && current.position > frozen.seconds { break }
+            // A source timestamp can advance before the graph's existing
+            // DSP pipeline has delivered its first resumed output. Drive IO
+            // through that boundary rather than stopping at source start.
+            if current.nodePlaying && current.position > frozen.seconds && outputPeak > 0.01 { break }
             try await Task.sleep(for: .milliseconds(5))
         }
         let resumedSample = try #require(await player.samplePlaybackTime())
@@ -417,6 +423,7 @@ struct PlayerServiceClockTests {
             "heldGeneration": held.generation, "resumedGeneration": resumed.generation,
             "pausedMediaSeconds": frozen.seconds, "resumedMediaSeconds": resumedSample.seconds,
             "renderedResumeBuffers": renderedBuffers, "maximumOutput": maximumOutput,
+            "firstAudibleBuffer": firstAudibleBuffer.map { $0 as Any } ?? NSNull(),
             "nativeResumeAnchors": subject.transportResumeAnchorTraceForTesting().map(\.evidence),
         ])
     }
