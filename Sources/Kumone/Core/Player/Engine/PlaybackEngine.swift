@@ -1596,7 +1596,7 @@ final class PlaybackEngine: @unchecked Sendable {
         private var installed = false
 
         private static let callback: AURenderCallback = { context, flags, time, _, count, data in
-            guard flags.pointee.contains(.unitRenderAction_PostRender), let context else { return noErr }
+            guard flags.pointee.contains(.unitRenderAction_PostRender) else { return noErr }
             let capture = Unmanaged<RenderQuantumCaptureForTesting>.fromOpaque(context).takeUnretainedValue()
             capture.receive(time.pointee, frames: count, buffers: data, flags: flags.pointee)
             return noErr
