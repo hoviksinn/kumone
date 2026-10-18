@@ -2,11 +2,11 @@ import AVFoundation
 import AudioToolbox
 import Synchronization
 
-/// Opt-in diagnostic observer on the EXISTING source AU, before time-pitch.
-/// The seqlock publishes paired timestamps and cumulative render requests.
-/// A source paused inside a running graph renders silence: those AU requests
-/// are NOT song media frames. Production transport uses AVAudioPlayerNode's
-/// own native pause/play timeline, never this diagnostic counter.
+/// Render-boundary observer on the EXISTING source AU, before time-pitch.
+/// The seqlock publishes paired timestamps and request counts so native resume
+/// can choose this source's next node-time boundary rather than output "now".
+/// A paused source renders silence: cumulative AU requests are NOT song media
+/// frames. Media time still comes from AVAudioPlayerNode's native timeline.
 final class SourceRenderClock: @unchecked Sendable {
     struct Snapshot {
         var framesAtStart: UInt64
@@ -55,6 +55,8 @@ final class SourceRenderClock: @unchecked Sendable {
     }
 
     deinit { if let token { unit.removeRenderObserver(token) } }
+
+    var hasObservedRender: Bool { storage.revision.load(ordering: .acquiring) > 0 }
 
     var snapshot: Snapshot? {
         // Bounded retries: a position read may retain the previous media

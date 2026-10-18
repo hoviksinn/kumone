@@ -14,6 +14,20 @@ extension PlaybackEngine.TransportCommandRecord {
     }
 }
 
+extension PlaybackEngine.TransportResumeAnchorRecord {
+    var evidence: [String: Any] {
+        ["deck": deck, "choice": choice, "observedAtHostTime": observedAt,
+         "sourceSampleTime": sourceSampleTime ?? -1,
+         "sourceRenderFrameCount": sourceFrameCount ?? 0,
+         "sourceRenderEnd": sourceRenderEnd ?? -1,
+         "sourceHostTime": sourceHostTime ?? 0,
+         "nodeSampleTime": nodeSampleTime ?? -1,
+         "nodeHostTime": nodeHostTime ?? 0,
+         "manualOutputFrames": manualOutputFrames ?? -1,
+         "selectedSampleTime": selectedSampleTime ?? -1]
+    }
+}
+
 private final class ClockMeasurementCancellation: @unchecked Sendable {
     private let lock = NSLock()
     private var cancelled = false
@@ -166,6 +180,7 @@ struct PlaybackMediaClockTests {
          "nativeClockBiasFrames": snapshot.nativeClockBiasFrames,
          "sourceProcessingLatencySeconds": snapshot.sourceProcessingLatency,
          "sourceOutputPresentationLatencySeconds": snapshot.sourceOutputPresentationLatency,
+         "actualSourceRenderLeadFrames": snapshot.actualSourceRenderLeadFrames ?? -1,
          "outputPCMFirstMediaSeconds": pcm?.first ?? -1,
          "outputPCMLastMediaSeconds": pcm?.last ?? -1,
          "outputPCMSampleRate": pcm?.sampleRate ?? 0,
@@ -228,7 +243,9 @@ struct PlaybackMediaClockTests {
             let destination = URL(fileURLWithPath: root).appendingPathComponent(".build/media-clock-diagnostic.json")
             let partial: [String: Any] = ["available": true, "incomplete": true,
                 "scope": "partial live render observation; test has not completed validation",
-                "cases": cases, "pcm": capture.summary, "validationFailures": failures]
+                "cases": cases, "pcm": capture.summary,
+                "nativeResumeAnchors": engine.transportResumeAnchorTraceForTesting().map(\.evidence),
+                "validationFailures": failures]
             do {
                 try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
                 try JSONSerialization.data(withJSONObject: partial, options: [.prettyPrinted, .sortedKeys])
@@ -244,19 +261,23 @@ struct PlaybackMediaClockTests {
             }
             let first = (Double(last.leftFirst) / Double(last.rightFirst) - 1) / 0.04
             let offset = snapshot.position - first
-            // The source AU and downstream delay observe different positions
-            // because DSP pulls source frames ahead. Measure the signed lead
-            // and require it to stay constant, rather than calling this DAC
-            // presentation time or subtracting an invented UI correction.
-            let bound = Double(last.frames + 2) / renderCapture.sampleRate
-            if let baseline = initialSourceClockOffset {
-                // The source node can be one render block ahead of downstream
-                // DSP. This fixed pipeline bound cannot grow with pause time.
-                check(abs(offset - baseline) <= bound,
-                    "native/PCM drift \(offset - baseline)s exceeds one quantum \(bound)s")
-            } else { initialSourceClockOffset = offset }
+            // Pausing freezes the source while already-rendered DSP tail can
+            // continue downstream. Thus an immediate paused checkpoint and a
+            // fully-drained checkpoint cannot share one constant lead. Bound
+            // their actual media difference by the measured processing delay
+            // and render quanta; keep the signed baseline change as evidence.
+            // This is a pipeline-range check, not sample-perfect DAC alignment.
+            let quantum = Double(last.frames + 2) / renderCapture.sampleRate
+            let lowerBound = -quantum
+            let upperBound = snapshot.sourceProcessingLatency + 2 * quantum
+            check(offset >= lowerBound && offset <= upperBound,
+                "native/PCM boundary lead \(offset)s outside measured pipeline [\(lowerBound), \(upperBound)]s")
+            if initialSourceClockOffset == nil { initialSourceClockOffset = offset }
             cases.append(["frozenSourceClockPosition": snapshot.position,
                 "decodedRenderSourcePosition": first, "sourceClockOffsetSeconds": offset,
+                "changeFromFirstBoundarySeconds": offset - (initialSourceClockOffset ?? offset),
+                "minimumPipelineLeadSeconds": lowerBound, "maximumPipelineLeadSeconds": upperBound,
+                "comparisonPhase": "paused-boundary-with-draining-DSP-tail",
                 "sourceProcessingLatencySeconds": snapshot.sourceProcessingLatency,
                 "sourceOutputPresentationLatencySeconds": snapshot.sourceOutputPresentationLatency,
                 "absoluteDACAlignmentVerified": false,
@@ -328,7 +349,9 @@ struct PlaybackMediaClockTests {
         return ["scope": "real-time final mix output before physical device; stereo ratio encodes source media time",
                 "available": true, "sourceSampleRate": DeckChain.format.sampleRate,
                 "cases": cases, "pcm": capture.summary, "renderQuanta": quantumReport,
-                "executedCommandRecords": commands.map(\.evidence), "validationFailures": failures]
+                "executedCommandRecords": commands.map(\.evidence),
+                "nativeResumeAnchors": engine.transportResumeAnchorTraceForTesting().map(\.evidence),
+                "validationFailures": failures]
     }
 
     private func validateRenderQuanta(_ capture: PlaybackEngine.RenderQuantumCaptureForTesting,

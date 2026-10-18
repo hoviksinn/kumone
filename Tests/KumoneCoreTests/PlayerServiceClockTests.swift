@@ -200,8 +200,12 @@ struct PlayerServiceClockTests {
         }
         #expect(golden.maximumSampleError < 0.000_01,
                 "every audible tail/resume frame must match the next uninterrupted golden frame")
-        #expect(refillSilence <= Int(ceil(paused.sourceProcessingLatency * sampleRate)) + 2 * Int(quantum),
-                "resume silence must stay within the measured DSP pipeline bound")
+        let measuredLead = try #require(paused.actualSourceRenderLeadFrames,
+            "offline unity graph must expose its measured source/output render lead")
+        let pipelineBound = max(Int(ceil(paused.sourceProcessingLatency * sampleRate)), Int(measuredLead))
+            + 2 * Int(quantum)
+        #expect(refillSilence <= pipelineBound,
+                "resume silence must stay within the measured pipeline/pre-read bound")
         #expect(player.isPlaying)
         #expect(abs(player.progress - frozen.seconds - 24 * Double(quantum) / sampleRate) <= 2 / sampleRate,
                 "paused IO frames must not become media time after resume")
@@ -212,6 +216,7 @@ struct PlayerServiceClockTests {
             "comparedSourceFrames": golden.comparedFrames, "maximumPCMError": golden.maximumSampleError,
             "intentionalSilenceFrames": golden.intentionalSilenceFrames,
             "refillSilenceFrames": refillSilence, "measuredProcessingLatencySeconds": paused.sourceProcessingLatency,
+            "measuredSourceRenderLeadFrames": measuredLead, "pipelineBoundFrames": pipelineBound,
             "finalEngineSeconds": subject.position(of: .a), "finalServiceSeconds": player.progress,
             "finalLyricsSeconds": player.lyricsCursor.mediaTime,
         ])

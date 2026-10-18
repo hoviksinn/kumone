@@ -1197,16 +1197,18 @@ struct PlaybackEngineSmokeTests {
                 "…but the seam itself must still be journalled (\(flat))")
     }
 
-    /// Pause, seek and a re-issued play all settle a running release to its
-    /// target instead of leaving it drifting under a track the listener has
-    /// just re-aimed. Every one of those moments is silent or muted, so the
-    /// jump is inaudible — see `PlaybackEngine.settleRideLocked`.
-    @Test func pauseAndSeekSettleTheRideImmediately() async throws {
+    /// Native source pause leaves an audible DSP tail, so its gain must freeze
+    /// without a step. Explicit seek/play still settle inside their existing
+    /// mute/flush window. Resume must continue the interrupted gain release.
+    @Test func pauseFreezesTheRideWhileSeekAndReplaySettleIt() async throws {
         guard await audioOutputAvailable.value else { return }
-        func runRide(interrupt: @escaping (PlaybackEngine) -> Void)
-            async -> PlaybackEngine.DeckEffectSnapshot? {
+        typealias Observation = (immediate: PlaybackEngine.DeckEffectSnapshot,
+                                 held: PlaybackEngine.DeckEffectSnapshot,
+                                 resumed: PlaybackEngine.DeckEffectSnapshot?)
+        func runRide(resumes: Bool, interrupt: @escaping (PlaybackEngine) -> Void)
+            async -> Observation? {
             await withWatchdog("rideSettle", timeout: 45) {
-                () -> PlaybackEngine.DeckEffectSnapshot? in
+                () -> Observation? in
                 let engine = PlaybackEngine()
                 let log = EventLog(engine)
                 defer { engine.stopAll() }
@@ -1230,8 +1232,16 @@ struct PlaybackEngineSmokeTests {
                 }
                 Thread.sleep(forTimeInterval: 0.4)
                 interrupt(engine)
+                let immediate = engine.effectSnapshot(of: .b)
                 Thread.sleep(forTimeInterval: 0.5)
-                return engine.effectSnapshot(of: .b)
+                let held = engine.effectSnapshot(of: .b)
+                var resumed: PlaybackEngine.DeckEffectSnapshot?
+                if resumes {
+                    engine.resume()
+                    Thread.sleep(forTimeInterval: 0.5)
+                    resumed = engine.effectSnapshot(of: .b)
+                }
+                return (immediate, held, resumed)
             } ?? nil
         }
 
@@ -1240,10 +1250,22 @@ struct PlaybackEngineSmokeTests {
             ("seek", { (e: PlaybackEngine) in e.seek(deck: .b, to: 1.0) }),
             ("play", { (e: PlaybackEngine) in e.play(deck: .b, from: 1.0) }),
         ] {
-            guard let s = await runRide(interrupt: interrupt) else { continue }
-            #expect(s.rideDB == 0,
-                    "\(label) must settle the release to its target at once (\(s))")
-            #expect(s.rideTargetDB == 0)
+            let observation = try #require(await runRide(resumes: label == "pause", interrupt: interrupt),
+                                           "the real transition must produce an observation")
+            if label == "pause" {
+                #expect(observation.immediate.rideDB < 0, "exercise a release that is still active")
+                #expect(observation.held.rideDB == observation.immediate.rideDB,
+                        "paused gain must neither jump nor drift while the DSP tail renders")
+                let resumed = try #require(observation.resumed)
+                #expect(resumed.rideDB > observation.held.rideDB,
+                        "resume must continue releasing toward unity")
+                #expect(resumed.rideTargetDB == 0)
+            } else {
+                #expect(observation.immediate.rideDB == 0,
+                        "\(label) must settle the release inside its flush window")
+                #expect(observation.held.rideDB == 0)
+            }
+            #expect(observation.held.rideTargetDB == 0)
         }
     }
 

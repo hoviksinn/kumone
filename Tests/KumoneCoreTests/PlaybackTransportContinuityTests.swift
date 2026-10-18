@@ -349,7 +349,8 @@ struct PlaybackTransportContinuityTests {
                 "rendering the paused DSP tail and silence must not advance source media time")
         }
         let tailFrames = golden.comparedFrames - sourceFramesBeforeDrain
-        let latencyBound = Int(ceil(paused.sourceProcessingLatency * Self.sampleRate)) + 2 * Int(Self.quantum)
+        let latencyBound = max(Int(ceil(paused.sourceProcessingLatency * Self.sampleRate)),
+            Int(paused.actualSourceRenderLeadFrames ?? 0)) + 2 * Int(Self.quantum)
         #expect(tailFrames <= latencyBound, "the natural DSP tail is bounded by measured AU latency")
         subject.resume()
         let resumed = subject.transportSnapshotForTesting(.a)
@@ -369,6 +370,7 @@ struct PlaybackTransportContinuityTests {
         try TransportEvidence.record(["name": "pausedDSPDrainAndRefill", "decks": bothDecks ? 2 : 1,
             "pausedRenderedFrames": 12 * Int(Self.quantum), "naturalDSPTailFrames": tailFrames,
             "resumeDSPRefillSilenceFrames": refillSilenceFrames, "measuredAULatencySeconds": paused.sourceProcessingLatency,
+            "actualSourceRenderLeadFrames": paused.actualSourceRenderLeadFrames ?? -1,
             "latencyBoundFrames": latencyBound, "comparedSourceFrames": golden.comparedFrames,
             "maximumSampleError": golden.maximumSampleError, "maximumSignal": golden.maximumSignal])
     }
