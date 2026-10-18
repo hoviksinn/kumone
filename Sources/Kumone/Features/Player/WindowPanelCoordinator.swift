@@ -33,14 +33,38 @@ final class WindowPanelCoordinator: ObservableObject {
     var addedWidth: CGFloat { panelWidth + PlayerLayoutMetrics.dividerWidth }
     var hasPanel: Bool { mode != .closed }
     var minimumContentWidth: CGFloat {
-        PlayerLayoutMetrics.minimumWindowWidth + (hasPanel ? addedWidth : 0)
+        guard hasPanel else { return PlayerLayoutMetrics.minimumWindowWidth }
+        let minimumNavigationWidth = sidebarWidthAtOpen + PlayerLayoutMetrics.minimumMainWidth
+        if mode == .expandedOutside {
+            // Outside layout preserves a complete closed-window base while
+            // the user resizes. Its saved closed frame shares the same floor.
+            return max(PlayerLayoutMetrics.minimumWindowWidth, minimumNavigationWidth) + addedWidth
+        }
+        // An inside pane can share a wide collapsed-sidebar window without
+        // reserving the hidden sidebar's width a second time.
+        return max(PlayerLayoutMetrics.minimumWindowWidth, minimumNavigationWidth + addedWidth)
     }
 
     func attach(to window: NSWindow) {
         guard self.window !== window else { return }
         detach()
         self.window = window
+        // Attachment is invoked by the configurator's asynchronous main-queue
+        // callback, after SwiftUI has committed its native view. A coordinator
+        // reused for another window must not carry an old display session.
+        mode = .closed
+        panel = nil
+        panelWidth = 0
+        insideReveal = 0
+        baseContentWidth = window.contentView?.bounds.width ?? window.contentLayoutRect.width
+        isAnimating = false
         isFullScreen = window.styleMask.contains(.fullScreen)
+        insufficientSpace = false
+        isClosing = false
+        sessionWasOutside = false
+        originalFrame = nil
+        restorationAfterFullScreen = nil
+        sidebarWidthAtOpen = 0
         window.collectionBehavior.insert(.fullScreenPrimary)
         window.contentMinSize = NSSize(width: PlayerLayoutMetrics.minimumWindowWidth,
                                        height: PlayerLayoutMetrics.minimumWindowHeight)
@@ -66,9 +90,13 @@ final class WindowPanelCoordinator: ObservableObject {
         observerTokens.forEach(NotificationCenter.default.removeObserver)
         observerTokens.removeAll()
         programmaticFrame = false
-        isAnimating = false
+        nativeFullScreenTransition = false
         deferredRequest = nil
         window = nil
+        // Do not publish display state here. SwiftUI calls this method from
+        // dismantleNSView while GraphHost.invalidate holds exclusive access;
+        // a synchronous @Published setter reenters that same graph and aborts.
+        // The next normal attach resets display flags outside graph teardown.
     }
 
     func request(_ requested: RightPanel?, mainWidth: CGFloat) -> Bool {
@@ -234,6 +262,7 @@ final class WindowPanelCoordinator: ObservableObject {
                 } else { mode = .expandedInside; insideReveal = addedWidth }
             }
             lastStableFrame = window.frame
+            applyMinimum()
             applyDeferredRequest()
             return
         }
@@ -257,6 +286,7 @@ final class WindowPanelCoordinator: ObservableObject {
                     baseContentWidth = max(PlayerLayoutMetrics.minimumWindowWidth,
                         (window.contentView?.bounds.width ?? window.contentLayoutRect.width) - addedWidth)
                 }
+                applyMinimum()
                 screenChanged()
                 if !isAnimating { applyDeferredRequest() }
             }

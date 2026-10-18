@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 import Testing
 @testable import KumoneCore
@@ -313,6 +314,75 @@ struct WindowNavigationChromeTests {
         #expect(fixture.window.contentMinSize == NSSize(width: 1021, height: 640))
     }
 
+    @Test func collapsedWideWindowUsesAnInsidePaneWithoutGrowingItsFrameOrMinimum() async throws {
+        let fixture = try Fixture()
+        defer { fixture.dispose() }
+        let bar = try await check(fixture, destination: nil, scenario: "inside-collapsed-before-resize")
+        fixture.panels.visibleFrameForTesting = CGRect(x: -1000, y: -1000, width: 4000, height: 3000)
+        fixture.window.setContentSize(NSSize(width: 1200, height: 640))
+        try await wait(fixture, "1200pt collapsed window layout") {
+            abs(fixture.host.bounds.width - 1200) < 0.5
+                && abs(fixture.window.frame.width - 1200) < 0.5
+        }
+        _ = try await check(fixture, destination: nil, originalBar: bar, scenario: "inside-collapsed-wide")
+        let original = fixture.window.frame
+        #expect(fixture.window.contentLayoutRect.width / fixture.window.contentLayoutRect.height >= 16.0 / 9.0)
+        fixture.player.activePanel = .lyrics
+        try await wait(fixture, "inside lyrics and actual content minimum") {
+            fixture.panels.mode == .expandedInside
+                && abs(fixture.window.contentMinSize.width - 1161) < 0.5
+                && self.markers("QieTing.RightPanel", in: fixture.host).contains { $0.bounds.width >= 340 }
+        }
+        #expect(fixture.panels.panelWidth == 340)
+        #expect(fixture.window.frame == original)
+        #expect(fixture.window.contentMinSize.width <= fixture.window.contentLayoutRect.width)
+        _ = try await check(fixture, destination: nil, originalBar: bar, scenario: "inside-collapsed-open")
+        fixture.player.activePanel = nil
+        try await wait(fixture, "inside pane closes without resizing") { fixture.panels.mode == .closed }
+        #expect(fixture.window.frame == original)
+        #expect(fixture.window.contentMinSize.width == 1021)
+    }
+
+    @Test func hostedTeardownCancelsAnAnimatingSessionWithoutPublishingBackIntoTheGraph() async throws {
+        var fixture: Fixture? = try Fixture()
+        defer { fixture?.dispose() }
+        _ = try await check(try #require(fixture), destination: nil, scenario: "teardown-before-animation")
+        let panels = try #require(fixture?.panels)
+        panels.visibleFrameForTesting = CGRect(x: -1000, y: -1000, width: 4000, height: 3000)
+        panels.animationDuration = 0.2
+        #expect(panels.request(.lyrics, mainWidth: 1021))
+        #expect(panels.isAnimating)
+        weak var releasedHost = fixture?.host
+        var cleanupPublications = 0
+        let observation = panels.objectWillChange.sink { _ in cleanupPublications += 1 }
+        defer { observation.cancel() }
+        fixture?.dispose()
+        fixture = nil
+        let deadline = ProcessInfo.processInfo.systemUptime + 4
+        while releasedHost != nil, ProcessInfo.processInfo.systemUptime < deadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(releasedHost == nil, "The actual NSHostingView must be destroyed, not retained to conceal dismantle failures")
+        #expect(cleanupPublications == 0, "dismantle cleanup must not synchronously invalidate the SwiftUI graph being destroyed")
+        #expect(panels.window == nil)
+        try NavigationValidationEvidence.record([
+            "scenario": "hosted-teardown-no-publications", "cleanupPublications": cleanupPublications,
+            "hostReleased": releasedHost == nil, "windowDetached": panels.window == nil,
+        ])
+        // A live coordinator subsequently attached through the configurator
+        // resets its display flags; teardown itself never publishes them.
+        let nextWindow = NSWindow(contentRect: CGRect(x: 0, y: 80, width: 1021, height: 640),
+                                  styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+        nextWindow.isReleasedWhenClosed = false
+        panels.attach(to: nextWindow)
+        #expect(cleanupPublications > 0, "A live attachment must still publish its fresh state")
+        #expect(!panels.isAnimating)
+        #expect(panels.mode == .closed && panels.panel == nil)
+        #expect(panels.panelWidth == 0 && panels.insideReveal == 0)
+        panels.detach()
+        nextWindow.close()
+    }
+
     @Test func fullScreenNotificationsSuspendFrameOwnershipAndRestoreTheOutsideSession() async throws {
         let fixture = try Fixture()
         defer { fixture.dispose() }
@@ -329,6 +399,7 @@ struct WindowNavigationChromeTests {
         #expect(fixture.window.frame == expanded)
         NotificationCenter.default.post(name: NSWindow.didEnterFullScreenNotification, object: fixture.window)
         #expect(fixture.panels.isFullScreen)
+        #expect(fixture.window.contentMinSize.width == 1161)
         let savedClosedFrame = fixture.panels.originalFrame
         fixture.window.setFrame(expanded.offsetBy(dx: 15, dy: 0), display: true)
         #expect(fixture.panels.originalFrame == savedClosedFrame)
@@ -337,6 +408,7 @@ struct WindowNavigationChromeTests {
         NotificationCenter.default.post(name: NSWindow.didExitFullScreenNotification, object: fixture.window)
         #expect(!fixture.panels.isFullScreen)
         #expect(fixture.panels.mode == .expandedOutside)
+        #expect(fixture.window.contentMinSize.width == 1362)
         #expect(fixture.window.frame == expanded)
         #expect(abs(fixture.panels.baseContentWidth - 1021) < 0.5)
         #expect(fixture.panels.request(nil, mainWidth: 1021))
