@@ -1,164 +1,170 @@
 import SwiftUI
 
+/// One stable window shell owns the player and inspector. NavigationStack
+/// replaces only the middle leaf; it can never replace the floating player.
 struct MainWindow: View {
     private let externalPath: Binding<[Destination]>?
+    private let testing: MainWindowTestConfiguration?
     @Environment(\.openWindow) private var openWindow
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityVoiceOverEnabled) private var voiceOverEnabled
     @EnvironmentObject private var player: PlayerService
     @EnvironmentObject private var account: AccountStore
     @EnvironmentObject private var settings: SettingsManager
     @EnvironmentObject private var toasts: ToastCenter
-
     @StateObject private var artworkStore = NowPlayingArtworkStore()
+    @StateObject private var panels: WindowPanelCoordinator
     @State private var selection: SidebarItem = .home
     @State private var localPath: [Destination] = []
     @State private var showLogin = false
-    @State private var detailWidth: CGFloat = 0
-    @State private var mainColumnLeadingInset: CGFloat = 0
-    @State private var columnVisibility: NavigationSplitViewVisibility = .all
-    @State private var nowPlayingChromeHidden = false
-    @State private var nowPlayingChromeFadedOut = false
-    @State private var nowPlayingChromeTask: Task<Void, Never>?
+    @State private var middleFrame: CGRect = .zero
+    @State private var columnVisibility: NavigationSplitViewVisibility
+    @State private var topChromeVisible = true
+    @State private var topChromeHovering = false
+    @State private var searchFocused = false
+    @State private var topPopoverOpen = false
+    @State private var menuTracking = false
+    @FocusState private var topControlsFocused: Bool
+    @State private var chromeTask: Task<Void, Never>?
 
-    init(path: Binding<[Destination]>? = nil) {
+    init(path: Binding<[Destination]>? = nil, testing: MainWindowTestConfiguration? = nil) {
         externalPath = path
+        self.testing = testing
+        _panels = StateObject(wrappedValue: testing?.panelCoordinator ?? WindowPanelCoordinator())
+        _columnVisibility = State(initialValue: testing?.initialColumnVisibility ?? .all)
     }
 
     private var path: [Destination] {
         get { externalPath?.wrappedValue ?? localPath }
         nonmutating set {
-            if let externalPath {
-                externalPath.wrappedValue = newValue
-            } else {
-                localPath = newValue
-            }
+            if let externalPath { externalPath.wrappedValue = newValue }
+            else { localPath = newValue }
         }
     }
-
-    private var pathBinding: Binding<[Destination]> {
-        externalPath ?? $localPath
-    }
+    private var pathBinding: Binding<[Destination]> { externalPath ?? $localPath }
+    private var sidebarCollapsed: Bool { columnVisibility == .detailOnly }
+    private var hidesTopChrome: Bool { player.showNowPlaying || sidebarCollapsed }
 
     var body: some View {
-        NavigationSplitView(columnVisibility: $columnVisibility) {
-            SidebarView(selection: $selection, showLogin: $showLogin)
-                .navigationSplitViewColumnWidth(min: 200, ideal: Theme.Layout.sidebarWidth, max: 280)
-        } detail: {
-            detailStack
-                .playerChrome()
-                .onGeometryChange(for: CGRect.self) { proxy in
-                    proxy.frame(in: .named("mainWindow"))
-                } action: { frame in
-                    detailWidth = frame.width
-                    mainColumnLeadingInset = frame.minX
+        GeometryReader { geometry in
+            let outside = panels.mode == .expandedOutside
+            let reveal = outside
+                ? min(panels.addedWidth, max(0, geometry.size.width - panels.baseContentWidth))
+                : panels.insideReveal
+            let navigationWidth = outside ? panels.baseContentWidth : max(0, geometry.size.width - reveal)
+            ZStack(alignment: .topLeading) {
+                HStack(spacing: 0) {
+                    navigationColumns
+                        .frame(width: navigationWidth)
+                    panelRegion(reveal: reveal, outside: outside)
                 }
-        }
-        .navigationSplitViewStyle(.balanced)
-        .coordinateSpace(name: "mainWindow")
-        .overlay(alignment: .trailing) {
-            if settings.showMainWindowAmbientBackground, detailWidth > 0 {
-                MainWindowAmbientBackground(
-                    colors: artworkStore.colors,
-                    intensity: settings.mainWindowAmbientBackgroundIntensity
-                )
-                    .frame(width: detailWidth)
+                .frame(width: geometry.size.width, height: geometry.size.height, alignment: .leading)
+
+                // Deliberately OUTSIDE the entire NavigationSplitView. This
+                // single instance survives every destination push and pop.
+                PlayerBar()
+                    .frame(width: PlayerLayoutMetrics.barWidth(in: middleFrame.width))
+                    .position(x: middleFrame.midX,
+                              y: geometry.size.height - PlayerLayoutMetrics.barBottomMargin - PlayerLayoutMetrics.barHeight / 2)
+                    .opacity(player.showNowPlaying ? 0 : 1)
+                    .allowsHitTesting(!player.showNowPlaying)
+                    .accessibilityHidden(player.showNowPlaying)
+
+                if player.showNowPlaying {
+                    immersiveContent
+                        .frame(width: geometry.size.width, height: geometry.size.height)
+                        .transition(reduceMotion ? .opacity : .move(edge: .bottom))
+                        .zIndex(2)
+                }
+            }
+            .coordinateSpace(name: "mainWindow")
+            .onContinuousHover { phase in
+                if case .active(let point) = phase {
+                    if player.showNowPlaying || (sidebarCollapsed && point.y < 56) { revealChrome() }
+                }
             }
         }
-        .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                SearchFieldView { query in
-                    path.append(Destination.search(query))
-                }
-            }
-            // Hide the Liquid Glass shared toolbar background behind the
-            // custom capsule search field, else it double-backgrounds on
-            // macOS 26 (dropped by #86's toolbar rewrite, restored here).
-            .sharedBackgroundVisibility(.hidden)
-        }
-        // Immersive now-playing page: hide the whole window toolbar
-        // (sidebar toggle, navigation title, search field).
-        .toolbar(nowPlayingChromeHidden ? .hidden : .automatic, for: .windowToolbar)
-        // Keep the single main window alive on Cmd+W / red button so the Dock
-        // icon can always bring it back (#60/#63/#66/#70).
-        .background(
-            MainWindowConfigurator(
-                ambientConfiguration: MainWindowAmbientConfiguration(
-                    showsAmbientBackground: settings.showMainWindowAmbientBackground,
-                    showsTitlebarAmbientBackground: !nowPlayingChromeHidden,
-                    showsNowPlaying: player.showNowPlaying,
-                    colors: artworkStore.colors,
-                    mainColumnLeadingInset: mainColumnLeadingInset,
-                    intensity: settings.mainWindowAmbientBackgroundIntensity,
-                    isDark: isDarkAppearance
-                ),
-                titlebarFadedOut: nowPlayingChromeFadedOut
-            )
-        )
+        .scrollIndicators(.automatic)
+        .toolbar(.hidden, for: .windowToolbar)
+        .background(MainWindowConfigurator(
+            ambientConfiguration: MainWindowAmbientConfiguration(
+                showsAmbientBackground: settings.showMainWindowAmbientBackground,
+                showsTitlebarAmbientBackground: !player.showNowPlaying,
+                showsNowPlaying: player.showNowPlaying,
+                colors: artworkStore.colors,
+                mainColumnLeadingInset: middleFrame.minX,
+                intensity: settings.mainWindowAmbientBackgroundIntensity,
+                isDark: isDarkAppearance),
+            panels: panels, registersApplicationWindow: testing == nil))
         .modifier(OfflinePlaybackAlert(player: player, onDownloads: { openDestination(.downloaded) }))
         .modifier(MeteredDownloadAlert())
         .environment(\.openLogin, { showLogin = true })
         .environment(\.openDestination, openDestination)
+        .environmentObject(artworkStore)
         .onReceive(NotificationCenter.default.publisher(for: .showDownloadedMusic)) { _ in
+            guard SongDownloadUI.isAvailable else { return }
             player.showNowPlaying = false
             selection = .downloaded
             path = []
         }
-        .environmentObject(artworkStore)
         .task {
-            // Keep this action in the app delegate: when the user closes the
-            // last WindowGroup window, there is no view left to receive a
-            // Dock reopen event directly.
+            panels.reduceMotion = reduceMotion
+            guard testing == nil else { return }
             AppDelegate.shared?.openMainWindow = { openWindow(id: "main") }
             artworkStore.setArtworkNeeded(needsCurrentArtwork)
             DesktopLyricsController.shared.sync(with: settings.showDesktopLyrics)
             await DownloadManager.shared.start()
-            if KumonePaths.isOfflineUITest { selection = .downloaded }
+            if KumonePaths.isOfflineUITest, SongDownloadUI.isAvailable { selection = .downloaded }
             await account.bootstrap()
         }
-        .onChange(of: settings.showDesktopLyrics) { _ in
+        .onChange(of: player.activePanel) { _, panel in
+            let accepted = panels.request(panel, mainWidth: middleFrame.width)
+            if !accepted { player.activePanel = nil }
+        }
+        .onChange(of: panels.mode) { _, mode in
+            if mode == .closed, player.activePanel != nil { player.activePanel = nil }
+        }
+        .onChange(of: panels.insufficientSpace) { _, insufficient in
+            if insufficient { player.activePanel = nil }
+        }
+        .onChange(of: reduceMotion) { _, value in panels.reduceMotion = value }
+        .onChange(of: voiceOverEnabled) { _, _ in revealChrome() }
+        .onChange(of: settings.showDesktopLyrics) { _, _ in
+            guard testing == nil else { return }
             DesktopLyricsController.shared.sync(with: settings.showDesktopLyrics)
         }
-        .onChange(of: settings.showMainWindowAmbientBackground) { _ in
-            artworkStore.setArtworkNeeded(needsCurrentArtwork)
+        .onChange(of: settings.showMainWindowAmbientBackground) { _, _ in
+            if testing == nil { artworkStore.setArtworkNeeded(needsCurrentArtwork) }
         }
-        // Warm the cover as soon as a track loads: the now-playing page only
-        // slides in smoothly when the artwork is already in memory.
-        .onChange(of: player.hasCurrentTrack) { _ in
-            artworkStore.setArtworkNeeded(needsCurrentArtwork)
+        .onChange(of: player.hasCurrentTrack) { _, _ in
+            if testing == nil { artworkStore.setArtworkNeeded(needsCurrentArtwork) }
         }
-        .onChange(of: player.showNowPlaying) { _ in
-            artworkStore.setArtworkNeeded(needsCurrentArtwork)
-            nowPlayingChromeTask?.cancel()
-            if player.showNowPlaying {
-                // Fade the titlebar out as the page rises to cover it, then
-                // drop the toolbar once nothing is left to see — snapping it
-                // away at once reads as a glitch above the rising page.
-                nowPlayingChromeTask = Task { @MainActor in
-                    try? await Task.sleep(for: .milliseconds(120))
-                    guard !Task.isCancelled else { return }
-                    nowPlayingChromeFadedOut = true
-                    try? await Task.sleep(for: .milliseconds(230))
-                    guard !Task.isCancelled else { return }
-                    nowPlayingChromeHidden = true
-                }
-            } else {
-                nowPlayingChromeHidden = false
-                nowPlayingChromeFadedOut = false
-            }
+        .onChange(of: player.showNowPlaying) { _, _ in
+            if testing == nil { artworkStore.setArtworkNeeded(needsCurrentArtwork) }
+            revealChrome()
         }
-        .sheet(isPresented: $showLogin) {
-            LoginSheet()
+        .onChange(of: columnVisibility) { _, _ in revealChrome() }
+        .onChange(of: searchFocused) { _, _ in revealChrome() }
+        .onChange(of: topControlsFocused) { _, _ in revealChrome() }
+        .onReceive(NotificationCenter.default.publisher(for: NSMenu.didBeginTrackingNotification)) { _ in
+            menuTracking = true
+            revealChrome()
         }
-        .overlay {
-            if player.showNowPlaying {
-                NowPlayingView(onOpenDestination: openDestination)
-                    .environmentObject(artworkStore)
-                    .background(ArrowCursorOverride())
-                    // Resolve the slide at the page boundary, including artwork
-                    // inserted asynchronously while the transition is running.
-                    .geometryGroup()
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
-            }
+        .onReceive(NotificationCenter.default.publisher(for: NSMenu.didEndTrackingNotification)) { _ in
+            menuTracking = false
+            revealChrome()
+        }
+        .onKeyPress { _ in
+            if hidesTopChrome { revealChrome() }
+            return .ignored
+        }
+        .onDisappear { chromeTask?.cancel() }
+        .sheet(isPresented: $showLogin) { LoginSheet() }
+        .alert("窗口空间不足", isPresented: $panels.insufficientSpace) {
+            Button("知道了", role: .cancel) {}
+        } message: {
+            Text("完整单排播放栏与右侧面板需要更多空间。请放大窗口，或手动收起左侧导航栏后再打开歌词或播放队列。")
         }
         .overlay(alignment: .top) {
             if let toast = toasts.current {
@@ -167,31 +173,135 @@ struct MainWindow: View {
                     .padding(.top, 12)
             }
         }
-        .animation(AppAnimation.smooth, value: player.showNowPlaying)
-        .animation(.spring(duration: 0.3), value: toasts.current)
+        .animation(reduceMotion ? nil : .spring(response: 0.38, dampingFraction: 1), value: panels.insideReveal)
+        .animation(reduceMotion ? nil : AppAnimation.smooth, value: player.showNowPlaying)
+        .animation(reduceMotion ? nil : AppAnimation.quick, value: topChromeVisible)
+    }
+
+    private var navigationColumns: some View {
+        NavigationSplitView(columnVisibility: $columnVisibility) {
+            SidebarView(selection: $selection, showLogin: $showLogin)
+                .navigationSplitViewColumnWidth(min: 200, ideal: Theme.Layout.sidebarWidth, max: 280)
+        } detail: {
+            VStack(spacing: 0) {
+                middleHeader
+                    .frame(height: 44)
+                detailStack
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            .frame(minWidth: PlayerLayoutMetrics.minimumMainWidth)
+            .background {
+                if settings.showMainWindowAmbientBackground {
+                    MainWindowAmbientBackground(colors: artworkStore.colors,
+                                                intensity: settings.mainWindowAmbientBackgroundIntensity)
+                }
+            }
+            .environment(\.playerChromeClearance, PlayerLayoutMetrics.barClearance)
+            .onGeometryChange(for: CGRect.self) { $0.frame(in: .named("mainWindow")) } action: { middleFrame = $0 }
+        }
+        .navigationSplitViewStyle(.balanced)
+    }
+
+    private var middleHeader: some View {
+        HStack(spacing: 10) {
+            Button {
+                columnVisibility = sidebarCollapsed ? .all : .detailOnly
+            } label: { Image(systemName: "sidebar.left") }
+                .buttonStyle(.plain).frame(width: 28, height: 28).focused($topControlsFocused).help("显示或隐藏侧边栏")
+            Button { if !path.isEmpty { path.removeLast() } } label: { Image(systemName: "chevron.left") }
+                .buttonStyle(.plain).frame(width: 28, height: 28).focused($topControlsFocused).disabled(path.isEmpty).help("返回")
+            Spacer(minLength: 8)
+            SearchFieldView(loadDefaultKeyword: testing == nil, onFocusChanged: { searchFocused = $0 }) { query in
+                path.append(.search(query))
+            }
+        }
+        .padding(.horizontal, 12)
+        .opacity(!sidebarCollapsed || topChromeVisible ? 1 : 0)
+        .allowsHitTesting(!sidebarCollapsed || topChromeVisible)
+        .accessibilityHidden(sidebarCollapsed && !topChromeVisible)
+        .onHover { topChromeHovering = $0; revealChrome() }
+    }
+
+    @ViewBuilder private func panelRegion(reveal: CGFloat, outside: Bool) -> some View {
+        if panels.hasPanel {
+            HStack(spacing: 0) {
+                Rectangle().fill(.primary.opacity(0.08)).frame(width: PlayerLayoutMetrics.dividerWidth)
+                Group {
+                    if !player.showNowPlaying, let panel = panels.panel {
+                        switch panel {
+                        case .lyrics: LyricsPanel()
+                        case .queue: QueuePanel()
+                        }
+                    } else { Color.clear }
+                }
+                .frame(width: panels.panelWidth)
+                .background(.regularMaterial)
+            }
+            .frame(width: panels.addedWidth)
+            .offset(x: outside ? reveal - panels.addedWidth : 0)
+            .frame(width: max(0, reveal), alignment: .leading)
+            .clipped()
+            .background(WindowChromeProbe(identifier: "QieTing.RightPanel"))
+        }
+    }
+
+    private var immersiveContent: some View {
+        NowPlayingView(onOpenDestination: openDestination)
+            .background(WindowChromeProbe(identifier: "QieTing.Immersive"))
+            .safeAreaInset(edge: .top, spacing: 0) { Color.clear.frame(height: 48) }
+            .background(ArrowCursorOverride())
+            .overlay(alignment: .top) {
+                HStack {
+                    Button { player.showNowPlaying = false } label: {
+                        Image(systemName: "chevron.down").frame(width: 30, height: 30)
+                    }.buttonStyle(.pressable).focused($topControlsFocused).help("返回主界面")
+                    Button { panels.window?.toggleFullScreen(nil) } label: {
+                        Image(systemName: "arrow.up.left.and.arrow.down.right").frame(width: 30, height: 30)
+                    }.buttonStyle(.pressable).focused($topControlsFocused).help("进入或退出全屏（⌃⌘F）")
+                    Spacer()
+                    VolumeControl(onPopoverChanged: { topPopoverOpen = $0; revealChrome() })
+                        .focused($topControlsFocused)
+                }
+                .padding(.horizontal, 20).frame(height: 48)
+                .opacity(topChromeVisible ? 1 : 0)
+                .allowsHitTesting(topChromeVisible)
+                .accessibilityHidden(!topChromeVisible)
+                .onHover { topChromeHovering = $0; revealChrome() }
+            }
+    }
+
+    private func revealChrome() {
+        topChromeVisible = true
+        chromeTask?.cancel()
+        guard hidesTopChrome else { return }
+        chromeTask = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(2.5))
+            guard !Task.isCancelled, !topChromeHovering, !searchFocused, !topControlsFocused, !topPopoverOpen, !menuTracking, !voiceOverEnabled,
+                  panels.window?.attachedSheet == nil else { return }
+            topChromeVisible = false
+        }
     }
 
     private var detailStack: some View {
         NavigationStack(path: pathBinding) {
-            rootView
-                .appDestinations()
+            Group {
+                if let testing { testing.leaf(nil) }
+                else { rootView }
+            }
+            .navigationDestination(for: Destination.self) { destination in
+                if let testing { testing.leaf(destination) }
+                else { DestinationContent(destination: destination) }
+            }
         }
-        .onChange(of: selection) { _ in
-            path = []
-        }
+        .onChange(of: selection) { _, _ in path = [] }
     }
 
     private func openDestination(_ destination: Destination) {
-        guard player.showNowPlaying else {
-            path.appendIfNotCurrent(destination)
-            return
-        }
-
-        withAnimation(AppAnimation.smooth, completionCriteria: .removed) {
+        if !SongDownloadUI.isAvailable, destination == .downloaded || destination == .downloadTasks { return }
+        guard player.showNowPlaying else { path.appendIfNotCurrent(destination); return }
+        withAnimation(reduceMotion ? nil : AppAnimation.smooth, completionCriteria: .removed) {
             player.showNowPlaying = false
-        } completion: {
-            path.appendIfNotCurrent(destination)
-        }
+        } completion: { path.appendIfNotCurrent(destination) }
     }
 
     @ViewBuilder
@@ -279,120 +389,65 @@ struct ArrowCursorOverride: NSViewRepresentable {
 /// forwarded untouched to SwiftUI's own delegate.
 struct MainWindowConfigurator: NSViewRepresentable {
     let ambientConfiguration: MainWindowAmbientConfiguration
-    let titlebarFadedOut: Bool
+    let panels: WindowPanelCoordinator
+    var registersApplicationWindow = true
 
-    func makeCoordinator() -> Coordinator { Coordinator() }
-
+    func makeCoordinator() -> Coordinator { Coordinator(panels: panels, registersApplicationWindow: registersApplicationWindow) }
     func makeNSView(context: Context) -> NSView {
         let view = NSView(frame: .zero)
-        DispatchQueue.main.async {
-            context.coordinator.requestAmbientBackgroundConfiguration(
-                from: view,
-                ambientConfiguration: ambientConfiguration
-            )
-            context.coordinator.setTitlebarFadedOut(titlebarFadedOut)
-        }
+        DispatchQueue.main.async { context.coordinator.configure(from: view, ambient: ambientConfiguration) }
         return view
     }
-
     func updateNSView(_ nsView: NSView, context: Context) {
-        DispatchQueue.main.async {
-            context.coordinator.requestAmbientBackgroundConfiguration(
-                from: nsView,
-                ambientConfiguration: ambientConfiguration
-            )
-            context.coordinator.setTitlebarFadedOut(titlebarFadedOut)
-        }
+        DispatchQueue.main.async { context.coordinator.configure(from: nsView, ambient: ambientConfiguration) }
     }
+    static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) { coordinator.detach() }
 
-    @MainActor
-    final class Coordinator: NSObject, NSWindowDelegate {
-        private(set) weak var window: NSWindow?
+    @MainActor final class Coordinator: NSObject, NSWindowDelegate {
+        private weak var window: NSWindow?
         private weak var forwardee: NSWindowDelegate?
         private let ambientAppearance = MainWindowAmbientAppearanceController()
-        private weak var configurationHost: NSView?
-        private var pendingAmbientConfiguration: MainWindowAmbientConfiguration?
-        private var hasScheduledAmbientConfiguration = false
-        private var titlebarFadedOut = false
-
-        /// Fades the titlebar chrome (traffic lights, title, toolbar) instead
-        /// of letting `.toolbar(.hidden)` snap it away. The superview of the
-        /// standard window buttons is the titlebar container, so one alpha
-        /// animation covers the whole bar.
-        func setTitlebarFadedOut(_ fadedOut: Bool) {
-            guard fadedOut != titlebarFadedOut else { return }
-            titlebarFadedOut = fadedOut
-            guard let titlebar = window?
-                .standardWindowButton(.closeButton)?.superview
-            else { return }
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = fadedOut ? 0.2 : 0.25
-                context.timingFunction = CAMediaTimingFunction(
-                    name: fadedOut ? .easeIn : .easeOut
-                )
-                titlebar.animator().alphaValue = fadedOut ? 0 : 1
-            }
-            ambientAppearance.setTitlebarMaskFadedOut(fadedOut)
+        private let panels: WindowPanelCoordinator
+        private let registersApplicationWindow: Bool
+        init(panels: WindowPanelCoordinator, registersApplicationWindow: Bool) {
+            self.panels = panels
+            self.registersApplicationWindow = registersApplicationWindow
         }
-
-        func attach(to window: NSWindow?) {
-            guard let window, self.window == nil else { return }
-            self.window = window
-            window.isReleasedWhenClosed = false
-            // Insert ourselves as the delegate, forwarding to whatever
-            // delegate SwiftUI installed.
-            if window.delegate !== self {
+        func configure(from view: NSView, ambient: MainWindowAmbientConfiguration) {
+            guard let window = view.window else { return }
+            if self.window !== window {
+                detach()
+                self.window = window
+                window.isReleasedWhenClosed = false
                 forwardee = window.delegate
                 window.delegate = self
+                panels.attach(to: window)
+                if registersApplicationWindow { AppDelegate.shared?.mainWindow = window }
             }
-            AppDelegate.shared?.mainWindow = window
+            // Native traffic lights and their accessibility remain intact.
+            // Never alpha-hide the titlebar or replace system window buttons.
+            ambientAppearance.configure(ambient, in: window)
         }
-
-        func requestAmbientBackgroundConfiguration(
-            from host: NSView,
-            ambientConfiguration: MainWindowAmbientConfiguration
-        ) {
-            configurationHost = host
-            pendingAmbientConfiguration = ambientConfiguration
-            guard !hasScheduledAmbientConfiguration else { return }
-            hasScheduledAmbientConfiguration = true
-
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                self.hasScheduledAmbientConfiguration = false
-                guard let configuration = self.pendingAmbientConfiguration else { return }
-                self.pendingAmbientConfiguration = nil
-                self.attach(to: self.configurationHost?.window)
-                guard let window = self.window else { return }
-                self.ambientAppearance.configure(configuration, in: window)
-            }
+        func detach() {
+            if let window, window.delegate === self { window.delegate = forwardee }
+            panels.detach()
+            self.window = nil
         }
-
         func windowDidUpdate(_ notification: Notification) {
             forwardee?.windowDidUpdate?(notification)
-            if let window {
-                ambientAppearance.updateLayout(in: window)
-            }
+            if let window { ambientAppearance.updateLayout(in: window) }
         }
-
         func windowDidResize(_ notification: Notification) {
             forwardee?.windowDidResize?(notification)
-            if let window {
-                ambientAppearance.updateLayout(in: window)
-            }
+            if let window { ambientAppearance.updateLayout(in: window) }
         }
-
-        // Hide instead of close; keep the scene alive.
         func windowShouldClose(_ sender: NSWindow) -> Bool {
-            sender.orderOut(nil)
-            return false
+            if registersApplicationWindow { sender.orderOut(nil); return false }
+            return true
         }
-
-        // Transparently forward every other delegate callback to SwiftUI.
         override func responds(to aSelector: Selector!) -> Bool {
             super.responds(to: aSelector) || (forwardee?.responds(to: aSelector) ?? false)
         }
-
         override func forwardingTarget(for aSelector: Selector!) -> Any? {
             if forwardee?.responds(to: aSelector) == true { return forwardee }
             return super.forwardingTarget(for: aSelector)
@@ -403,6 +458,8 @@ struct MainWindowConfigurator: NSViewRepresentable {
 // MARK: - Search field
 
 struct SearchFieldView: View {
+    var loadDefaultKeyword = true
+    var onFocusChanged: (Bool) -> Void = { _ in }
     let onSubmit: (String) -> Void
 
     @State private var text = ""
@@ -434,7 +491,9 @@ struct SearchFieldView: View {
         // Keep the capsule off the window's rounded top-right corner (#88).
         .padding(.trailing, 8)
         .animation(AppAnimation.quick, value: focused)
+        .onChange(of: focused) { _, value in onFocusChanged(value) }
         .task {
+            guard loadDefaultKeyword else { return }
             if let keyword = try? await NeteaseAPI.searchDefaultKeyword(), !keyword.isEmpty {
                 placeholder = keyword
                 placeholderQuery = keyword

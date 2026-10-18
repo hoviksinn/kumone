@@ -14,6 +14,8 @@ struct PlayerBar: View {
             .padding(.horizontal, 14)
             .frame(maxWidth: .infinity)
             .frame(height: layout.height)
+            .fixedSize(horizontal: false, vertical: true)
+            .background(WindowChromeProbe(identifier: "QieTing.PlayerBar"))
             .compatGlass(interactive: true, in: barShape)
             .overlay(barShape.strokeBorder(.primary.opacity(isHovering ? 0.1 : 0.06), lineWidth: 0.5))
             .onHover { isHovering = $0 }
@@ -21,45 +23,14 @@ struct PlayerBar: View {
     }
 
     private var barShape: RoundedRectangle {
-        RoundedRectangle(cornerRadius: layout == .wide ? 28 : 24, style: .continuous)
+        RoundedRectangle(cornerRadius: 28, style: .continuous)
     }
 
-    @ViewBuilder
     private var barContent: some View {
-        switch layout {
-        case .wide:
-            HStack(spacing: 12) {
-                songInfoSection.frame(width: 220, alignment: .leading)
-                centerSection.frame(maxWidth: .infinity)
-                optionsSection(includeQuality: true)
-            }
-        case .stacked:
-            VStack(spacing: 6) {
-                HStack(spacing: 12) {
-                    songInfoSection.frame(maxWidth: .infinity, alignment: .leading)
-                    optionsSection(includeQuality: true)
-                }
-                HStack(spacing: 12) {
-                    transportControls
-                    ScrubberLane().frame(maxWidth: .infinity)
-                }
-                .opacity(player.hasCurrentTrack ? 1 : 0.5)
-            }
-        case .narrow:
-            VStack(spacing: 6) {
-                HStack(spacing: 8) {
-                    songInfoSection.frame(maxWidth: .infinity, alignment: .leading)
-                    qualityIndicator
-                }
-                HStack(spacing: 8) {
-                    transportControls
-                    Spacer(minLength: 0)
-                    optionsSection(includeQuality: false)
-                }
-                ScrubberLane()
-                    .frame(maxWidth: .infinity)
-                    .opacity(player.hasCurrentTrack ? 1 : 0.5)
-            }
+        HStack(spacing: 12) {
+            songInfoSection.frame(width: 200, alignment: .leading)
+            centerSection.frame(minWidth: 220, maxWidth: .infinity)
+            optionsSection(includeQuality: true)
         }
     }
 
@@ -198,6 +169,7 @@ struct PlayerBar: View {
                 Circle()
                     .fill(Theme.accentGradient)
                     .frame(width: 30, height: 30)
+                    .fixedSize()
                     .shadow(color: Theme.accent.opacity(0.35), radius: 5, y: 1)
                 if player.isBuffering && player.isPlaying {
                     ProgressView()
@@ -214,6 +186,8 @@ struct PlayerBar: View {
         }
         .buttonStyle(.pressable)
         .padding(.horizontal, 2)
+        .fixedSize()
+        .background(WindowChromeProbe(identifier: "QieTing.PlayerBar.PlayPause"))
         .help(player.isPlaying ? String(localized: "暂停") : String(localized: "播放"))
         .accessibilityLabel(player.isPlaying ? String(localized: "暂停") : String(localized: "播放"))
     }
@@ -243,6 +217,7 @@ struct PlayerBar: View {
             ) {
                 player.activePanel = player.activePanel == .lyrics ? nil : .lyrics
             }
+            .background(WindowChromeProbe(identifier: "QieTing.PlayerBar.Lyrics"))
             .help("歌词")
             PlayerIconButton(
                 icon: "inset.filled.bottomthird.square", size: 13,
@@ -365,7 +340,13 @@ struct LikeButton: View {
 
 struct ScrubberLane: View {
     @EnvironmentObject private var player: PlayerService
-    @ObservedObject private var clock = PlayerService.shared.clock
+
+    var body: some View { ScrubberContent(clock: player.clock) }
+}
+
+private struct ScrubberContent: View {
+    @EnvironmentObject private var player: PlayerService
+    @ObservedObject var clock: PlaybackClock
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -444,6 +425,7 @@ struct ScrubberLane: View {
 // MARK: - Volume
 
 struct VolumeControl: View {
+    var onPopoverChanged: ((Bool) -> Void)? = nil
     @EnvironmentObject private var player: PlayerService
     @State private var showPopover = false
 
@@ -456,6 +438,7 @@ struct VolumeControl: View {
                 .padding(.vertical, 12)
                 .padding(.horizontal, 10)
         }
+        .onChange(of: showPopover) { _, shown in onPopoverChanged?(shown) }
         .help("音量")
     }
 

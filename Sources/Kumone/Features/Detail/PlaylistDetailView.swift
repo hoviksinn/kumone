@@ -29,15 +29,16 @@ struct PlaylistDetailView: View {
                 .task(id: "\(playlistID):\(account.offlineScope ?? ""):\(downloads.network.isKnown):\(downloads.network.connected)") {
                     await loadPlaylist()
                 }
-                .toolbar {
-                    if model.errorMessage != nil, downloads.network.connected, model.detail != nil {
-                        ToolbarItem(placement: .primaryAction) {
-                            Button { Task { await loadPlaylist() } } label: { Image(systemName: "arrow.clockwise") }
-                                .accessibilityLabel("重试")
-                                .help("重试")
-                        }
-                    }
+                .safeAreaInset(edge: .top, spacing: 0) {
+            if model.errorMessage != nil, downloads.network.connected, model.detail != nil {
+                HStack {
+                    Spacer()
+                    Button { Task { await loadPlaylist() } } label: { Label("重试", systemImage: "arrow.clockwise") }
+                        .buttonStyle(.plain).padding(10)
                 }
+                .background(.regularMaterial)
+            }
+        }
         }
     }
 

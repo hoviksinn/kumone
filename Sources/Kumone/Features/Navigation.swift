@@ -24,67 +24,6 @@ extension EnvironmentValues {
     }
 }
 
-struct PlayerChromeModifier: ViewModifier {
-    @EnvironmentObject private var player: PlayerService
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-    func body(content: Content) -> some View {
-        GeometryReader { proxy in
-            let metrics = PlayerLayoutMetrics(
-                detailWidth: proxy.size.width,
-                showsPanel: player.activePanel != nil
-            )
-            HStack(spacing: 0) {
-                content
-                    .environment(\.playerChromeClearance, metrics.barClearance)
-                    .frame(width: metrics.mainWidth)
-                    .frame(maxHeight: .infinity)
-                    .overlay(alignment: .bottom) {
-                        PlayerBar(layout: metrics.barLayout)
-                            .frame(width: metrics.barWidth)
-                            .padding(.bottom, PlayerLayoutMetrics.barBottomMargin)
-                    }
-                    .clipped()
-
-                if player.activePanel != nil {
-                    trailingPanel
-                        .frame(width: metrics.panelWidth)
-                        .frame(maxHeight: .infinity)
-                        .background(.regularMaterial)
-                        .overlay(alignment: .leading) {
-                            Rectangle()
-                                .fill(.primary.opacity(0.08))
-                                .frame(width: PlayerLayoutMetrics.dividerWidth)
-                        }
-                        .padding(.leading, PlayerLayoutMetrics.dividerWidth)
-                        .transition(reduceMotion ? .opacity : .move(edge: .trailing).combined(with: .opacity))
-                }
-            }
-            .clipped()
-            // Only opening/closing changes the column geometry. Switching
-            // lyrics ↔ queue keeps the exact same main-column and bar widths.
-            .animation(reduceMotion ? nil : .spring(response: 0.42, dampingFraction: 0.9),
-                       value: player.activePanel != nil)
-        }
-    }
-
-    @ViewBuilder
-    private var trailingPanel: some View {
-        if let panel = player.activePanel {
-            Group {
-                switch panel {
-                case .lyrics:
-                    LyricsPanel()
-                case .queue:
-                    QueuePanel()
-                }
-            }
-            .transition(.opacity)
-            .animation(reduceMotion ? nil : .easeInOut(duration: 0.16), value: panel)
-        }
-    }
-}
-
 private struct PlayerChromeClearanceKey: EnvironmentKey {
     static let defaultValue: CGFloat = Theme.Layout.playerChromeClearance
 }
@@ -131,47 +70,34 @@ extension Array where Element == Destination {
     }
 }
 
-/// Registers all shared navigation destinations on a stack.
-struct DestinationsModifier: ViewModifier {
-    func body(content: Content) -> some View {
-        content.navigationDestination(for: Destination.self) { destination in
-            Group {
-                switch destination {
-                case .downloaded:
-                    DownloadedMusicView()
-                case .downloadTasks:
-                    DownloadTasksView()
-                case .playlist(let id):
-                    PlaylistDetailView(playlistID: id)
-                case .radarPlaylist(let id):
-                    PlaylistDetailView(playlistID: id, recommendationContext: .radar)
-                case .album(let id):
-                    AlbumDetailView(albumID: id)
-                case .artist(let id):
-                    ArtistDetailView(artistID: id)
-                case .daily:
-                    DailySongsView()
-                case .toplists:
-                    ToplistsView()
-                case .recents:
-                    RecentsView()
-                case .collections:
-                    CollectionsView()
-                case .cloud:
-                    CloudView()
-                case .search(let query):
-                    SearchView(query: query)
-                }
-            }
+/// Shared destination leaf; window-level controls are never created here.
+struct DestinationContent: View {
+    let destination: Destination
+    @ViewBuilder var body: some View {
+        switch destination {
+        case .downloaded: DownloadedMusicView()
+        case .downloadTasks: DownloadTasksView()
+        case .playlist(let id): PlaylistDetailView(playlistID: id)
+        case .radarPlaylist(let id): PlaylistDetailView(playlistID: id, recommendationContext: .radar)
+        case .album(let id): AlbumDetailView(albumID: id)
+        case .artist(let id): ArtistDetailView(artistID: id)
+        case .daily: DailySongsView()
+        case .toplists: ToplistsView()
+        case .recents: RecentsView()
+        case .collections: CollectionsView()
+        case .cloud: CloudView()
+        case .search(let query): SearchView(query: query)
         }
     }
 }
 
-extension View {
-    func playerChrome() -> some View {
-        modifier(PlayerChromeModifier())
+struct DestinationsModifier: ViewModifier {
+    func body(content: Content) -> some View {
+        content.navigationDestination(for: Destination.self) { DestinationContent(destination: $0) }
     }
+}
 
+extension View {
     func appDestinations() -> some View {
         modifier(DestinationsModifier())
     }

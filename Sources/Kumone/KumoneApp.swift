@@ -22,9 +22,8 @@ public struct KumoneApp: App {
                 .environmentObject(toasts)
                 .tint(Theme.accent)
                 .preferredColorScheme(settings.appearance.colorScheme)
-                .frame(minWidth: player.showNowPlaying
-                           ? Theme.Layout.minWindowWidthSidebarCollapsed
-                           : Theme.Layout.minWindowWidth,
+                .scrollIndicators(.automatic)
+                .frame(minWidth: Theme.Layout.minWindowWidth,
                        minHeight: Theme.Layout.minWindowHeight)
         }
         .defaultSize(width: Theme.Layout.defaultWindowWidth,
@@ -110,6 +109,7 @@ public struct KumoneApp: App {
         Window(AutoMixDebugPanel.windowTitle, id: AutoMixDebugPanel.windowID) {
             AutoMixDebugPanel()
                 .preferredColorScheme(settings.appearance.colorScheme)
+                .scrollIndicators(.automatic)
         }
         .defaultSize(width: 460, height: 620)
         .windowResizability(.contentMinSize)
@@ -118,7 +118,7 @@ public struct KumoneApp: App {
         Settings {
             SettingsView()
                 .environment(\.openDestination, { destination in
-                    guard destination == .downloaded else { return }
+                    guard SongDownloadUI.isAvailable, destination == .downloaded else { return }
                     NotificationCenter.default.post(name: .showDownloadedMusic, object: nil)
                     _ = AppDelegate.shared?.applicationShouldHandleReopen(NSApp, hasVisibleWindows: true)
                 })
@@ -126,6 +126,7 @@ public struct KumoneApp: App {
                 .environmentObject(settings)
                 .tint(Theme.accent)
                 .preferredColorScheme(settings.appearance.colorScheme)
+                .scrollIndicators(.automatic)
         }
     }
 }

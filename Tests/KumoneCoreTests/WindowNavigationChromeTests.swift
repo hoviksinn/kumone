@@ -1,0 +1,353 @@
+import AppKit
+import SwiftUI
+import Testing
+@testable import KumoneCore
+
+@MainActor
+private final class NavigationFixtureState: ObservableObject {
+    @Published var path: [Destination] = []
+}
+
+private struct NavigationFixtureLeaf: NSViewRepresentable {
+    let name: String
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: .zero)
+        view.wantsLayer = true
+        view.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        view.identifier = NSUserInterfaceItemIdentifier(name)
+        return view
+    }
+    func updateNSView(_ nsView: NSView, context: Context) { nsView.identifier = NSUserInterfaceItemIdentifier(name) }
+}
+
+@MainActor
+private struct NavigationFixtureRoot: View {
+    @ObservedObject var state: NavigationFixtureState
+    let player: PlayerService
+    let panels: WindowPanelCoordinator
+    let columnVisibility: NavigationSplitViewVisibility
+    var body: some View {
+        MainWindow(path: $state.path, testing: MainWindowTestConfiguration(
+            leaf: { destination in AnyView(NavigationFixtureLeaf(name: fixtureName(destination))) },
+            panelCoordinator: panels, initialColumnVisibility: columnVisibility))
+            .environmentObject(player)
+            .environmentObject(AccountStore.shared)
+            .environmentObject(SettingsManager.shared)
+            .environmentObject(ToastCenter.shared)
+    }
+}
+
+private func fixtureName(_ destination: Destination?) -> String {
+    "fixture." + (destination.map { String(describing: $0) } ?? "home")
+}
+
+@MainActor
+private enum NavigationValidationEvidence {
+    static var cases: [[String: Any]] = []
+    static func record(_ values: [String: Any]) throws {
+        cases.append(values)
+        let root = ProcessInfo.processInfo.environment["GITHUB_WORKSPACE"] ?? FileManager.default.currentDirectoryPath
+        let url = URL(fileURLWithPath: root).appendingPathComponent(".build/window-navigation-validation.json")
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try JSONSerialization.data(withJSONObject: [
+            "scope": "Real MainWindow/NavigationSplitView/NavigationStack/PlayerBar in NSHostingView; offline synthetic page leaves. Synthetic screen bounds are explicitly recorded. No physical multi-monitor/full-screen animation claim.",
+            "cases": cases,
+        ], options: [.prettyPrinted, .sortedKeys]).write(to: url, options: .atomic)
+    }
+}
+
+/// Unlike rectangle-only tests these push real SwiftUI navigation destinations
+/// and inspect the production player's native attachment, visibility and input.
+@Suite("Window-owned player survives navigation", .serialized)
+@MainActor
+struct WindowNavigationChromeTests {
+    private final class Fixture {
+        let state = NavigationFixtureState()
+        let panels = WindowPanelCoordinator()
+        let player: PlayerService
+        let window: NSWindow
+        let host: NSHostingView<NavigationFixtureRoot>
+        init(columnVisibility: NavigationSplitViewVisibility = .detailOnly) throws {
+            _ = NSApplication.shared
+            let track = try JSONDecoder().decode(Track.self, from: Data(
+                #"{"id":606060,"name":"Navigation fixture","dt":180000}"#.utf8))
+            // Graph construction only: no engine start, hardware routing,
+            // account/network observers, persistence or progress timer.
+            player = PlayerService(playbackEngineForTesting: PlaybackEngine(), track: track,
+                                   lyrics: ParsedLyrics(lines: []))
+            panels.animationDuration = 0.04
+            window = NSWindow(contentRect: CGRect(x: 0, y: 80, width: 1021, height: 640),
+                              styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                              backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false
+            host = NSHostingView(rootView: NavigationFixtureRoot(state: state, player: player, panels: panels,
+                                                               columnVisibility: columnVisibility))
+            window.contentView = host
+            window.makeKeyAndOrderFront(nil)
+        }
+        func dispose() {
+            player.pause()
+            panels.detach()
+            window.orderOut(nil)
+            window.contentView = nil
+            window.close()
+        }
+    }
+
+    private func descendants(_ root: NSView) -> [NSView] {
+        [root] + root.subviews.flatMap(descendants)
+    }
+    private func markers(_ name: String, in root: NSView) -> [NSView] {
+        descendants(root).filter { $0.identifier?.rawValue == name && $0.window != nil }
+    }
+    private func wait(_ fixture: Fixture, _ description: String,
+                      condition: () -> Bool) async throws {
+        let deadline = ProcessInfo.processInfo.systemUptime + 4
+        while ProcessInfo.processInfo.systemUptime < deadline {
+            fixture.host.layoutSubtreeIfNeeded()
+            if condition() { return }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        Issue.record("Timed out waiting for \(description); native tree: \(descendants(fixture.host).map { String(describing: type(of: $0)) }.joined(separator: ","))")
+        throw CocoaError(.coderInvalidValue)
+    }
+
+    private func check(_ fixture: Fixture, destination: Destination?,
+                       originalBar: ObjectIdentifier? = nil, scenario: String) async throws -> ObjectIdentifier {
+        let expected = fixtureName(destination)
+        try await wait(fixture, "visible destination \(expected)") {
+            self.markers(expected, in: fixture.host).contains { !$0.visibleRect.isEmpty && !$0.isHiddenOrHasHiddenAncestor }
+        }
+        let bars = markers("QieTing.PlayerBar", in: fixture.host)
+        #expect(bars.count == 1)
+        let bar = try #require(bars.first)
+        let identity = ObjectIdentifier(bar)
+        if let originalBar { #expect(identity == originalBar) }
+        #expect(bar.window === fixture.window)
+        #expect(!bar.isHiddenOrHasHiddenAncestor)
+        #expect(!bar.visibleRect.isEmpty)
+        #expect(bar.bounds.width >= 779 && bar.bounds.width <= 881)
+        #expect(abs(bar.bounds.height - 56) < 1)
+        let barFrame = bar.convert(bar.bounds, to: fixture.host)
+        #expect(barFrame.minX >= fixture.host.bounds.minX - 0.5)
+        #expect(barFrame.maxX <= fixture.host.bounds.maxX + 0.5)
+        let button = try #require(markers("QieTing.PlayerBar.Lyrics", in: fixture.host).first)
+        #expect(abs(button.bounds.width - button.bounds.height) < 1)
+        let pointInWindow = button.convert(NSPoint(x: button.bounds.midX, y: button.bounds.midY), to: nil)
+        let pointInHostSuperview = fixture.host.superview?.convert(pointInWindow, from: nil) ?? pointInWindow
+        let hit = fixture.host.hitTest(pointInHostSuperview)
+        #expect(hit != nil)
+        let leaves = markers(expected, in: fixture.host)
+        #expect(!leaves.contains { leaf in hit === leaf || (hit?.isDescendant(of: leaf) ?? false) })
+        #expect(fixture.player.currentTrack?.id == 606060)
+        try NavigationValidationEvidence.record([
+            "scenario": scenario, "destination": expected, "barIdentity": String(describing: identity),
+            "attachedBarCount": bars.count, "barVisible": !bar.visibleRect.isEmpty,
+            "barFrame": NSStringFromRect(bar.convert(bar.bounds, to: nil)),
+            "windowFrame": NSStringFromRect(fixture.window.frame),
+            "physicalVisibleFrame": fixture.window.screen.map { NSStringFromRect($0.visibleFrame) } ?? "none",
+            "syntheticVisibleFrame": fixture.panels.visibleFrameForTesting.map(NSStringFromRect) ?? "none",
+            "panelMode": fixture.panels.mode.rawValue, "hitClass": hit.map { String(describing: type(of: $0)) } ?? "none",
+            "isPlaying": fixture.player.isPlaying,
+        ])
+        return identity
+    }
+
+    @Test func albumArtistAndOrdinaryDestinationsKeepTheSameLivePlayer() async throws {
+        let fixture = try Fixture()
+        defer { fixture.dispose() }
+        let serviceID = ObjectIdentifier(fixture.player)
+        let clockID = ObjectIdentifier(fixture.player.clock)
+        #expect(fixture.player.isPlaying)
+        let bar = try await check(fixture, destination: nil, scenario: "home-playing")
+        let playingPaths: [[Destination]] = [
+            [.album(7)], [], [.artist(42)], [.artist(42), .album(7)], [.artist(42)], [],
+            [.playlist(9)], [], [.search("fixture")], [], [.collections], [], [.recents], [], [.daily], [], [.cloud], [],
+        ]
+        for path in playingPaths {
+            fixture.state.path = path
+            _ = try await check(fixture, destination: path.last, originalBar: bar, scenario: "push-pop-playing")
+            #expect(fixture.player.isPlaying)
+        }
+        fixture.player.pause()
+        let pausedPaths: [[Destination]] = [[.artist(42)], [.artist(42), .album(7)], []]
+        for path in pausedPaths {
+            fixture.state.path = path
+            _ = try await check(fixture, destination: path.last, originalBar: bar, scenario: "push-pop-paused")
+            #expect(!fixture.player.isPlaying)
+        }
+        #expect(ObjectIdentifier(fixture.player) == serviceID)
+        #expect(ObjectIdentifier(fixture.player.clock) == clockID)
+    }
+
+    @Test func lyricsQueueAndImmersiveKeepWindowAndPlayerIdentity() async throws {
+        let fixture = try Fixture()
+        defer { fixture.dispose() }
+        let bar = try await check(fixture, destination: nil, scenario: "before-panel")
+        let original = fixture.window.frame
+        // The hosted runner may have only a 1024pt physical display. Injecting
+        // this geometry tests real window-frame operations, not real monitors.
+        fixture.panels.visibleFrameForTesting = CGRect(x: -1000, y: -1000, width: 4000, height: 3000)
+        fixture.player.activePanel = .lyrics
+        try await wait(fixture, "outside lyrics") {
+            fixture.panels.mode == .expandedOutside && !fixture.panels.isAnimating && fixture.window.frame.width > original.width + 280
+        }
+        let expanded = fixture.window.frame
+        let panelPaths: [[Destination]] = [[.album(7)], [.artist(42)], []]
+        for path in panelPaths {
+            fixture.state.path = path
+            _ = try await check(fixture, destination: path.last, originalBar: bar, scenario: "lyrics-navigation")
+        }
+        fixture.player.activePanel = .queue
+        try await wait(fixture, "queue switch") { fixture.panels.panel == .queue }
+        #expect(fixture.window.frame == expanded)
+        fixture.state.path = [.playlist(9)]
+        _ = try await check(fixture, destination: .playlist(9), originalBar: bar, scenario: "queue-navigation")
+        let minimum = fixture.window.contentMinSize
+        fixture.player.showNowPlaying = true
+        try await wait(fixture, "attached immersive view") {
+            self.markers("QieTing.Immersive", in: fixture.host).contains { !$0.visibleRect.isEmpty }
+        }
+        #expect(markers("QieTing.PlayerBar", in: fixture.host).count == 1)
+        #expect(ObjectIdentifier(try #require(markers("QieTing.PlayerBar", in: fixture.host).first)) == bar)
+        #expect(fixture.window.frame == expanded)
+        #expect(fixture.window.contentMinSize == minimum)
+        let systemButtonTypes: [NSWindow.ButtonType] = [.closeButton, .miniaturizeButton, .zoomButton]
+        for kind in systemButtonTypes {
+            let systemButton = try #require(fixture.window.standardWindowButton(kind))
+            #expect(!systemButton.isHiddenOrHasHiddenAncestor)
+            #expect(systemButton.alphaValue > 0.99)
+        }
+        fixture.player.showNowPlaying = false
+        try await wait(fixture, "immersive view removed") {
+            self.markers("QieTing.Immersive", in: fixture.host).isEmpty
+        }
+        _ = try await check(fixture, destination: .playlist(9), originalBar: bar, scenario: "exit-immersive")
+        fixture.player.activePanel = nil
+        try await wait(fixture, "original frame restored") {
+            fixture.panels.mode == .closed && abs(fixture.window.frame.width - original.width) < 0.5
+        }
+        #expect(fixture.window.frame == original)
+        #expect(fixture.window.contentMinSize.width == PlayerLayoutMetrics.minimumWindowWidth)
+        _ = try await check(fixture, destination: .playlist(9), originalBar: bar, scenario: "close-panel-restored")
+    }
+
+    @Test func realLyricsButtonRemainsClickableAfterNavigation() async throws {
+        let fixture = try Fixture()
+        defer { fixture.dispose() }
+        fixture.panels.visibleFrameForTesting = CGRect(x: -1000, y: -1000, width: 4000, height: 3000)
+        let bar = try await check(fixture, destination: nil, scenario: "before-real-click")
+        fixture.state.path = [.album(7)]
+        _ = try await check(fixture, destination: .album(7), originalBar: bar, scenario: "before-real-click-album")
+        let button = try #require(markers("QieTing.PlayerBar.Lyrics", in: fixture.host).first)
+        let point = button.convert(NSPoint(x: button.bounds.midX, y: button.bounds.midY), to: nil)
+        let down = try #require(NSEvent.mouseEvent(with: .leftMouseDown, location: point, modifierFlags: [],
+                                                  timestamp: ProcessInfo.processInfo.systemUptime,
+                                                  windowNumber: fixture.window.windowNumber, context: nil,
+                                                  eventNumber: 1, clickCount: 1, pressure: 1))
+        let up = try #require(NSEvent.mouseEvent(with: .leftMouseUp, location: point, modifierFlags: [],
+                                                timestamp: ProcessInfo.processInfo.systemUptime + 0.01,
+                                                windowNumber: fixture.window.windowNumber, context: nil,
+                                                eventNumber: 2, clickCount: 1, pressure: 0))
+        // AppKit button tracking may synchronously dequeue mouse-up.
+        NSApp.postEvent(up, atStart: false)
+        fixture.window.sendEvent(down)
+        try await wait(fixture, "real lyrics button action") { fixture.player.activePanel == .lyrics }
+        _ = try await check(fixture, destination: .album(7), originalBar: bar, scenario: "after-real-click")
+    }
+    @Test func rapidPanelCommandsAndUserResizeDoNotAccumulateWindowWidth() async throws {
+        let fixture = try Fixture()
+        defer { fixture.dispose() }
+        _ = try await check(fixture, destination: nil, scenario: "rapid-before")
+        fixture.panels.visibleFrameForTesting = CGRect(x: -1000, y: -1000, width: 4000, height: 3000)
+        let original = fixture.window.frame
+        for _ in 0..<10 {
+            _ = fixture.panels.request(.lyrics, mainWidth: 1021)
+            _ = fixture.panels.request(.queue, mainWidth: 1021)
+            _ = fixture.panels.request(nil, mainWidth: 1021)
+        }
+        try await wait(fixture, "rapid session closes") { fixture.panels.mode == .closed && !fixture.panels.isAnimating }
+        #expect(fixture.window.frame == original)
+        #expect(fixture.panels.request(.lyrics, mainWidth: 1021))
+        try await wait(fixture, "manual-resize start") { fixture.panels.mode == .expandedOutside && !fixture.panels.isAnimating }
+        var manuallyChanged = fixture.window.frame
+        manuallyChanged.origin.x += 30
+        manuallyChanged.origin.y += 20
+        manuallyChanged.size.width += 80
+        manuallyChanged.size.height += 20
+        fixture.window.setFrame(manuallyChanged, display: true)
+        try await wait(fixture, "manual resize rebased") {
+            abs((fixture.panels.originalFrame?.width ?? 0) - (original.width + 80)) < 0.5
+        }
+        let expected = try #require(fixture.panels.originalFrame)
+        #expect(fixture.panels.request(nil, mainWidth: 1101))
+        try await wait(fixture, "manual session closes") { fixture.panels.mode == .closed && !fixture.panels.isAnimating }
+        #expect(fixture.window.frame == expected)
+    }
+
+    @Test func visibleSidebarAtTheSharedMinimumKeepsTheSingleRowWithinTheWindow() async throws {
+        let fixture = try Fixture(columnVisibility: .all)
+        defer { fixture.dispose() }
+        let bar = try await check(fixture, destination: nil, scenario: "sidebar-visible-minimum")
+        fixture.state.path = [.album(7)]
+        _ = try await check(fixture, destination: .album(7), originalBar: bar, scenario: "sidebar-minimum-album")
+        let button = try #require(markers("QieTing.PlayerBar.PlayPause", in: fixture.host).first)
+        #expect(button.bounds.width >= 30 && button.bounds.height >= 30)
+        #expect(button.bounds.width <= 40 && button.bounds.height <= 40)
+        #expect(fixture.window.contentMinSize == NSSize(width: 1021, height: 640))
+    }
+
+    @Test func fullScreenNotificationsSuspendFrameOwnershipAndRestoreTheOutsideSession() async throws {
+        let fixture = try Fixture()
+        defer { fixture.dispose() }
+        _ = try await check(fixture, destination: nil, scenario: "fullscreen-notifications-before")
+        fixture.panels.visibleFrameForTesting = CGRect(x: -1000, y: -1000, width: 4000, height: 3000)
+        let original = fixture.window.frame
+        #expect(fixture.panels.request(.lyrics, mainWidth: 1021))
+        try await wait(fixture, "outside session settles") { !fixture.panels.isAnimating }
+        let expanded = fixture.window.frame
+        // These exercise AppKit notification/state ownership in the real
+        // hosted window. They do not create a fullscreen Space or a monitor.
+        NotificationCenter.default.post(name: NSWindow.willEnterFullScreenNotification, object: fixture.window)
+        #expect(fixture.panels.mode == .expandedInside)
+        #expect(fixture.window.frame == expanded)
+        NotificationCenter.default.post(name: NSWindow.didEnterFullScreenNotification, object: fixture.window)
+        #expect(fixture.panels.isFullScreen)
+        let savedClosedFrame = fixture.panels.originalFrame
+        fixture.window.setFrame(expanded.offsetBy(dx: 15, dy: 0), display: true)
+        #expect(fixture.panels.originalFrame == savedClosedFrame)
+        fixture.window.setFrame(expanded, display: true)
+        NotificationCenter.default.post(name: NSWindow.willExitFullScreenNotification, object: fixture.window)
+        NotificationCenter.default.post(name: NSWindow.didExitFullScreenNotification, object: fixture.window)
+        #expect(!fixture.panels.isFullScreen)
+        #expect(fixture.panels.mode == .expandedOutside)
+        #expect(fixture.window.frame == expanded)
+        #expect(abs(fixture.panels.baseContentWidth - 1021) < 0.5)
+        #expect(fixture.panels.request(nil, mainWidth: 1021))
+        try await wait(fixture, "post-fullscreen outside close") { fixture.panels.mode == .closed && !fixture.panels.isAnimating }
+        #expect(fixture.window.frame == original)
+    }
+
+    @Test func nativeFullScreenTakingOverAnInFlightCloseDoesNotLeaveAnOrphanPanel() async throws {
+        let fixture = try Fixture()
+        defer { fixture.dispose() }
+        _ = try await check(fixture, destination: nil, scenario: "fullscreen-close-interruption-before")
+        fixture.panels.visibleFrameForTesting = CGRect(x: -1000, y: -1000, width: 4000, height: 3000)
+        let original = fixture.window.frame
+        #expect(fixture.panels.request(.queue, mainWidth: 1021))
+        try await wait(fixture, "outside queue settles") { !fixture.panels.isAnimating }
+        #expect(fixture.panels.request(nil, mainWidth: 1021))
+        NotificationCenter.default.post(name: NSWindow.willEnterFullScreenNotification, object: fixture.window)
+        #expect(fixture.panels.mode == .closed)
+        #expect(fixture.panels.panel == nil)
+        NotificationCenter.default.post(name: NSWindow.didEnterFullScreenNotification, object: fixture.window)
+        NotificationCenter.default.post(name: NSWindow.willExitFullScreenNotification, object: fixture.window)
+        NotificationCenter.default.post(name: NSWindow.didExitFullScreenNotification, object: fixture.window)
+        try await wait(fixture, "interrupted close restores after native ownership") {
+            !fixture.panels.isAnimating && fixture.panels.mode == .closed
+                && abs(fixture.window.frame.width - original.width) < 0.5
+        }
+        #expect(fixture.window.frame == original)
+    }
+
+}

@@ -32,13 +32,14 @@ struct AlbumDetailView: View {
         .task(id: "\(albumID):\(downloads.network.connected)") {
             if downloads.network.connected || savedCollectionID == nil { await load() }
         }
-        .toolbar {
+        .safeAreaInset(edge: .top, spacing: 0) {
             if errorMessage != nil, downloads.network.connected, album != nil || savedCollectionID != nil {
-                ToolbarItem(placement: .primaryAction) {
-                    Button { Task { await load() } } label: { Image(systemName: "arrow.clockwise") }
-                        .accessibilityLabel("重试")
-                        .help("重试")
+                HStack {
+                    Spacer()
+                    Button { Task { await load() } } label: { Label("重试", systemImage: "arrow.clockwise") }
+                        .buttonStyle(.plain).padding(10)
                 }
+                .background(.regularMaterial)
             }
         }
     }
@@ -63,7 +64,7 @@ struct AlbumDetailView: View {
                             .padding(.horizontal, Theme.Layout.contentInset)
                             .padding(.top, 12)
 
-                        ScrollView(.horizontal, showsIndicators: false) {
+                        ScrollView(.horizontal) {
                             HStack(spacing: 16) {
                                 Spacer().frame(width: (Theme.Layout.contentInset) - 16)
                                 ForEach(otherAlbums) { item in
