@@ -16,6 +16,7 @@ private enum ServiceClockEvidence {
         try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
         let report: [String: Any] = [
             "scope": "Offline production PCM, PlayerService publisher and lyric cursor; no physical-output or listening claim",
+            "completionScope": "Offline dataRendered source completion excludes downstream/device latency; real playback retains dataPlayedBack",
             "sampleRate": DeckChain.format.sampleRate,
             "commandTimestampUnit": "mach_absolute_time ticks; UI issued/confirmed bounds are systemUptime seconds",
             "cases": cases,
@@ -222,7 +223,10 @@ struct PlayerServiceClockTests {
         let olderRead = try #require(player.beginPlaybackTimeRead())
         let olderSeconds = await engine.positionAsync(of: olderRead.deck)
         for _ in 0..<4 { _ = try samples(engine) }
-        let newer = try await assertSameClock(player, engine: engine)
+        _ = try await assertSameClock(player, engine: engine)
+        // assertSameClock also exercises the word-timing reader, which accepts
+        // another newer sample. Compare with the actual latest accepted read.
+        let newer = try #require(player.latestPlaybackTimeSample)
         let accepted = try #require(player.acceptPlaybackTime(olderSeconds, for: olderRead))
         #expect(accepted == newer, "an older timer continuation publishes the newer accepted timestamp")
         #expect(player.latestPlaybackTimeSample == newer)
@@ -230,7 +234,7 @@ struct PlayerServiceClockTests {
         #expect(player.lyricsCursor.mediaTime == newer.seconds)
     }
 
-    @Test func realEngineCompletionPublishesTheEndpointWithoutAnotherTimerTick() async throws {
+    @Test func sourceRenderCompletionPublishesTheEndpointWithoutAnotherTimerTick() async throws {
         let url = try fixture(duration: 0.3)
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
         let engine = try engine(url)
@@ -241,13 +245,13 @@ struct PlayerServiceClockTests {
             _ = try samples(engine)
             await Task.yield()
         }
-        // Let the real AVAudioPlayerNode completion reach the engine queue and
-        // the SAME event consumer used by the application. No synthetic end or
-        // manually added UI seconds are injected here.
+        // Offline rendering uses the real node's dataRendered completion:
+        // dataPlayedBack is defined only for a real audio device. Both take
+        // the SAME engine event/service path; no synthetic EOF is injected.
         for _ in 0..<100 where player.isPlaying {
             try await Task.sleep(for: .milliseconds(5))
         }
-        #expect(!player.isPlaying, "the engine must deliver its real natural completion")
+        #expect(!player.isPlaying, "the engine must deliver its real source-render completion")
         #expect(player.progress == player.duration)
         #expect(player.lyricsCursor.mediaTime == player.duration)
         #expect(abs(player.duration - 0.3) <= 1 / sampleRate)
