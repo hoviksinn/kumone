@@ -209,7 +209,8 @@ struct PlaybackControlBoundaryTests {
         #expect(golden.maximumSignal > amplitude * 0.4, "silence cannot validate a boundary measurement")
         #expect(golden.maximumSampleError < 0.000_01,
                 "diagnostic observation must retain every audible PCM frame with the original strict tolerance")
-        #expect((steady + pause + resume).flatMap { $0 }.allSatisfy(\.isFinite))
+        let allMeasuredSamplesAreFinite = (steady + pause + resume).flatMap { $0 }.allSatisfy { $0.isFinite }
+        #expect(allMeasuredSamplesAreFinite)
         try PlaybackBoundaryEvidence.record([
             "operation": "pause-resume", "sourceSampleRate": sourceRate, "sourceAmplitude": amplitude,
             "steady": metrics(steady), "pause": metrics(pause), "resume": metrics(resume),
@@ -252,7 +253,8 @@ struct PlaybackControlBoundaryTests {
         for _ in 0..<40 { try append(subject.renderOfflineForTesting(quantum), to: &replacement) }
         #expect(replaced.generation > before.generation)
         #expect(!replaced.paused && replaced.nodePlaying)
-        #expect(replacement.flatMap { $0 }.allSatisfy(\.isFinite))
+        let allReplacementSamplesAreFinite = replacement.flatMap { $0 }.allSatisfy { $0.isFinite }
+        #expect(allReplacementSamplesAreFinite)
         #expect((replacement.flatMap { $0 }.map(abs).max() ?? 0) > 0.2)
         try PlaybackBoundaryEvidence.record([
             "operation": "direct-stop-load-play", "sourceSampleRate": sourceRate,

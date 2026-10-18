@@ -61,6 +61,7 @@ private enum NavigationValidationEvidence {
 @Suite("Window-owned player survives navigation", .serialized)
 @MainActor
 struct WindowNavigationChromeTests {
+    @MainActor
     private final class Fixture {
         let state = NavigationFixtureState()
         let panels = WindowPanelCoordinator()
@@ -115,8 +116,23 @@ struct WindowNavigationChromeTests {
     private func check(_ fixture: Fixture, destination: Destination?,
                        originalBar: ObjectIdentifier? = nil, scenario: String) async throws -> ObjectIdentifier {
         let expected = fixtureName(destination)
-        try await wait(fixture, "visible destination \(expected)") {
-            self.markers(expected, in: fixture.host).contains { !$0.visibleRect.isEmpty && !$0.isHiddenOrHasHiddenAncestor }
+        try await wait(fixture, "configured window and visible destination \(expected)") {
+            guard fixture.panels.window === fixture.window,
+                  self.markers(expected, in: fixture.host).contains(where: {
+                      !$0.visibleRect.isEmpty && !$0.isHiddenOrHasHiddenAncestor
+                  }),
+                  let bar = self.markers("QieTing.PlayerBar", in: fixture.host).first,
+                  let lyrics = self.markers("QieTing.PlayerBar.Lyrics", in: fixture.host).first
+            else { return false }
+            // Native configuration and middle-column geometry are committed
+            // asynchronously after initial hosting. Observe their completion
+            // instead of racing the first panel command against attachment.
+            let frame = bar.convert(bar.bounds, to: fixture.host)
+            return bar.bounds.width >= 779 && abs(bar.bounds.height - 56) < 1
+                && frame.minX >= fixture.host.bounds.minX - 0.5
+                && frame.maxX <= fixture.host.bounds.maxX + 0.5
+                && lyrics.bounds.width > 0 && lyrics.bounds.height > 0
+                && abs(lyrics.bounds.width - lyrics.bounds.height) < 1
         }
         let bars = markers("QieTing.PlayerBar", in: fixture.host)
         #expect(bars.count == 1)
