@@ -1392,7 +1392,9 @@ final class PlayerService: ObservableObject {
     private func handleEngineEvent(_ event: PlaybackEngineEvent) {
         switch event {
         case .deckFinished(let deck):
-            guard deck == activeDeck else { return }
+            // Resolving a replacement may leave the preceding source sounding
+            // on the same deck. Its late EOF must not finish the new item.
+            guard deck == activeDeck, deckLoaded else { return }
             handleItemEnded()
         case .streamStalled(let deck):
             if deck == activeDeck { isBuffering = true }
