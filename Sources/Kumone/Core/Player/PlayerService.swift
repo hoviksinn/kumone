@@ -106,6 +106,33 @@ final class PlaybackClock: ObservableObject {
 @MainActor
 final class LyricsCursor: ObservableObject {
     @Published var activeIndex: Int?
+    /// The media timestamp used for line selection, before the established
+    /// 200 ms line-focus lead. Not published at display cadence.
+    private(set) var mediaTime: TimeInterval = 0
+
+    func update(at seconds: TimeInterval, lyrics: ParsedLyrics?) {
+        mediaTime = seconds
+        let index = lyrics?.activeIndex(at: seconds + 0.2)
+        if index != activeIndex { activeIndex = index }
+    }
+}
+
+/// One accepted read of the engine's media clock. The UI clock and lyric
+/// cursor consume this very timestamp; wall time never advances a playhead.
+struct PlaybackTimeSample: Equatable {
+    let seconds: TimeInterval
+    let timelineRevision: UInt64
+    let sequence: UInt64
+}
+
+/// Identity captured BEFORE crossing the engine queue. Keeping request and
+/// acceptance separate makes asynchronous ordering explicit and testable.
+struct PlaybackTimeRead {
+    let timelineRevision: UInt64
+    let resolveGeneration: Int
+    let deck: Deck
+    let trackID: Int?
+    let sequence: UInt64
 }
 
 @MainActor
@@ -146,7 +173,9 @@ final class PlayerService: ObservableObject {
         set { clock.progress = newValue }
     }
     @Published var repeatMode: RepeatMode = .off {
-        didSet { UserDefaults.standard.set(repeatMode.rawValue, forKey: "player.repeat") }
+        didSet {
+            if observesSystemPlayback { UserDefaults.standard.set(repeatMode.rawValue, forKey: "player.repeat") }
+        }
     }
 
     /// Which order the player walks its queue in (predev §2.1). The three
@@ -209,7 +238,8 @@ final class PlayerService: ObservableObject {
 
     // MARK: - Engine
 
-    private let engine = PlaybackEngine()
+    private let engine: PlaybackEngine
+    private var observesSystemPlayback = true
     /// The deck currently carrying the audible track; hand-overs flip it.
     private var activeDeck: Deck = .a
     /// The active deck has a source loaded (file or progressive stream).
@@ -223,29 +253,85 @@ final class PlayerService: ObservableObject {
     private var currentRemoteURL: URL?
     private var progressTimer: Timer?
 
-    /// Live playback position straight off the deck, for smooth per-frame
-    /// karaoke highlighting (the published `progress` is intentionally coarse —
-    /// it only moves when the scrubber would visibly move).
-    ///
-    /// Falls back to `progress` whenever no deck is carrying a source, so a
-    /// paused or unloaded player still reports where the playhead sits.
-    var livePlaybackTime: TimeInterval {
-        guard deckLoaded else { return progress }
-        let t = engine.position(of: activeDeck)
-        return t.isFinite ? t : progress
-    }
+    /// Most recently accepted real engine timestamp. Non-rendering consumers
+    /// (AutoMix/debug) read this cache instead of synchronously blocking the
+    /// main actor behind engine work. A display-synchronized lyric row and the
+    /// 5 Hz progress tick both refresh it through `samplePlaybackTime`.
+    var livePlaybackTime: TimeInterval { latestPlaybackTimeSample?.seconds ?? progress }
+
+    private(set) var latestPlaybackTimeSample: PlaybackTimeSample?
+    private var playbackTimelineRevision: UInt64 = 0
+    private var playbackSampleSequence: UInt64 = 0
+    private var clockSampleTask: Task<Void, Never>?
 
     /// A nonblocking read of the actual audio clock for local lyric rendering.
-    /// A track/deck change while awaiting the queue retires the old sample.
+    /// The same sampler serves the scrubber and lyric cursor. A seek, transport
+    /// command or source change retires ALL earlier reads, even on the same song.
     func livePlaybackTimeAsync() async -> TimeInterval {
-        guard deckLoaded else { return progress }
-        let generation = resolveGeneration
-        let deck = activeDeck
-        let trackID = currentTrack?.id
-        let seconds = await engine.positionAsync(of: deck)
-        guard generation == resolveGeneration, deck == activeDeck,
-              trackID == currentTrack?.id, deckLoaded else { return progress }
-        return seconds.isFinite ? seconds : progress
+        await samplePlaybackTime(publishProgress: false)?.seconds ?? livePlaybackTime
+    }
+
+    @discardableResult
+    func samplePlaybackTime(publishProgress: Bool = true) async -> PlaybackTimeSample? {
+        guard let read = beginPlaybackTimeRead() else { return nil }
+        let seconds = await engine.positionAsync(of: read.deck)
+        return acceptPlaybackTime(seconds, for: read, publishProgress: publishProgress)
+    }
+
+    func beginPlaybackTimeRead() -> PlaybackTimeRead? {
+        guard !Task.isCancelled, deckLoaded, !isScrubbing else { return nil }
+        playbackSampleSequence &+= 1
+        return PlaybackTimeRead(timelineRevision: playbackTimelineRevision,
+                                resolveGeneration: resolveGeneration, deck: activeDeck,
+                                trackID: currentTrack?.id, sequence: playbackSampleSequence)
+    }
+
+    @discardableResult
+    func acceptPlaybackTime(_ seconds: TimeInterval, for read: PlaybackTimeRead,
+                            publishProgress: Bool = true) -> PlaybackTimeSample? {
+        guard !Task.isCancelled, read.timelineRevision == playbackTimelineRevision,
+              read.resolveGeneration == resolveGeneration, read.deck == activeDeck,
+              read.trackID == currentTrack?.id, deckLoaded, !isScrubbing,
+              seconds.isFinite else { return nil }
+        let sample: PlaybackTimeSample
+        if let latest = latestPlaybackTimeSample, latest.sequence >= read.sequence {
+            // A display read can finish before an older progress read resumes
+            // on the main actor. Publish the newer timestamp instead of letting
+            // either stale data or display cadence starve the progress timer.
+            sample = latest
+        } else {
+            sample = PlaybackTimeSample(seconds: seconds, timelineRevision: read.timelineRevision, sequence: read.sequence)
+            latestPlaybackTimeSample = sample
+            updateLyricsCursor(at: seconds)
+        }
+        if publishProgress {
+            if progress != sample.seconds { progress = sample.seconds }
+            if observesSystemPlayback {
+                NowPlayingManager.shared.updateElapsed(sample.seconds, rate: isPlaying ? 1 : 0)
+            }
+        }
+        return sample
+    }
+
+    private func invalidatePlaybackTime() {
+        playbackTimelineRevision &+= 1
+        clockSampleTask?.cancel()
+        clockSampleTask = nil
+        latestPlaybackTimeSample = nil
+    }
+
+    private func requestClockRefresh() {
+        guard deckLoaded, !isScrubbing, clockSampleTask == nil else { return }
+        let revision = playbackTimelineRevision
+        clockSampleTask = Task { @MainActor [weak self] in
+            guard let self, !Task.isCancelled,
+                  revision == self.playbackTimelineRevision else { return }
+            let sample = await self.samplePlaybackTime()
+            // An old task must not clear a replacement queued by seek/pause.
+            guard revision == self.playbackTimelineRevision else { return }
+            self.clockSampleTask = nil
+            if sample != nil, self.isPlaying, self.observesSystemPlayback { self.updateStemPrerender() }
+        }
     }
     private var resolveGeneration = 0
     /// True while the engine is paused by us (togglePlayPause/pause/
@@ -335,6 +421,8 @@ final class PlayerService: ObservableObject {
     /// empty while tests exercise the real occurrence-removal API.
     init(queueForTesting tracks: [Track], currentIndex index: Int, inserted: [Track] = [],
          order: QueueOrder = .listed, orderedTracks: [Track]? = nil) {
+        engine = PlaybackEngine()
+        observesSystemPlayback = false
         queue = tracks
         shuffledQueue = order == .shuffled ? (orderedTracks ?? tracks) : []
         autoMixQueue = order == .autoMix ? (orderedTracks ?? tracks) : []
@@ -345,7 +433,24 @@ final class PlayerService: ObservableObject {
         repeatMode = .one
     }
 
+    /// Uses the actual production sampler/publisher with a caller-owned engine
+    /// and no account, persistence, network, timer or system-media registration.
+    init(playbackEngineForTesting engine: PlaybackEngine, track: Track, lyrics: ParsedLyrics) {
+        self.engine = engine
+        observesSystemPlayback = false
+        queue = [track]
+        currentIndex = 0
+        currentTrack = track
+        self.lyrics = lyrics
+        deckLoaded = true
+        hasLocalFile = true
+        duration = engine.duration(of: .a) ?? track.duration
+        isPlaying = true
+        observeEngineEvents()
+    }
+
     private init() {
+        engine = PlaybackEngine()
         sleepTimer.onDeadlineReached = { [weak self] in
             self?.pause()
         }
@@ -412,22 +517,10 @@ final class PlayerService: ObservableObject {
                 // there is no second timer to own.
                 self.updateAutoMixPick()
                 guard self.isPlaying, self.deckLoaded, !self.isScrubbing else { return }
-                let seconds = self.engine.position(of: self.activeDeck)
-                guard seconds.isFinite else { return }
-
-                // Lyrics need this cadence to stay in sync; the cursor itself
-                // only publishes when the line actually changes.
-                self.updateLyricsCursor(at: seconds)
-
-                // The scrubber does not. Publishing the position every tick
-                // re-renders it — and SwiftUI rebuilds the display list for the
-                // whole tree each time — to move the thumb a fraction of a
-                // pixel. Half a second is still smoother than the eye needs.
-                if abs(seconds - self.progress) > 0.45 {
-                    self.progress = seconds
-                    NowPlayingManager.shared.updateElapsed(seconds, rate: 1)
-                }
-                self.updateStemPrerender()
+                // Never block the main actor waiting for scheduling/DSP work.
+                // At most one timer read is outstanding. Publishing only the
+                // isolated PlaybackClock at 5 Hz does not rebuild PlayerService.
+                self.requestClockRefresh()
             }
         }
         // .common keeps the clock ticking through menu tracking and window
@@ -435,13 +528,7 @@ final class PlayerService: ObservableObject {
         RunLoop.main.add(timer, forMode: .common)
         progressTimer = timer
 
-        Task { [weak self] in
-            guard let events = self?.engine.events else { return }
-            for await event in events {
-                guard let self else { return }
-                self.handleEngineEvent(event)
-            }
-        }
+        observeEngineEvents()
 
         NowPlayingManager.shared.attach(to: self)
         offlineActivatedScope = AccountStore.shared.offlineScope
@@ -452,7 +539,13 @@ final class PlayerService: ObservableObject {
     }
 
     /// Set while the user drags the seek bar so the time observer doesn't fight the thumb.
-    var isScrubbing = false
+    var isScrubbing = false {
+        didSet {
+            guard isScrubbing != oldValue else { return }
+            invalidatePlaybackTime()
+            if !isScrubbing { requestClockRefresh() }
+        }
+    }
 
     // MARK: - Entry points
 
@@ -512,25 +605,36 @@ final class PlayerService: ObservableObject {
             startPlaying(track, indexUnchanged: true)
             return
         } else if enginePaused {
+            invalidatePlaybackTime()
             engine.resume()
             enginePaused = false
             isPlaying = true
         } else {
             // The deck drained (queue end) or was loaded without playing —
             // resume() would be a no-op; re-issue play from where we are.
+            invalidatePlaybackTime()
             engine.play(deck: activeDeck, from: min(progress, max(0, duration - 0.1)))
             isPlaying = true
             scrobbleStartIfNeeded(track)
         }
-        NowPlayingManager.shared.updateElapsed(progress, rate: isPlaying ? 1 : 0)
+        requestClockRefresh()
+        if observesSystemPlayback {
+            NowPlayingManager.shared.updateElapsed(progress, rate: isPlaying ? 1 : 0)
+        }
     }
 
     func pause() {
+        invalidatePlaybackTime()
         engine.pause()
         enginePaused = true
         isPlaying = false
-        AudioSpectrum.shared.reset()
-        NowPlayingManager.shared.updateElapsed(progress, rate: 0)
+        if observesSystemPlayback {
+            AudioSpectrum.shared.reset()
+            NowPlayingManager.shared.updateElapsed(progress, rate: 0)
+        }
+        // This read is enqueued AFTER pause on the engine queue, so the frozen
+        // progress/cursor reflect the pause's executed media position.
+        requestClockRefresh()
     }
 
     func next() {
@@ -584,15 +688,12 @@ final class PlayerService: ObservableObject {
     /// Recomputes the current lyric line, publishing only on a change.
     /// The lead makes a line light up just before it is sung.
     private func updateLyricsCursor(at seconds: TimeInterval) {
-        let index = lyrics?.activeIndex(at: seconds + 0.2)
-        if index != lyricsCursor.activeIndex {
-            lyricsCursor.activeIndex = index
-        }
+        lyricsCursor.update(at: seconds, lyrics: lyrics)
     }
 
-    /// `completion` runs once the playhead is at `seconds`. The engine seeks
-    /// synchronously, so it runs before this returns — the parameter exists for
-    /// the AVPlayer-shaped call sites in the UI.
+    /// The target is published immediately; the engine serializes the seek
+    /// before subsequent clock reads. `completion` acknowledges submission,
+    /// rather than claiming that an asynchronous render has already occurred.
     func seek(to seconds: TimeInterval, completion: (@MainActor () -> Void)? = nil) {
         // An armed/overlapping hand-over is anchored to the old timeline —
         // cancel it, seek, then re-arm from the prefetched file.
@@ -613,10 +714,14 @@ final class PlayerService: ObservableObject {
         // the re-arm, on the signature, and drops it if the seam really moved.
         let wasArmed = transitionArmed
         if wasArmed { disarmTransition(keepingPrerender: true) }
+        invalidatePlaybackTime()
         progress = seconds
         updateLyricsCursor(at: seconds)
         engine.seek(deck: activeDeck, to: seconds)
-        NowPlayingManager.shared.updateElapsed(seconds, rate: isPlaying ? 1 : 0)
+        if observesSystemPlayback {
+            NowPlayingManager.shared.updateElapsed(seconds, rate: isPlaying ? 1 : 0)
+        }
+        requestClockRefresh()
         if wasArmed {
             armTransitionIfReady()
             reconcileParkedPrerender()
@@ -908,7 +1013,9 @@ final class PlayerService: ObservableObject {
                     ToastCenter.shared.show(String(localized: "已经是最后一首了"))
                 } else {
                     isPlaying = false
-                    NowPlayingManager.shared.updateElapsed(progress, rate: 0)
+                    if observesSystemPlayback {
+                        NowPlayingManager.shared.updateElapsed(progress, rate: 0)
+                    }
                 }
                 return
             }
@@ -920,6 +1027,16 @@ final class PlayerService: ObservableObject {
     }
 
     private func handleItemEnded() {
+        let wasPlaying = isPlaying
+        invalidatePlaybackTime()
+        // A completion can reach MainActor just after the user's pause command.
+        // The source is drained regardless of the requested transport state;
+        // the next play must schedule it rather than resume an exhausted node.
+        enginePaused = false
+        // A natural completion is definitive, even if the final timer tick was
+        // delayed. Never leave a drained last track showing seconds remaining.
+        progress = duration
+        updateLyricsCursor(at: duration)
         scrobbleIfNeeded(completed: true)
 
         if sleepTimer.consumeEndOfCurrentTrack() {
@@ -932,20 +1049,27 @@ final class PlayerService: ObservableObject {
             progress = duration
             updateLyricsCursor(at: duration)
             isPlaying = false
-            AudioSpectrum.shared.reset()
-            NowPlayingManager.shared.updateElapsed(progress, rate: 0)
+            if observesSystemPlayback {
+                AudioSpectrum.shared.reset()
+                NowPlayingManager.shared.updateElapsed(progress, rate: 0)
+            }
             return
         }
 
-        guard isPlaying else { return }
+        guard wasPlaying else {
+            if observesSystemPlayback { NowPlayingManager.shared.updateElapsed(progress, rate: 0) }
+            return
+        }
 
         if repeatMode == .one, !isFMMode {
             scrobbled = false
             if hasLocalFile {
                 progress = 0
+                updateLyricsCursor(at: 0)
                 engine.play(deck: activeDeck, from: 0)
+                requestClockRefresh()
                 isPlaying = true
-                NowPlayingManager.shared.updateElapsed(0, rate: 1)
+                if observesSystemPlayback { NowPlayingManager.shared.updateElapsed(0, rate: 1) }
             } else if let track = currentTrack {
                 // A drained stream can't restart in place; re-resolve (the
                 // second pass usually hits the cache the first one committed).
@@ -990,6 +1114,7 @@ final class PlayerService: ObservableObject {
 
     private func startPlaying(_ track: Track, indexUnchanged: Bool = false,
                               localLease: OfflinePlaybackLease? = nil) {
+        invalidatePlaybackTime()
         offlineScan?.cancel()
         offlineScan = nil
         offlineScanID = UUID()
@@ -1178,7 +1303,7 @@ final class PlayerService: ObservableObject {
 
         engine.stop(deck: activeDeck)
         deckFiles[activeDeck] = nil
-        deckLoaded = true
+        deckLoaded = false
         hasLocalFile = false
 
         if !resolved.isTrial {
@@ -1207,8 +1332,11 @@ final class PlayerService: ObservableObject {
                 deckFiles[activeDeck] = local
                 currentLocalURL = local
                 persistCurrentLyricsSidecar()
+                invalidatePlaybackTime()
                 engine.play(deck: activeDeck, from: 0)
+                deckLoaded = true
                 isPlaying = true
+                requestClockRefresh()
                 AudioSpectrum.shared.markTapped()
                 scrobbleStartIfNeeded(track)
                 duration = fileDuration
@@ -1232,10 +1360,13 @@ final class PlayerService: ObservableObject {
         }
         // Buffering until the first decoded chunk lands (streamResumed).
         isBuffering = true
+        invalidatePlaybackTime()
         engine.startStreaming(from: resolved.url, formatHint: key.fileExtension,
                               writingTo: partURL, on: activeDeck)
         engine.play(deck: activeDeck, from: 0)
+        deckLoaded = true
         isPlaying = true
+        requestClockRefresh()
         AudioSpectrum.shared.markTapped()
         scrobbleStartIfNeeded(track)
 
@@ -1247,6 +1378,16 @@ final class PlayerService: ObservableObject {
     }
 
     // MARK: - Engine events
+
+    private func observeEngineEvents() {
+        Task { [weak self] in
+            guard let events = self?.engine.events else { return }
+            for await event in events {
+                guard let self else { return }
+                self.handleEngineEvent(event)
+            }
+        }
+    }
 
     private func handleEngineEvent(_ event: PlaybackEngineEvent) {
         switch event {
@@ -1313,6 +1454,7 @@ final class PlayerService: ObservableObject {
                 // Mid-song recovery: keep the level exactly where the listener
                 // has been hearing it (the stream started at unity), so the
                 // fallback is inaudible.
+                invalidatePlaybackTime()
                 let fileDuration = try engine.loadFile(at: local, on: activeDeck, trimDB: 0)
                 deckFiles[activeDeck] = local
                 hasLocalFile = true
@@ -2050,9 +2192,9 @@ final class PlayerService: ObservableObject {
             cancelStemPrerender()
         }
         let splice = signature.outPoint - TransitionSegmentRenderer.handoff
-        // The live playhead, not the published `progress`: that one is only
-        // republished when the scrubber would visibly move, so it can sit up to
-        // half a second behind — half a second of runway this decision spends.
+        // The freshest accepted engine sample, also refreshed by an active
+        // display-synchronized lyric row; no wall-time extrapolation or extra
+        // render-thread wait is needed to evaluate the remaining runway.
         let remaining = splice - livePlaybackTime
 
         // A refusal expires when the clock it was filed against does. The seam
@@ -2577,6 +2719,7 @@ final class PlayerService: ObservableObject {
             }
         }
 
+        invalidatePlaybackTime()
         currentTrack = next
         activeDeck = deck
         deckLoaded = true
@@ -3011,6 +3154,7 @@ final class PlayerService: ObservableObject {
     /// or a loudness trim, so hand-overs from it fall back to gapless.
     private func playLocalFile(_ url: URL, lease: OfflinePlaybackLease?, for track: Track, generation: Int,
                                from position: TimeInterval = 0) {
+        invalidatePlaybackTime()
         consecutiveFailures = 0
         servedQuality = lease?.descriptor.identity.quality
         currentCacheKey = nil
@@ -3044,6 +3188,7 @@ final class PlayerService: ObservableObject {
     }
 
     private func stopForOffline() {
+        invalidatePlaybackTime()
         disarmTransition()
         engine.stop(deck: activeDeck)
         deckFiles[activeDeck] = nil
@@ -3158,7 +3303,7 @@ final class PlayerService: ObservableObject {
     /// point playback actually begins — the cache-hit path and the streaming
     /// path both reach it, and `startPlaying` clears the flag.
     private func scrobbleStartIfNeeded(_ track: Track) {
-        guard !startScrobbled else { return }
+        guard observesSystemPlayback, !startScrobbled else { return }
         startScrobbled = true
         let tid = track.id
         let sid = source.sourceID
@@ -3166,7 +3311,7 @@ final class PlayerService: ObservableObject {
     }
 
     private func scrobbleIfNeeded(completed: Bool) {
-        guard let track = currentTrack, !scrobbled, progress > 1 else { return }
+        guard observesSystemPlayback, let track = currentTrack, !scrobbled, progress > 1 else { return }
         scrobbled = true
         let seconds = completed ? Int(duration) : Int(progress)
         let sourceID = source.sourceID
