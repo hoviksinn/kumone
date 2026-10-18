@@ -3,9 +3,29 @@ import SwiftUI
 
 /// The window owns the trailing column. This view fills that column instead
 /// of placing a second floating card over the library.
+enum LyricsPanelPresentation: Equatable {
+    case standard, immersive
+
+    var fontScale: CGFloat { self == .immersive ? 1.22 : 1 }
+    var lineSpacing: CGFloat { LyricsVisualParameters.lineSpacing * fontScale }
+    var horizontalPadding: CGFloat { self == .immersive ? 28 : LyricsVisualParameters.horizontalPadding }
+}
+
 struct LyricsPanel: View {
+    var presentation: LyricsPanelPresentation = .standard
     @EnvironmentObject private var player: PlayerService
-    @ObservedObject private var lyricsCursor = PlayerService.shared.lyricsCursor
+
+    var body: some View {
+        LyricsPanelContent(presentation: presentation, lyricsCursor: player.lyricsCursor)
+    }
+}
+
+/// The presentation modes share focus, real media time, scrolling and ruby
+/// layout. Only glyph sizes and spacing differ in the larger immersive column.
+private struct LyricsPanelContent: View {
+    let presentation: LyricsPanelPresentation
+    @EnvironmentObject private var player: PlayerService
+    @ObservedObject var lyricsCursor: LyricsCursor
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @State private var activeIndex: Int?
@@ -15,7 +35,7 @@ struct LyricsPanel: View {
     var body: some View {
         content
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(.primary.opacity(0.025))
+            .background(.primary.opacity(presentation == .immersive ? 0 : 0.025))
             .onDisappear { resumeTask?.cancel() }
     }
 
@@ -25,7 +45,7 @@ struct LyricsPanel: View {
             GeometryReader { geometry in
                 ScrollViewReader { proxy in
                     ScrollView {
-                        LazyVStack(alignment: .leading, spacing: LyricsVisualParameters.lineSpacing) {
+                        LazyVStack(alignment: .leading, spacing: presentation.lineSpacing) {
                             // A proportional inset lets the first and last lines
                             // reach the same focus position in short windows.
                             Color.clear.frame(height: geometry.size.height * 0.38)
@@ -33,6 +53,7 @@ struct LyricsPanel: View {
                                 LyricsPanelLine(
                                     line: line,
                                     activeIndex: activeIndex,
+                                    presentation: presentation,
                                     onSeek: {
                                         player.seek(to: line.time)
                                         resumeFollowing(proxy: proxy)
@@ -42,8 +63,8 @@ struct LyricsPanel: View {
                             }
                             Color.clear.frame(height: geometry.size.height * 0.48)
                         }
-                        .padding(.horizontal, LyricsVisualParameters.horizontalPadding)
-                        .background(LyricScrollerPreferences().frame(width: 0, height: 0))
+                        .padding(.horizontal, presentation.horizontalPadding)
+                        .background(NativeScrollPreferences().frame(width: 0, height: 0))
                     }
                     // NSScrollView supplies overlay scrollers and their fade
                     // timing. Respect the user's "Always" system preference.
@@ -157,6 +178,7 @@ struct LyricsPanel: View {
 private struct LyricsPanelLine: View {
     let line: LyricLine
     let activeIndex: Int?
+    let presentation: LyricsPanelPresentation
     let onSeek: () -> Void
 
     @EnvironmentObject private var settings: SettingsManager
@@ -176,7 +198,7 @@ private struct LyricsPanelLine: View {
             VStack(alignment: .leading, spacing: LyricsVisualParameters.annotationSpacing) {
                 if settings.lyricsAnnotation == .romaji, let romaji = line.romaji {
                     Text(romaji)
-                        .font(.system(size: LyricsVisualParameters.romajiSize, weight: .medium))
+                        .font(.system(size: LyricsVisualParameters.romajiSize * presentation.fontScale, weight: .medium))
                         .foregroundStyle(.primary.opacity(0.72))
                 }
                 // Font metrics and ruby geometry stay identical when focus
@@ -184,14 +206,14 @@ private struct LyricsPanelLine: View {
                 LyricPlaybackText(
                     line: line,
                     isActive: isActive,
-                    size: LyricsVisualParameters.fontSize,
+                    size: LyricsVisualParameters.fontSize * presentation.fontScale,
                     weight: .bold,
                     color: .primary,
                     verbatim: settings.verbatimLyrics
                 )
                 if settings.showLyricsTranslation, let translation = line.translation {
                     Text(translation)
-                        .font(.system(size: LyricsVisualParameters.translationSize, weight: .medium))
+                        .font(.system(size: LyricsVisualParameters.translationSize * presentation.fontScale, weight: .medium))
                         .foregroundStyle(.primary.opacity(0.66))
                 }
             }
@@ -214,27 +236,5 @@ private struct LyricsPanelLine: View {
         .accessibilityAddTraits(isActive ? [.isSelected] : [])
         .animation(reduceMotion ? .easeInOut(duration: 0.18) : LyricsVisualParameters.focusAnimation, value: activeIndex)
         .animation(.easeInOut(duration: 0.15), value: isHovering)
-    }
-}
-
-/// Use the containing native scroll view's own scroller policy. In particular,
-/// don't flash indicators for programmatic lyric following or force overlays
-/// for people who explicitly chose persistent scrollbars in System Settings.
-private struct LyricScrollerPreferences: NSViewRepresentable {
-    func makeNSView(context: Context) -> Probe { Probe() }
-    func updateNSView(_ view: Probe, context: Context) { view.applyPreferences() }
-
-    final class Probe: NSView {
-        override func viewDidMoveToWindow() {
-            super.viewDidMoveToWindow()
-            DispatchQueue.main.async { [weak self] in self?.applyPreferences() }
-        }
-
-        func applyPreferences() {
-            guard let scrollView = enclosingScrollView else { return }
-            scrollView.scrollerStyle = NSScroller.preferredScrollerStyle
-            scrollView.hasVerticalScroller = true
-            scrollView.autohidesScrollers = true
-        }
     }
 }

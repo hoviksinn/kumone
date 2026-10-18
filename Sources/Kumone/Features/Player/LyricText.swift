@@ -67,9 +67,12 @@ struct LyricPlaybackText: View {
     var color: Color = .primary
     var verbatim = true
 
+    @EnvironmentObject private var player: PlayerService
+
     var body: some View {
         if isActive, verbatim, let words = line.words, !words.isEmpty {
-            DisplayLinkedLyricText(line: line, words: words, size: size, weight: weight, color: color)
+            DisplayLinkedLyricText(line: line, words: words, size: size, weight: weight,
+                                  color: color, clock: player.clock)
         } else {
             LyricText(line: line, size: size, weight: weight, color: color)
         }
@@ -86,7 +89,7 @@ private struct DisplayLinkedLyricText: View {
     @EnvironmentObject private var player: PlayerService
     // This small observer also updates the highlight after seeking while
     // paused, when the display link is intentionally asleep.
-    @ObservedObject private var clock = PlayerService.shared.clock
+    @ObservedObject var clock: PlaybackClock
     @State private var displayedAlphas: [Double]?
     @State private var refreshTask: Task<Void, Never>?
     @State private var refreshGeneration = 0
