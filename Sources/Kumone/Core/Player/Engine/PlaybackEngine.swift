@@ -1278,6 +1278,16 @@ final class PlaybackEngine: @unchecked Sendable {
     /// not yet reset.
     var segmentIsPlaying: Bool { queue.sync { transition?.phase == .segmentPlaying } }
 
+    /// Read-only identity/EOF observation for the real-node pause regression;
+    /// tests cannot inject a completion or change the scheduled segment here.
+    func segmentPauseIdentityForTesting(from deck: Deck)
+        -> (pendingOutgoingDrain: Bool, generation: Int) {
+        queue.sync {
+            (deckStates[deck]!.pendingTransitionDrainGeneration != nil,
+             segmentState.generation)
+        }
+    }
+
     /// Snapshot of one deck's fader + effect parameters. Test hook: the only
     /// way to assert that a transition left the reused deck neutral.
     struct DeckEffectSnapshot: Sendable, Equatable {
@@ -5789,6 +5799,16 @@ final class PlaybackEngine: @unchecked Sendable {
     /// The outgoing deck of an active transition drained naturally.
     private func handleFromDeckDrainedLocked(_ tr: TransitionState) {
         let from = deckStates[tr.from]!
+        if tr.phase == .segmentPlaying, tr.segment != nil {
+            // The rendered segment already owns this handover. The source
+            // may naturally finish in its head window, including a completion
+            // delivered while transport was paused. Retire only that spent
+            // source; do not discard the still-live segment or report an
+            // ordinary EOF that makes the service advance a second time.
+            retireOutgoingForSegmentLocked(from)
+            setSegmentFaderLocked(1)
+            return
+        }
         switch tr.plan {
         case .gapless:
             let to = deckStates[tr.to]!

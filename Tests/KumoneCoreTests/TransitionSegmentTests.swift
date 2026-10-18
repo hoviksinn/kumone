@@ -587,6 +587,172 @@ struct TransitionSegmentTests {
 
     // MARK: - Rate and pad hygiene across the splice
 
+    /// Real-device probe of a narrow source-completion race. No EOF is injected:
+    /// the actual file schedule must complete while its segment head is paused.
+    /// Failure to hit that hardware-dependent interval is recorded as unverified;
+    /// once observed, all transport/output assertions below are mandatory.
+    @Test func anObservedOutgoingEOFDuringPausedSegmentHeadPreservesTheSegment() async throws {
+        let evidence = SegmentValidationEvidence("real-EOF-during-paused-segment-head")
+        guard await audioOutputAvailable.value else {
+            evidence.values(["conditionObserved": false, "reason": "no real audio output device"])
+            return
+        }
+        let outgoingDuration = 3.0
+        let outgoing = try SegmentFixtures.sine(hz: 440, seconds: outgoingDuration,
+                                               name: "seg-head-real-eof")
+        let planned = plan(overlap: 2, outPoint: outgoingDuration)
+        let segment = try TransitionSegmentRenderer.render(
+            TransitionSegmentRenderer.Request(planned: planned, outgoingURL: outgoing,
+                                              incomingURL: SegmentFixtures.incoming),
+            provider: silentVocals)
+        // The identical complete file is used for pre-render and playback. It
+        // is never shortened or replaced to manufacture a completion callback.
+        #expect(segment.buffer.frameLength > 0 && segment.duration > segment.handoffIn + segment.handoffOut)
+        #expect(abs(segment.spliceStart + segment.headSourceSpan - outgoingDuration) < 0.001)
+
+        final class Output: @unchecked Sendable {
+            private let lock = NSLock()
+            private var resumed = false
+            private var peak: Float = 0
+            private var buffers = 0
+            func beginResume() { lock.lock(); resumed = true; lock.unlock() }
+            func receive(_ value: Float) {
+                lock.lock(); defer { lock.unlock() }
+                guard resumed else { return }
+                peak = max(peak, value)
+                if value > 0.01 { buffers += 1 }
+            }
+            var snapshot: (peak: Float, buffers: Int) {
+                lock.lock(); defer { lock.unlock() }; return (peak, buffers)
+            }
+        }
+        struct Outcome {
+            var conditionObserved = false
+            var frozenPositionPreserved = false
+            var transitionPreserved = false
+            var segmentGenerationPreserved = false
+            var completed = false
+            var midpointWasSpliced = false
+            var completionCount = 0
+            var outgoingFinishedUnexpectedly = false
+            var resumedPeak: Float = 0
+            var resumedNonzeroBuffers = 0
+        }
+
+        let result = await withWatchdog("paused-segment-real-eof", timeout: 25) { () -> Outcome in
+            var outcome = Outcome()
+            let engine = PlaybackEngine()
+            let events = SegmentEventLog(engine, evidence: evidence)
+            let output = Output()
+            defer {
+                engine.setSegmentOutputMonitor(nil)
+                engine.stopAll()
+            }
+            guard (try? engine.loadFile(at: outgoing, on: .a)) != nil,
+                  (try? engine.loadFile(at: SegmentFixtures.incoming, on: .b)) != nil else {
+                evidence.values(["conditionObserved": false, "reason": "fixture file could not be loaded"])
+                return outcome
+            }
+            engine.outputVolume = 0
+            // Use the EXISTING legal latency-pin range to leave a measurable
+            // interval between the outgoing source EOF and the segment head's
+            // retirement of that source. This is not a transport delay/seek.
+            engine.setHeadLatencyPin(SeamLatencyCalibration.bounds.upperBound)
+            engine.setSegmentOutputMonitor { output.receive($0) }
+            engine.play(deck: .a, from: 1.5)
+            engine.scheduleTransition(planned, from: .a, to: .b)
+            Thread.sleep(forTimeInterval: 0.15)
+            engine.armTransitionSegment(segment)
+            evidence.values(["headLatencyPinMilliseconds": SeamLatencyCalibration.bounds.upperBound,
+                "outgoingFileDurationSeconds": outgoingDuration,
+                "segmentDurationSeconds": segment.duration,
+                "scope": "Real dataPlayedBack callback plus segment PCM monitor before muted master; no strict PCM-boundary or DAC claim"])
+            evidence.checkpoint("after-offer", engine: engine)
+
+            var reachedSourceEOFInsideHead = false
+            let deadline = Date().addingTimeInterval(5)
+            while Date() < deadline {
+                let source = engine.transportSnapshotForTesting(.a)
+                if let raw = source.rawPlayerFrames,
+                   source.startOffset + Double(raw) / DeckChain.format.sampleRate >= outgoingDuration,
+                   source.position < outgoingDuration, source.nodePlaying, engine.segmentIsPlaying {
+                    reachedSourceEOFInsideHead = true
+                    break
+                }
+                if !engine.hasPendingTransition { break }
+                Thread.sleep(forTimeInterval: 0.001)
+            }
+            guard reachedSourceEOFInsideHead else {
+                evidence.values(["conditionObserved": false,
+                    "reason": "real source EOF and active segment head did not overlap before completion"])
+                evidence.checkpoint("probe-window-not-observed", engine: engine)
+                return outcome
+            }
+            let identity = engine.segmentPauseIdentityForTesting(from: .a)
+            engine.pause()
+            let frozenPosition = engine.position(of: .a)
+            let drainDeadline = Date().addingTimeInterval(2)
+            while Date() < drainDeadline,
+                  !engine.segmentPauseIdentityForTesting(from: .a).pendingOutgoingDrain {
+                Thread.sleep(forTimeInterval: 0.001)
+            }
+            outcome.conditionObserved = engine.segmentPauseIdentityForTesting(from: .a).pendingOutgoingDrain
+            evidence.values(["conditionObserved": outcome.conditionObserved])
+            evidence.checkpoint("paused-awaiting-real-completion", engine: engine)
+            guard outcome.conditionObserved else {
+                evidence.values(["reason": "real completion did not enter the pending paused-drain path"])
+                return outcome
+            }
+            Thread.sleep(forTimeInterval: 0.2)
+            outcome.frozenPositionPreserved = engine.position(of: .a) == frozenPosition
+            output.beginResume()
+            engine.resume()
+            let resumed = engine.segmentPauseIdentityForTesting(from: .a)
+            outcome.transitionPreserved = engine.hasPendingTransition && engine.hasArmedSegment && engine.segmentIsPlaying
+            outcome.segmentGenerationPreserved = resumed.generation == identity.generation
+            evidence.checkpoint("after-resume", engine: engine)
+            outcome.completed = events.wait(timeout: 8) {
+                if case .transitionCompleted(from: .a, to: .b) = $0 { return true }; return false
+            }
+            let received = events.snapshot
+            outcome.midpointWasSpliced = received.contains {
+                if case let .transitionMidpoint(from: .a, to: .b, via) = $0 {
+                    return via.path == .splicedSegment
+                }; return false
+            }
+            outcome.completionCount = received.filter {
+                if case .transitionCompleted(from: .a, to: .b) = $0 { return true }; return false
+            }.count
+            outcome.outgoingFinishedUnexpectedly = received.contains {
+                if case .deckFinished(.a) = $0 { return true }; return false
+            }
+            outcome.resumedPeak = output.snapshot.peak
+            outcome.resumedNonzeroBuffers = output.snapshot.buffers
+            evidence.values(["frozenPositionPreserved": outcome.frozenPositionPreserved,
+                "transitionPreserved": outcome.transitionPreserved,
+                "segmentGenerationPreserved": outcome.segmentGenerationPreserved,
+                "completed": outcome.completed, "midpointWasSpliced": outcome.midpointWasSpliced,
+                "completionCount": outcome.completionCount,
+                "unexpectedOutgoingFinished": outcome.outgoingFinishedUnexpectedly,
+                "resumedSegmentPeak": outcome.resumedPeak,
+                "resumedSegmentNonzeroBuffers": outcome.resumedNonzeroBuffers])
+            return outcome
+        }
+        let outcome = try #require(result, "real EOF probe must finish its watchdog")
+        guard outcome.conditionObserved else {
+            print("TRANSITION_SEGMENT_REAL_EOF_NOT_VERIFIED: hardware did not expose the source-completion/head-pause interval; see JSON")
+            return
+        }
+        #expect(outcome.frozenPositionPreserved)
+        #expect(outcome.transitionPreserved)
+        #expect(outcome.segmentGenerationPreserved, "resume the original segment buffer without a new schedule")
+        #expect(outcome.completed && outcome.completionCount == 1)
+        #expect(outcome.midpointWasSpliced)
+        #expect(!outcome.outgoingFinishedUnexpectedly)
+        #expect(outcome.resumedPeak > 0.01 && outcome.resumedNonzeroBuffers >= 2,
+                "the preserved segment must produce actual nonzero PCM after resume")
+    }
+
     /// **The splice has to leave both decks as clean as the live overlap does.**
     ///
     /// Every rate/pad test in the suite drives the *live* hand-over. The
@@ -1063,6 +1229,10 @@ private final class SegmentEventLog: @unchecked Sendable {
     }
 
     deinit { task?.cancel() }
+
+    var snapshot: [PlaybackEngineEvent] {
+        lock.lock(); defer { lock.unlock() }; return events
+    }
 
     private func append(_ event: PlaybackEngineEvent) {
         lock.lock()
