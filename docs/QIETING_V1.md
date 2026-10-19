@@ -77,7 +77,7 @@ CI #18 的实际原生视图记录进一步确认：旧 NavigationSplitView 在�
 
 ## 验证入口与本机清单
 
-完整 macos-26 CI 保留 Build、全部 Test（含 MLX GPU）、App 打包、严格 ad-hoc 签名、实际 arm64/minos=26.0 检查、ZIP 与 Artifacts。实际运行结论、测试数量和下载链接记录在 Draft PR；Linux 仅静态检查，不编译 SwiftUI。
+完整 macos-26 CI 保留 Build、全部 Test（含 MLX GPU）、App 打包、严格 ad-hoc 签名、实际 arm64/minos=26.0 检查、ZIP 与 Artifacts。窗口宿主测试先在单独进程执行，后续执行其余全部套件，避免同步 GPU 工作耗尽 UI 主线程的观察期限。两阶段都检查最终测试汇总，不能只因进程退出码为零就宣称测试完成；日志和机器可读汇总随诊断上传。实际运行结论、测试数量和下载链接记录在 Draft PR；Linux 仅静态检查，不编译 SwiftUI。
 
 下载同一成功运行的外层 ZIP，解压后再解压 App ZIP。附带 app-verification.json 和 transport-validation.json。
 

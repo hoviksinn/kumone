@@ -42,16 +42,21 @@ jobs:
             cp "$BIN_PATH/mlx.metallib" "$test_bin/mlx.metallib"
           done < <(find "$BIN_PATH" -type d -path '*.xctest/Contents/MacOS' -print0)
 
-      # Catch hosted AppKit/navigation failures before the longer audio/MLX run.
-      # The complete suite below still runs unchanged after this focused check.
+      # Run every hosted window case in its own process. Synchronous GPU/audio
+      # work in other suites must not consume its native UI observation deadline.
+      # The following step runs all remaining suites; no coverage is omitted.
       - name: Hosted window navigation regression
+        shell: bash
         run: |
-          swift test --skip-build --triple arm64-apple-macosx26.0 --filter WindowNavigationChromeTests
+          swift test --skip-build --triple arm64-apple-macosx26.0 --filter WindowNavigationChromeTests 2>&1 | tee .build/window-regression.log
+          python3 Scripts/verify-test-log.py .build/window-regression.log --minimum-tests 10 --report .build/window-test-summary.json
           test -s .build/window-navigation-validation.json
 
       - name: Test
+        shell: bash
         run: |
-          swift test --skip-build --triple arm64-apple-macosx26.0
+          swift test --skip-build --triple arm64-apple-macosx26.0 --skip WindowNavigationChromeTests 2>&1 | tee .build/test.log
+          python3 Scripts/verify-test-log.py .build/test.log --minimum-tests 972 --report .build/test-summary.json
           test -s .build/transport-validation.json
           test -s .build/media-clock-diagnostic.json
           test -s .build/service-clock-validation.json
@@ -88,6 +93,8 @@ jobs:
           path: |
             .build/QieTing-Test-macOS26-arm64.zip
             .build/app-verification.json
+            .build/window-test-summary.json
+            .build/test-summary.json
             .build/transport-validation.json
             .build/media-clock-diagnostic.json
             .build/service-clock-validation.json
@@ -105,6 +112,10 @@ jobs:
           name: QieTing-Validation-Evidence-${{ github.run_number }}-${{ github.run_attempt }}
           path: |
             .build/app-verification.json
+            .build/window-test-summary.json
+            .build/test-summary.json
+            .build/window-regression.log
+            .build/test.log
             .build/transport-validation.json
             .build/media-clock-diagnostic.json
             .build/service-clock-validation.json
