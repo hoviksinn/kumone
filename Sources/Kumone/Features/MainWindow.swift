@@ -333,9 +333,13 @@ struct MainWindow: View {
                 if let testing { testing.leaf(nil) }
                 else { rootView }
             }
+            .toolbar(.hidden, for: .windowToolbar)
             .navigationDestination(for: Destination.self) { destination in
-                if let testing { testing.leaf(destination) }
-                else { DestinationContent(destination: destination) }
+                Group {
+                    if let testing { testing.leaf(destination) }
+                    else { DestinationContent(destination: destination) }
+                }
+                .toolbar(.hidden, for: .windowToolbar)
             }
         }
         // This stack owns pages, while the window shell owns navigation
