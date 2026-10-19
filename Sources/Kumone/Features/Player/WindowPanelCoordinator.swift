@@ -33,7 +33,7 @@ final class WindowPanelCoordinator: ObservableObject {
     var addedWidth: CGFloat { panelWidth + PlayerLayoutMetrics.dividerWidth }
     var hasPanel: Bool { mode != .closed }
     var minimumContentWidth: CGFloat {
-        guard hasPanel else { return PlayerLayoutMetrics.minimumWindowWidth }
+        guard hasPanel, !isClosing else { return PlayerLayoutMetrics.minimumWindowWidth }
         let minimumNavigationWidth = sidebarWidthAtOpen + PlayerLayoutMetrics.minimumMainWidth
         if mode == .expandedOutside {
             // Outside layout preserves a complete closed-window base while
@@ -66,8 +66,7 @@ final class WindowPanelCoordinator: ObservableObject {
         restorationAfterFullScreen = nil
         sidebarWidthAtOpen = 0
         window.collectionBehavior.insert(.fullScreenPrimary)
-        window.contentMinSize = NSSize(width: PlayerLayoutMetrics.minimumWindowWidth,
-                                       height: PlayerLayoutMetrics.minimumWindowHeight)
+        applyMinimum()
         lastStableFrame = window.frame
         let center = NotificationCenter.default
         for name in [NSWindow.didMoveNotification, NSWindow.didResizeNotification,
@@ -156,8 +155,7 @@ final class WindowPanelCoordinator: ObservableObject {
             mode = .expandedOutside
             // Lower the constraint before shrinking; never change it merely
             // because the ordinary/immersive page changes.
-            window.contentMinSize = NSSize(width: PlayerLayoutMetrics.minimumWindowWidth,
-                                           height: PlayerLayoutMetrics.minimumWindowHeight)
+            applyMinimum()
             animateWindow(to: WindowPanelGeometry.restoredFrame(originalFrame, visibleFrame: visible),
                           generation: requestGeneration, closes: true)
         } else {
@@ -217,8 +215,19 @@ final class WindowPanelCoordinator: ObservableObject {
     }
 
     private func applyMinimum() {
-        window?.contentMinSize = NSSize(width: minimumContentWidth,
-                                       height: PlayerLayoutMetrics.minimumWindowHeight)
+        guard let window else { return }
+        // Full-size content views include native titlebar/toolbar space in
+        // contentMinSize. Reserve 640pt for usable content, not for chrome.
+        let nativeContentHeight = window.contentRect(forFrameRect: window.frame).height
+        let chromeHeight = max(0, nativeContentHeight - window.contentLayoutRect.height)
+        let size = NSSize(width: minimumContentWidth,
+                          height: PlayerLayoutMetrics.minimumWindowHeight + chromeHeight)
+        if window.contentMinSize != size { window.contentMinSize = size }
+    }
+
+    func refreshMinimum() {
+        guard !nativeFullScreenTransition else { return }
+        applyMinimum()
     }
 
     private func windowChanged(_ name: Notification.Name) {

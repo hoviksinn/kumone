@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import Darwin
 import SwiftUI
 import Testing
 @testable import KumoneCore
@@ -8,6 +9,23 @@ import Testing
 private final class NavigationFixtureState: ObservableObject {
     @Published var path: [Destination] = []
     @Published var columnVisibility: NavigationSplitViewVisibility = .detailOnly
+}
+
+/// A hosted test process is not the application executable. Unexpected AppKit
+/// termination must be an observable test failure, not an early successful exit.
+@MainActor
+private final class HostedNavigationApplicationDelegate: NSObject, NSApplicationDelegate {
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        let stack = Thread.callStackSymbols
+        try? NavigationValidationEvidence.record([
+            "scenario": "unexpected-application-termination",
+            "currentEventType": sender.currentEvent.map { Int($0.type.rawValue) } ?? -1,
+            "stack": stack,
+        ])
+        Issue.record("Hosted window test unexpectedly requested NSApplication termination: \(stack.joined(separator: "\n"))")
+        return .terminateCancel
+    }
 }
 
 private struct NavigationFixtureLeaf: NSViewRepresentable {
@@ -76,6 +94,7 @@ struct WindowNavigationChromeTests {
     @MainActor
     private final class Fixture {
         private static var applicationPrepared = false
+        private static let applicationDelegate = HostedNavigationApplicationDelegate()
         let state: NavigationFixtureState
         let panels = WindowPanelCoordinator()
         let player: PlayerService
@@ -87,6 +106,13 @@ struct WindowNavigationChromeTests {
             state = fixtureState
             if !Self.applicationPrepared {
                 try NavigationValidationEvidence.record(["scenario": "application-bootstrap", "phase": "before-finishLaunching"])
+                NSApplication.shared.delegate = Self.applicationDelegate
+                // Keep a stack even for a direct exit that bypasses AppKit's
+                // delegate. This is test-process diagnostics, never App code.
+                atexit {
+                    fputs("HOSTED_TEST_PROCESS_EXIT\n", stderr)
+                    for line in Thread.callStackSymbols { fputs(line + "\n", stderr) }
+                }
                 // SwiftPM supplies no NSApplication event loop. Finish the
                 // native launch once before dispatching real AppKit events.
                 NSApplication.shared.finishLaunching()
@@ -164,6 +190,10 @@ struct WindowNavigationChromeTests {
             "windowKey": fixture.window.isKeyWindow,
             "applicationActive": NSApp.isActive,
             "applicationRunning": NSApp.isRunning,
+            "applicationDelegateClass": NSApp.delegate.map { String(describing: type(of: $0)) } ?? "none",
+            "nativeToolbarStyle": Int(fixture.window.toolbarStyle.rawValue),
+            "nativeToolbarVisible": fixture.window.toolbar?.isVisible ?? false,
+            "nativeContentRect": rectValues(fixture.window.contentRect(forFrameRect: fixture.window.frame)),
             "hasAttachedSheet": fixture.window.attachedSheet != nil,
             "hasModalWindow": NSApp.modalWindow != nil,
             "firstResponderClass": fixture.window.firstResponder.map { String(describing: type(of: $0)) } ?? "none",
@@ -506,7 +536,11 @@ struct WindowNavigationChromeTests {
         let button = try #require(markers("QieTing.PlayerBar.PlayPause", in: fixture.host).first)
         #expect(button.bounds.width >= 30 && button.bounds.height >= 30)
         #expect(button.bounds.width <= 40 && button.bounds.height <= 40)
-        #expect(fixture.window.contentMinSize == NSSize(width: 1021, height: 640))
+        #expect(fixture.window.contentMinSize.width == 1021)
+        let nativeChrome = fixture.window.contentRect(forFrameRect: fixture.window.frame).height
+            - fixture.window.contentLayoutRect.height
+        #expect(fixture.window.contentMinSize.height - nativeChrome == 640,
+                "The shared minimum reserves 640pt of usable content independently of native chrome")
     }
 
     @Test func sidebarCollapseAndExpansionPreserveNavigationAndChromeInstances() async throws {

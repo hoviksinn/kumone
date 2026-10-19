@@ -338,6 +338,9 @@ struct MainWindow: View {
                 else { DestinationContent(destination: destination) }
             }
         }
+        // This stack owns pages, while the window shell owns navigation
+        // controls. Suppress the stack's implicit native back toolbar too.
+        .toolbar(.hidden, for: .windowToolbar)
         .onChange(of: selection) { _, _ in path = [] }
     }
 
@@ -466,6 +469,10 @@ struct MainWindowConfigurator: NSViewRepresentable {
                 window.isReleasedWhenClosed = false
                 forwardee = window.delegate
                 window.delegate = self
+                // Automatic style changes from page navigation otherwise
+                // switch between compact and expanded titlebar heights and
+                // resize the same content-minimum window by 20 points.
+                window.toolbarStyle = .unifiedCompact
                 panels.attach(to: window)
                 if registersApplicationWindow { AppDelegate.shared?.mainWindow = window }
             }
@@ -480,6 +487,7 @@ struct MainWindowConfigurator: NSViewRepresentable {
         }
         func windowDidUpdate(_ notification: Notification) {
             forwardee?.windowDidUpdate?(notification)
+            panels.refreshMinimum()
             if let window { ambientAppearance.updateLayout(in: window) }
         }
         func windowDidResize(_ notification: Notification) {
