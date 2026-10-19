@@ -77,7 +77,9 @@ CI #18 的实际原生视图记录进一步确认：旧 NavigationSplitView 在�
 
 ## 验证入口与本机清单
 
-完整 macos-26 CI 保留 Build、全部 Test（含 MLX GPU）、App 打包、严格 ad-hoc 签名、实际 arm64/minos=26.0 检查、ZIP 与 Artifacts。窗口宿主测试先在单独进程执行，后续执行其余全部套件，避免同步 GPU 工作耗尽 UI 主线程的观察期限。两阶段都检查最终测试汇总，不能只因进程退出码为零就宣称测试完成；日志和机器可读汇总随诊断上传。实际运行结论、测试数量和下载链接记录在 Draft PR；Linux 仅静态检查，不编译 SwiftUI。
+完整 macos-26 CI 保留 Build、全部 Test（含 MLX GPU）、App 打包、严格 ad-hoc 签名、实际 arm64/minos=26.0 检查、ZIP 与 Artifacts。10 个原生窗口用例使用 XCTest 宿主单独执行，全部其余 Swift Testing 套件随后执行，避免同步 GPU 工作耗尽 UI 主线程的观察期限。没有省略用例；窗口迁移保留原 91 个 expectation、22 个 requirement 的表达式及阈值，另增加原生工具栏保持隐藏的断言。两阶段都检查最终测试汇总，不能只因进程退出码为零就宣称测试完成；日志和机器可读汇总随诊断上传。实际运行结论、测试数量和下载链接记录在 Draft PR；Linux 仅静态检查，不编译 SwiftUI。
+
+宿主调整依据：CI #20 的真实退出栈为 `swift_task_asyncMainDrainQueue → exit`，未触发测试 App 的终止回调，也未输出最终 Swift Testing 汇总；与 Swift 6.3.3 的 [async-main/CFRunLoop 同症问题](https://github.com/swiftlang/swift/issues/91716)相符，不能把零退出码视为通过。迁移仅改变这些原生事件用例的测试宿主，不改变 App 的音频或事件实现。独立于这个宿主问题，原生记录确认详情页会把 Toolbar 从隐藏变为显示，因此在根页面与每个导航目的地的公共包装层明确隐藏工具栏，固定紧凑样式，并用原生 chrome 实际高度换算 640pt 可用内容下限；frame 恢复仍做精确等值检查。
 
 下载同一成功运行的外层 ZIP，解压后再解压 App ZIP。附带 app-verification.json 和 transport-validation.json。
 

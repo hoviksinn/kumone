@@ -48,14 +48,14 @@ jobs:
       - name: Hosted window navigation regression
         shell: bash
         run: |
-          swift test --skip-build --triple arm64-apple-macosx26.0 --filter WindowNavigationChromeTests 2>&1 | tee .build/window-regression.log
-          python3 Scripts/verify-test-log.py .build/window-regression.log --minimum-tests 10 --report .build/window-test-summary.json
+          swift test --skip-build --triple arm64-apple-macosx26.0 --disable-swift-testing --filter WindowNavigationChromeTests 2>&1 | tee .build/window-regression.log
+          python3 Scripts/verify-test-log.py .build/window-regression.log --framework xctest --minimum-tests 10 --report .build/window-test-summary.json
           test -s .build/window-navigation-validation.json
 
       - name: Test
         shell: bash
         run: |
-          swift test --skip-build --triple arm64-apple-macosx26.0 --skip WindowNavigationChromeTests 2>&1 | tee .build/test.log
+          swift test --skip-build --triple arm64-apple-macosx26.0 --disable-xctest 2>&1 | tee .build/test.log
           python3 Scripts/verify-test-log.py .build/test.log --minimum-tests 972 --report .build/test-summary.json
           test -s .build/transport-validation.json
           test -s .build/media-clock-diagnostic.json
