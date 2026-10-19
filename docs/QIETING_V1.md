@@ -81,6 +81,8 @@ CI #18 的实际原生视图记录进一步确认：旧 NavigationSplitView 在�
 
 宿主调整依据：CI #20 的真实退出栈为 `swift_task_asyncMainDrainQueue → exit`，未触发测试 App 的终止回调，也未输出最终 Swift Testing 汇总；与 Swift 6.3.3 的 [async-main/CFRunLoop 同症问题](https://github.com/swiftlang/swift/issues/91716)相符，不能把零退出码视为通过。迁移仅改变这些原生事件用例的测试宿主，不改变 App 的音频或事件实现；CI #21 已完整执行 10 个 XCTest 用例并输出最终汇总，原先早退不再复现，但窗口布局仍有失败，不能算回归通过。
 
+CI #23 的原生记录确认，移除生产场景与测试根的重复静态 frame 后，内部展开的计算 minimum、宿主 fitting size 与 NSWindow.contentMinSize 都为 1161pt，窗口 frame 保持不变。CI #24 的首窗逐次记录又排除了首次同步布局过慢（约 0.205s）：第一轮仍未挂载协调器，20ms 异步等待没有在四秒内获得第二轮执行。测试现在以真实主队列屏障等待 MainWindowConfigurator 已排入的异步挂载，并在准备阶段断言实际附件；交互观察仍保留四秒及 250ms 几何稳定要求，不使用额外 sleep 或重试。后续 CI 结果以 PR 为准。
+
 独立于宿主问题，原生记录确认详情页会把 Toolbar 从隐藏变为显示。根据 Apple 的 [windowToolbar 说明](https://developer.apple.com/documentation/swiftui/toolbarplacement/windowtoolbar)，整体隐藏也会隐藏原生窗口控制，因此保留紧凑原生标题区域，在根页面及目的地的公共包装层移除重复系统返回和标题项，搜索及返回仍由稳定中列持有，保留 ⌘[。原生工具栏是否存在不能单独证明红黄绿可用，测试直接检查三个标准按钮。使用原生 chrome 实际高度换算 640pt 可用内容下限；frame 恢复仍做精确等值检查。
 
 下载同一成功运行的外层 ZIP，解压后再解压 App ZIP。附带 app-verification.json 和 transport-validation.json。

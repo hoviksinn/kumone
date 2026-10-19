@@ -121,7 +121,7 @@ extension WindowNavigationChromeTests {
         let player: PlayerService
         let window: NSWindow
         let host: NSHostingView<NavigationFixtureRoot>
-        init(columnVisibility: NavigationSplitViewVisibility = .detailOnly) throws {
+        init(columnVisibility: NavigationSplitViewVisibility = .detailOnly) async throws {
             let fixtureState = NavigationFixtureState()
             fixtureState.columnVisibility = columnVisibility
             state = fixtureState
@@ -168,6 +168,23 @@ extension WindowNavigationChromeTests {
                 "hostBounds": NSStringFromRect(host.bounds),
                 "coordinatorAttached": panels.window === window,
             ])
+            // MainWindowConfigurator deliberately attaches on the next main
+            // dispatch turn, outside SwiftUI's synchronous graph transaction.
+            // Complete that real bootstrap before starting interaction clocks.
+            // FIFO ordering is a readiness barrier, not a guessed time delay.
+            let queuedAt = ProcessInfo.processInfo.systemUptime
+            let dispatchedAt = await withCheckedContinuation { (continuation: CheckedContinuation<TimeInterval, Never>) in
+                DispatchQueue.main.async {
+                    continuation.resume(returning: ProcessInfo.processInfo.systemUptime)
+                }
+            }
+            try NavigationValidationEvidence.record([
+                "scenario": "fixture-native-attachment-barrier",
+                "mainQueueSeconds": dispatchedAt - queuedAt,
+                "continuationSeconds": ProcessInfo.processInfo.systemUptime - dispatchedAt,
+                "coordinatorAttached": panels.window === window,
+            ])
+            try require(panels.window === window, "The real configurator must attach before the fixture is ready")
         }
         func dispose() {
             player.pause()
@@ -439,7 +456,7 @@ extension WindowNavigationChromeTests {
     }
 
     func testAlbumArtistAndOrdinaryDestinationsKeepTheSameLivePlayer() async throws {
-        let fixture = try Fixture()
+        let fixture = try await Fixture()
         defer { fixture.dispose() }
         let serviceID = ObjectIdentifier(fixture.player)
         let clockID = ObjectIdentifier(fixture.player.clock)
@@ -469,7 +486,7 @@ extension WindowNavigationChromeTests {
     }
 
     func testLyricsQueueAndImmersiveKeepWindowAndPlayerIdentity() async throws {
-        let fixture = try Fixture()
+        let fixture = try await Fixture()
         defer { fixture.dispose() }
         let bar = try await check(fixture, destination: nil, scenario: "before-panel")
         let original = fixture.window.frame
@@ -543,7 +560,7 @@ extension WindowNavigationChromeTests {
     }
 
     func testRealLyricsButtonRemainsClickableAfterNavigation() async throws {
-        let fixture = try Fixture()
+        let fixture = try await Fixture()
         defer { fixture.dispose() }
         fixture.panels.visibleFrameForTesting = CGRect(x: -1000, y: -1000, width: 4000, height: 3000)
         let bar = try await check(fixture, destination: nil, scenario: "before-real-click")
@@ -583,7 +600,7 @@ extension WindowNavigationChromeTests {
         _ = try await check(fixture, destination: .album(7), originalBar: bar, scenario: "after-real-click")
     }
     func testRapidPanelCommandsAndUserResizeDoNotAccumulateWindowWidth() async throws {
-        let fixture = try Fixture()
+        let fixture = try await Fixture()
         defer { fixture.dispose() }
         _ = try await check(fixture, destination: nil, scenario: "rapid-before")
         fixture.panels.visibleFrameForTesting = CGRect(x: -1000, y: -1000, width: 4000, height: 3000)
@@ -615,7 +632,7 @@ extension WindowNavigationChromeTests {
     }
 
     func testVisibleSidebarAtTheSharedMinimumKeepsTheSingleRowWithinTheWindow() async throws {
-        let fixture = try Fixture(columnVisibility: .all)
+        let fixture = try await Fixture(columnVisibility: .all)
         defer { fixture.dispose() }
         let bar = try await check(fixture, destination: nil, scenario: "sidebar-visible-minimum")
         fixture.state.path = [.album(7)]
@@ -631,7 +648,7 @@ extension WindowNavigationChromeTests {
     }
 
     func testSidebarCollapseAndExpansionPreserveNavigationAndChromeInstances() async throws {
-        let fixture = try Fixture(columnVisibility: .all)
+        let fixture = try await Fixture(columnVisibility: .all)
         defer { fixture.dispose() }
         let bar = try await check(fixture, destination: nil, scenario: "sidebar-toggle-before-navigation")
         let main = try require(markers("QieTing.MainColumn", in: fixture.host).first)
@@ -685,7 +702,7 @@ extension WindowNavigationChromeTests {
     }
 
     func testCollapsedWideWindowUsesAnInsidePaneWithoutGrowingItsFrameOrMinimum() async throws {
-        let fixture = try Fixture()
+        let fixture = try await Fixture()
         defer { fixture.dispose() }
         let bar = try await check(fixture, destination: nil, scenario: "inside-collapsed-before-resize")
         fixture.panels.visibleFrameForTesting = CGRect(x: -1000, y: -1000, width: 4000, height: 3000)
@@ -714,7 +731,7 @@ extension WindowNavigationChromeTests {
     }
 
     func testHostedTeardownCancelsAnAnimatingSessionWithoutPublishingBackIntoTheGraph() async throws {
-        var fixture: Fixture? = try Fixture()
+        var fixture: Fixture? = try await Fixture()
         defer { fixture?.dispose() }
         _ = try await check(try require(fixture), destination: nil, scenario: "teardown-before-animation")
         let panels = try require(fixture?.panels)
@@ -755,7 +772,7 @@ extension WindowNavigationChromeTests {
     }
 
     func testFullScreenNotificationsSuspendFrameOwnershipAndRestoreTheOutsideSession() async throws {
-        let fixture = try Fixture()
+        let fixture = try await Fixture()
         defer { fixture.dispose() }
         _ = try await check(fixture, destination: nil, scenario: "fullscreen-notifications-before")
         fixture.panels.visibleFrameForTesting = CGRect(x: -1000, y: -1000, width: 4000, height: 3000)
@@ -799,7 +816,7 @@ extension WindowNavigationChromeTests {
     }
 
     func testNativeFullScreenTakingOverAnInFlightCloseDoesNotLeaveAnOrphanPanel() async throws {
-        let fixture = try Fixture()
+        let fixture = try await Fixture()
         defer { fixture.dispose() }
         _ = try await check(fixture, destination: nil, scenario: "fullscreen-close-interruption-before")
         fixture.panels.visibleFrameForTesting = CGRect(x: -1000, y: -1000, width: 4000, height: 3000)
