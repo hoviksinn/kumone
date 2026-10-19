@@ -217,6 +217,8 @@ extension WindowNavigationChromeTests {
             "applicationDelegateClass": NSApp.delegate.map { String(describing: type(of: $0)) } ?? "none",
             "nativeToolbarStyle": Int(fixture.window.toolbarStyle.rawValue),
             "nativeToolbarVisible": fixture.window.toolbar?.isVisible ?? false,
+            "nativeToolbarPresent": fixture.window.toolbar != nil,
+            "nativeToolbarItems": fixture.window.toolbar?.items.map { $0.itemIdentifier.rawValue } ?? [],
             "nativeContentRect": rectValues(fixture.window.contentRect(forFrameRect: fixture.window.frame)),
             "hasAttachedSheet": fixture.window.attachedSheet != nil,
             "hasModalWindow": NSApp.modalWindow != nil,
@@ -232,6 +234,17 @@ extension WindowNavigationChromeTests {
                     "bounds": rectValues(view.bounds), "frameInWindow": rectValues(view.convert(view.bounds, to: nil)),
                     "visibleRect": rectValues(view.visibleRect), "hidden": view.isHiddenOrHasHiddenAncestor,
                     "attached": view.window === fixture.window]
+        }
+        values["nativeWindowControls"] = [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton].map { kind -> [String: Any] in
+            guard let control = fixture.window.standardWindowButton(kind) else {
+                return ["kind": Int(kind.rawValue), "present": false]
+            }
+            let point = control.convert(NSPoint(x: control.bounds.midX, y: control.bounds.midY), to: control.superview)
+            return ["kind": Int(kind.rawValue), "present": true,
+                    "bounds": rectValues(control.bounds), "frame": rectValues(control.frame),
+                    "hidden": control.isHiddenOrHasHiddenAncestor, "alpha": Double(control.alphaValue),
+                    "attached": control.window === fixture.window,
+                    "hitClass": control.hitTest(point).map { String(describing: type(of: $0)) } ?? "none"]
         }
         if includeTree {
             values["nativeTree"] = views.map { view in
@@ -366,8 +379,18 @@ extension WindowNavigationChromeTests {
         let leaves = markers(expected, in: fixture.host)
         expect(!leaves.contains { leaf in hit === leaf || (hit?.isDescendant(of: leaf) ?? false) })
         expect(fixture.player.currentTrack?.id == 606060)
-        expect(fixture.window.toolbar?.isVisible != true,
-               "Ordinary pages use the stable middle header, not an implicit native toolbar")
+        // Keeping native titlebar controls is part of the product contract;
+        // NSToolbar item visibility alone does not prove those controls exist.
+        for kind in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
+            let control = try require(fixture.window.standardWindowButton(kind))
+            expect(control.window === fixture.window)
+            expect(!control.isHiddenOrHasHiddenAncestor)
+            expect(control.alphaValue > 0.99)
+            expect(control.bounds.width > 0 && control.bounds.height > 0)
+            let point = control.convert(NSPoint(x: control.bounds.midX, y: control.bounds.midY), to: control.superview)
+            let hit = control.hitTest(point)
+            expect(hit === control || (hit?.isDescendant(of: control) ?? false))
+        }
         var values = snapshot(fixture, scenario: scenario)
         values.merge([
             "scenario": scenario, "destination": expected, "barIdentity": String(describing: identity),
@@ -387,6 +410,7 @@ extension WindowNavigationChromeTests {
         let clockID = ObjectIdentifier(fixture.player.clock)
         expect(fixture.player.isPlaying)
         let bar = try await check(fixture, destination: nil, scenario: "home-playing")
+        let originalWindowFrame = fixture.window.frame
         let playingPaths: [[Destination]] = [
             [.album(7)], [], [.artist(42)], [.artist(42), .album(7)], [.artist(42)], [],
             [.playlist(9)], [], [.search("fixture")], [], [.collections], [], [.recents], [], [.daily], [], [.cloud], [],
@@ -395,6 +419,7 @@ extension WindowNavigationChromeTests {
             fixture.state.path = path
             _ = try await check(fixture, destination: path.last, originalBar: bar, scenario: "push-pop-playing")
             expect(fixture.player.isPlaying)
+            expect(fixture.window.frame == originalWindowFrame)
         }
         fixture.player.pause()
         let pausedPaths: [[Destination]] = [[.artist(42)], [.artist(42), .album(7)], []]
@@ -402,6 +427,7 @@ extension WindowNavigationChromeTests {
             fixture.state.path = path
             _ = try await check(fixture, destination: path.last, originalBar: bar, scenario: "push-pop-paused")
             expect(!fixture.player.isPlaying)
+            expect(fixture.window.frame == originalWindowFrame)
         }
         expect(ObjectIdentifier(fixture.player) == serviceID)
         expect(ObjectIdentifier(fixture.player.clock) == clockID)

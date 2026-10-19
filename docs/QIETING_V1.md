@@ -37,7 +37,7 @@ CI #18 的实际原生视图记录进一步确认：旧 NavigationSplitView 在�
 
 打开时以内容宽高比选择模式：小于 16:9 优先外扩并保留原导航/主内容宽度，屏幕右侧不足时左移；否则内部展开。会话保留模式、原窗口 frame，切歌词/队列不再次扩窗。屏幕空间不足以容纳完整控件时，提示放大窗口或手动折叠导航，不自动隐藏控件。全屏使用内部布局，由系统控制窗口 frame。
 
-播放栏固定单排，高 56pt，宽 780–880pt，在中间主内容范围居中，底距 16pt。普通与沉浸页共用最小内容尺寸 1021×640pt；面板会话另计其必要宽度。音质、音量、输出、桌面歌词、AutoMix 和媒体键保留。小于应用最低宽度的屏幕不能保证完整并排布局，此限制会提示用户。外扩恢复、多屏、动画及真实数据页面仍需本机验收。
+播放栏固定单排，高 56pt，宽 780–880pt，在中间主内容范围居中，底距 16pt。普通与沉浸页共用最小可用内容尺寸 1021×640pt；原生 chrome 的高度另外计算。根布局直接声明面板会话所需最小宽度，避免只写 NSWindow.contentMinSize 后又被 SwiftUI 的静态 minimum 覆盖。外扩动画期间先保留关闭状态 minimum，完成后再提交完整面板 minimum，AppKit 负责窗口插值；内部展开立即提交，但要求现有窗口已可容纳。音质、音量、输出、桌面歌词、AutoMix 和媒体键保留。小于应用最低宽度的屏幕不能保证完整并排布局，此限制会提示用户。外扩恢复、多屏、动画及真实数据页面仍需本机验收。
 
 新增真实 NSWindow / NSHostingView 导航回归使用生产 MainWindow、HSplitView、NavigationStack 和 PlayerBar，只把联网页面替换为离线标记，检查推入/返回后的唯一实例、可见性、命中与真实按钮事件。测试也检查侧栏切换期间的路径、中列、搜索框和播放栏身份，以及沉浸页切换时真实搜索输入框的焦点。`.build/window-navigation-validation.json` 保存实际观察。测试观察原生几何稳定后才记录恢复基准，不把标题栏异步布局当作用户调整窗口；它不替代真实音乐库页面和系统 Spaces/多屏操作。
 
@@ -77,9 +77,11 @@ CI #18 的实际原生视图记录进一步确认：旧 NavigationSplitView 在�
 
 ## 验证入口与本机清单
 
-完整 macos-26 CI 保留 Build、全部 Test（含 MLX GPU）、App 打包、严格 ad-hoc 签名、实际 arm64/minos=26.0 检查、ZIP 与 Artifacts。10 个原生窗口用例使用 XCTest 宿主单独执行，全部其余 Swift Testing 套件随后执行，避免同步 GPU 工作耗尽 UI 主线程的观察期限。没有省略用例；窗口迁移保留原 91 个 expectation、22 个 requirement 的表达式及阈值，另增加原生工具栏保持隐藏的断言。两阶段都检查最终测试汇总，不能只因进程退出码为零就宣称测试完成；日志和机器可读汇总随诊断上传。实际运行结论、测试数量和下载链接记录在 Draft PR；Linux 仅静态检查，不编译 SwiftUI。
+完整 macos-26 CI 保留 Build、全部 Test（含 MLX GPU）、App 打包、严格 ad-hoc 签名、实际 arm64/minos=26.0 检查、ZIP 与 Artifacts。10 个原生窗口用例使用 XCTest 宿主单独执行，全部其余 Swift Testing 套件随后执行，避免同步 GPU 工作耗尽 UI 主线程的观察期限。没有省略用例；窗口迁移保留原 91 个 expectation、22 个 requirement 的表达式及阈值，另增加普通导航不改变 frame、原生窗口按钮可见/挂接/命中的断言。两阶段都检查最终测试汇总，不能只因进程退出码为零就宣称测试完成；日志和机器可读汇总随诊断上传。实际运行结论、测试数量和下载链接记录在 Draft PR；Linux 仅静态检查，不编译 SwiftUI。
 
-宿主调整依据：CI #20 的真实退出栈为 `swift_task_asyncMainDrainQueue → exit`，未触发测试 App 的终止回调，也未输出最终 Swift Testing 汇总；与 Swift 6.3.3 的 [async-main/CFRunLoop 同症问题](https://github.com/swiftlang/swift/issues/91716)相符，不能把零退出码视为通过。迁移仅改变这些原生事件用例的测试宿主，不改变 App 的音频或事件实现。独立于这个宿主问题，原生记录确认详情页会把 Toolbar 从隐藏变为显示，因此在根页面与每个导航目的地的公共包装层明确隐藏工具栏，固定紧凑样式，并用原生 chrome 实际高度换算 640pt 可用内容下限；frame 恢复仍做精确等值检查。
+宿主调整依据：CI #20 的真实退出栈为 `swift_task_asyncMainDrainQueue → exit`，未触发测试 App 的终止回调，也未输出最终 Swift Testing 汇总；与 Swift 6.3.3 的 [async-main/CFRunLoop 同症问题](https://github.com/swiftlang/swift/issues/91716)相符，不能把零退出码视为通过。迁移仅改变这些原生事件用例的测试宿主，不改变 App 的音频或事件实现；CI #21 已完整执行 10 个 XCTest 用例并输出最终汇总，原先早退不再复现，但窗口布局仍有失败，不能算回归通过。
+
+独立于宿主问题，原生记录确认详情页会把 Toolbar 从隐藏变为显示。根据 Apple 的 [windowToolbar 说明](https://developer.apple.com/documentation/swiftui/toolbarplacement/windowtoolbar)，整体隐藏也会隐藏原生窗口控制，因此保留紧凑原生标题区域，在根页面及目的地的公共包装层移除重复系统返回和标题项，搜索及返回仍由稳定中列持有，保留 ⌘[。原生工具栏是否存在不能单独证明红黄绿可用，测试直接检查三个标准按钮。使用原生 chrome 实际高度换算 640pt 可用内容下限；frame 恢复仍做精确等值检查。
 
 下载同一成功运行的外层 ZIP，解压后再解压 App ZIP。附带 app-verification.json 和 transport-validation.json。
 

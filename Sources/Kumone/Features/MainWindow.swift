@@ -72,6 +72,10 @@ struct MainWindow: View {
             .animation(reduceMotion ? nil : .spring(response: 0.38, dampingFraction: 1), value: panels.insideReveal)
             .animation(reduceMotion ? nil : AppAnimation.smooth, value: player.showNowPlaying)
             .animation(reduceMotion ? nil : AppAnimation.quick, value: topChromeVisible)
+            // Constraints commit independently of the child content springs;
+            // only AppKit interpolates the outside window frame.
+            .frame(minWidth: panels.declarativeMinimumContentWidth,
+                   minHeight: PlayerLayoutMetrics.minimumWindowHeight)
     }
 
     /// Opaque, statically typed stages keep the compiler's inference local.
@@ -120,7 +124,7 @@ struct MainWindow: View {
     private var configuredWindow: some View {
         windowLayout
         .scrollIndicators(.automatic)
-        .toolbar(.hidden, for: .windowToolbar)
+        .toolbarVisibility(.visible, for: .windowToolbar)
         .background(MainWindowConfigurator(
             ambientConfiguration: MainWindowAmbientConfiguration(
                 showsAmbientBackground: settings.showMainWindowAmbientBackground,
@@ -253,7 +257,8 @@ struct MainWindow: View {
             } label: { Image(systemName: "sidebar.left") }
                 .buttonStyle(.plain).frame(width: 28, height: 28).focused($topControlsFocused).help("显示或隐藏侧边栏")
             Button { if !path.isEmpty { path.removeLast() } } label: { Image(systemName: "chevron.left") }
-                .buttonStyle(.plain).frame(width: 28, height: 28).focused($topControlsFocused).disabled(path.isEmpty).help("返回")
+                .buttonStyle(.plain).frame(width: 28, height: 28).focused($topControlsFocused)
+                .disabled(path.isEmpty).keyboardShortcut("[", modifiers: .command).help("返回（⌘[）")
             Spacer(minLength: 8)
             SearchFieldView(isActive: !player.showNowPlaying, loadDefaultKeyword: testing == nil,
                             onFocusChanged: { searchFocused = $0 }) { query in
@@ -333,18 +338,22 @@ struct MainWindow: View {
                 if let testing { testing.leaf(nil) }
                 else { rootView }
             }
-            .toolbar(.hidden, for: .windowToolbar)
+            .navigationBarBackButtonHidden(true)
+            .toolbar(removing: .title)
+            .toolbarVisibility(.visible, for: .windowToolbar)
             .navigationDestination(for: Destination.self) { destination in
                 Group {
                     if let testing { testing.leaf(destination) }
                     else { DestinationContent(destination: destination) }
                 }
-                .toolbar(.hidden, for: .windowToolbar)
+                .navigationBarBackButtonHidden(true)
+                .toolbar(removing: .title)
+                .toolbarVisibility(.visible, for: .windowToolbar)
             }
         }
-        // This stack owns pages, while the window shell owns navigation
-        // controls. Suppress the stack's implicit native back toolbar too.
-        .toolbar(.hidden, for: .windowToolbar)
+        // Keep native window controls in one stable titlebar. Only page-level
+        // back/title items are removed; the shell owns those navigation tools.
+        .toolbarVisibility(.visible, for: .windowToolbar)
         .onChange(of: selection) { _, _ in path = [] }
     }
 
@@ -491,7 +500,6 @@ struct MainWindowConfigurator: NSViewRepresentable {
         }
         func windowDidUpdate(_ notification: Notification) {
             forwardee?.windowDidUpdate?(notification)
-            panels.refreshMinimum()
             if let window { ambientAppearance.updateLayout(in: window) }
         }
         func windowDidResize(_ notification: Notification) {

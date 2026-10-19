@@ -32,6 +32,14 @@ final class WindowPanelCoordinator: ObservableObject {
     var animationDuration: TimeInterval = 0.3
     var addedWidth: CGFloat { panelWidth + PlayerLayoutMetrics.dividerWidth }
     var hasPanel: Bool { mode != .closed }
+    var declarativeMinimumContentWidth: CGFloat {
+        // AppKit owns outside frame interpolation. A final-width SwiftUI
+        // minimum during opening would resize the window before that tween.
+        if mode == .expandedOutside, isAnimating {
+            return PlayerLayoutMetrics.minimumWindowWidth
+        }
+        return minimumContentWidth
+    }
     var minimumContentWidth: CGFloat {
         guard hasPanel, !isClosing else { return PlayerLayoutMetrics.minimumWindowWidth }
         let minimumNavigationWidth = sidebarWidthAtOpen + PlayerLayoutMetrics.minimumMainWidth
@@ -138,6 +146,7 @@ final class WindowPanelCoordinator: ObservableObject {
             sidebarWidthAtOpen = max(0, baseContentWidth - mainWidth)
             panelWidth = plan.panelWidth
             panel = requested
+            if plan.mode == .expandedOutside { isAnimating = true }
             mode = plan.mode
             sessionWasOutside = plan.mode == .expandedOutside
             if mode == .expandedOutside {
@@ -223,11 +232,6 @@ final class WindowPanelCoordinator: ObservableObject {
         let size = NSSize(width: minimumContentWidth,
                           height: PlayerLayoutMetrics.minimumWindowHeight + chromeHeight)
         if window.contentMinSize != size { window.contentMinSize = size }
-    }
-
-    func refreshMinimum() {
-        guard !nativeFullScreenTransition else { return }
-        applyMinimum()
     }
 
     private func windowChanged(_ name: Notification.Name) {
