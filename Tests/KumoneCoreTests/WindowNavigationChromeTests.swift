@@ -78,11 +78,8 @@ private struct NavigationFixtureRoot: View {
             .environmentObject(AccountStore.shared)
             .environmentObject(SettingsManager.shared)
             .environmentObject(ToastCenter.shared)
-            // Match the production Window scene's outer content minimum.
-            // A bare MainWindow can otherwise shrink while AppKit installs
-            // its toolbar/titlebar and change the pane's aspect-ratio mode.
-            .frame(minWidth: Theme.Layout.minWindowWidth,
-                   minHeight: Theme.Layout.minWindowHeight)
+            // Match production: MainWindow is the only declarative minimum.
+            // NSHostingView's standard sizing bounds propagate it to AppKit.
     }
 }
 
@@ -197,6 +194,10 @@ extension WindowNavigationChromeTests {
             "hostBounds": rectValues(fixture.host.bounds),
             "contentMinimum": ["width": Double(fixture.window.contentMinSize.width),
                                "height": Double(fixture.window.contentMinSize.height)],
+            "coordinatorMinimumWidth": Double(fixture.panels.minimumContentWidth),
+            "declarativeMinimumWidth": Double(fixture.panels.declarativeMinimumContentWidth),
+            "hostFittingSize": ["width": Double(fixture.host.fittingSize.width),
+                                "height": Double(fixture.host.fittingSize.height)],
             "contentAspectRatio": Double(contentLayout.width / max(1, contentLayout.height)),
             "mainColumnWidth": Double(main?.bounds.width ?? 0),
             "mainColumnFrame": rectValues(main.map { $0.convert($0.bounds, to: fixture.host) } ?? .zero),

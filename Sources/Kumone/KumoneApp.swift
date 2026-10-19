@@ -23,8 +23,9 @@ public struct KumoneApp: App {
                 .tint(Theme.accent)
                 .preferredColorScheme(settings.appearance.colorScheme)
                 .scrollIndicators(.automatic)
-                .frame(minWidth: Theme.Layout.minWindowWidth,
-                       minHeight: Theme.Layout.minWindowHeight)
+                // MainWindow owns the phase-aware minimum for both pages
+                // and open inspectors. An outer fixed minimum masks it when
+                // the hosting view measures the scene's minimum size.
         }
         .defaultSize(width: Theme.Layout.defaultWindowWidth,
                      height: Theme.Layout.defaultWindowHeight)
