@@ -157,6 +157,17 @@ extension WindowNavigationChromeTests {
                                                                columnVisibility: columnVisibility))
             window.contentView = host
             window.makeKeyAndOrderFront(nil)
+            // Construct the real native hierarchy as fixture setup. The
+            // following four-second observation budget measures settling and
+            // interactions, not lazy creation of SwiftUI's first host graph.
+            let layoutStart = ProcessInfo.processInfo.systemUptime
+            host.layoutSubtreeIfNeeded()
+            try NavigationValidationEvidence.record([
+                "scenario": "fixture-initial-layout",
+                "seconds": ProcessInfo.processInfo.systemUptime - layoutStart,
+                "hostBounds": NSStringFromRect(host.bounds),
+                "coordinatorAttached": panels.window === window,
+            ])
         }
         func dispose() {
             player.pause()
@@ -276,16 +287,36 @@ extension WindowNavigationChromeTests {
 
     private func wait(_ fixture: Fixture, _ description: String, stableLayout: Bool = false,
                       condition: () -> Bool) async throws {
-        let deadline = ProcessInfo.processInfo.systemUptime + 4
+        let started = ProcessInfo.processInfo.systemUptime
+        let deadline = started + 4
         var previous: NativeLayoutObservation?
         var unchangedSince = ProcessInfo.processInfo.systemUptime
+        var samples: [[String: Any]] = []
         while ProcessInfo.processInfo.systemUptime < deadline {
+            let layoutStart = ProcessInfo.processInfo.systemUptime
             fixture.host.layoutSubtreeIfNeeded()
             let now = ProcessInfo.processInfo.systemUptime
-            if condition() {
-                if !stableLayout { return }
-                if let current = nativeLayoutObservation(fixture) {
-                    if current == previous, now - unchangedSince >= 0.25 { return }
+            let satisfied = condition()
+            let current = satisfied && stableLayout ? nativeLayoutObservation(fixture) : nil
+            samples.append([
+                "elapsed": now - started, "layoutSeconds": now - layoutStart,
+                "predicateSatisfied": satisfied, "nativeObservationAvailable": current != nil,
+                "editableFieldCount": descendants(fixture.host).compactMap { $0 as? NSTextField }.filter { $0.isEditable }.count,
+                "coordinatorAttached": fixture.panels.window === fixture.window,
+                "observationUnchanged": current != nil && current == previous,
+                "unchangedSeconds": now - unchangedSince,
+                "frame": NSStringFromRect(fixture.window.frame),
+            ])
+            // Preserve the first observation plus the latest settling history.
+            if samples.count > 13 { samples.remove(at: 1) }
+            if satisfied {
+                if !stableLayout || (current != nil && current == previous && now - unchangedSince >= 0.25) {
+                    try NavigationValidationEvidence.record([
+                        "scenario": "wait-completed: \(description)", "samples": samples,
+                    ])
+                    return
+                }
+                if let current {
                     if current != previous {
                         previous = current
                         unchangedSince = now
@@ -300,6 +331,9 @@ extension WindowNavigationChromeTests {
             }
             try await Task.sleep(for: .milliseconds(20))
         }
+        try NavigationValidationEvidence.record([
+            "scenario": "wait-timed-out: \(description)", "samples": samples,
+        ])
         try NavigationValidationEvidence.record(snapshot(fixture, scenario: "timeout: \(description)", includeTree: true))
         XCTFail("Timed out waiting for \(description); mode=\(fixture.panels.mode.rawValue), frame=\(fixture.window.frame), contentLayout=\(fixture.window.contentLayoutRect), insufficientSpace=\(fixture.panels.insufficientSpace). See window-navigation-validation.json for the native snapshot.")
         throw FixtureFailure.timedOut(description)
