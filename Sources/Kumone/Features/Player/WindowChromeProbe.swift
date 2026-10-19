@@ -23,4 +23,5 @@ struct MainWindowTestConfiguration {
     let leaf: (Destination?) -> AnyView
     let panelCoordinator: WindowPanelCoordinator
     var initialColumnVisibility: NavigationSplitViewVisibility = .detailOnly
+    var liveColumnVisibility: Binding<NavigationSplitViewVisibility>?
 }

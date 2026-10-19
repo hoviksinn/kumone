@@ -19,7 +19,7 @@ struct MainWindow: View {
     @State private var localPath: [Destination] = []
     @State private var showLogin = false
     @State private var middleFrame: CGRect = .zero
-    @State private var columnVisibility: NavigationSplitViewVisibility
+    @State private var localColumnVisibility: NavigationSplitViewVisibility
     @State private var topChromeVisible = true
     @State private var topChromeHovering = false
     @State private var searchFocused = false
@@ -32,7 +32,7 @@ struct MainWindow: View {
         externalPath = path
         self.testing = testing
         _panels = StateObject(wrappedValue: testing?.panelCoordinator ?? WindowPanelCoordinator())
-        _columnVisibility = State(initialValue: testing?.initialColumnVisibility ?? .all)
+        _localColumnVisibility = State(initialValue: testing?.initialColumnVisibility ?? .all)
     }
 
     private var path: [Destination] {
@@ -43,6 +43,13 @@ struct MainWindow: View {
         }
     }
     private var pathBinding: Binding<[Destination]> { externalPath ?? $localPath }
+    private var columnVisibility: NavigationSplitViewVisibility {
+        get { testing?.liveColumnVisibility?.wrappedValue ?? localColumnVisibility }
+        nonmutating set {
+            if let binding = testing?.liveColumnVisibility { binding.wrappedValue = newValue }
+            else { localColumnVisibility = newValue }
+        }
+    }
     private var sidebarCollapsed: Bool { columnVisibility == .detailOnly }
     private var hidesTopChrome: Bool { player.showNowPlaying || sidebarCollapsed }
 
@@ -84,7 +91,7 @@ struct MainWindow: View {
                 }
                 .frame(width: geometry.size.width, height: geometry.size.height, alignment: .leading)
 
-                // Deliberately OUTSIDE the entire NavigationSplitView. This
+                // Deliberately OUTSIDE the entire navigation split. This
                 // single instance survives every destination push and pop.
                 PlayerBar()
                     .frame(width: PlayerLayoutMetrics.barWidth(in: middleFrame.width))
@@ -207,28 +214,36 @@ struct MainWindow: View {
     }
 
     private var navigationColumns: some View {
-        NavigationSplitView(columnVisibility: $columnVisibility) {
-            SidebarView(selection: $selection, showLogin: $showLogin)
-                .navigationSplitViewColumnWidth(min: 200, ideal: Theme.Layout.sidebarWidth, max: 280)
-        } detail: {
-            VStack(spacing: 0) {
-                middleHeader
-                    .frame(height: 44)
-                detailStack
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // NavigationSplitView can promote a nested stack's destination to
+        // replace its whole detail column, including sibling chrome. A native
+        // split without navigation ownership keeps this middle shell stable.
+        HSplitView {
+            if !sidebarCollapsed {
+                SidebarView(selection: $selection, showLogin: $showLogin)
+                    .frame(minWidth: 200, idealWidth: Theme.Layout.sidebarWidth, maxWidth: 280)
             }
-            .frame(minWidth: PlayerLayoutMetrics.minimumMainWidth)
-            .background(WindowChromeProbe(identifier: "QieTing.MainColumn"))
-            .background {
-                if settings.showMainWindowAmbientBackground {
-                    MainWindowAmbientBackground(colors: artworkStore.colors,
-                                                intensity: settings.mainWindowAmbientBackgroundIntensity)
-                }
-            }
-            .environment(\.playerChromeClearance, PlayerLayoutMetrics.barClearance)
-            .onGeometryChange(for: CGRect.self) { $0.frame(in: .named("mainWindow")) } action: { middleFrame = $0 }
+            middleColumn
         }
-        .navigationSplitViewStyle(.balanced)
+    }
+
+    private var middleColumn: some View {
+        VStack(spacing: 0) {
+            middleHeader
+                .frame(height: 44)
+                .background(WindowChromeProbe(identifier: "QieTing.MainHeader"))
+            detailStack
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .frame(minWidth: PlayerLayoutMetrics.minimumMainWidth)
+        .background(WindowChromeProbe(identifier: "QieTing.MainColumn"))
+        .background {
+            if settings.showMainWindowAmbientBackground {
+                MainWindowAmbientBackground(colors: artworkStore.colors,
+                                            intensity: settings.mainWindowAmbientBackgroundIntensity)
+            }
+        }
+        .environment(\.playerChromeClearance, PlayerLayoutMetrics.barClearance)
+        .onGeometryChange(for: CGRect.self) { $0.frame(in: .named("mainWindow")) } action: { middleFrame = $0 }
     }
 
     private var middleHeader: some View {

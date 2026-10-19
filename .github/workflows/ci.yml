@@ -104,6 +104,7 @@ jobs:
         with:
           name: QieTing-Validation-Evidence-${{ github.run_number }}-${{ github.run_attempt }}
           path: |
+            .build/app-verification.json
             .build/transport-validation.json
             .build/media-clock-diagnostic.json
             .build/service-clock-validation.json

@@ -31,13 +31,15 @@ PlayerService 用同一套异步采样结果更新进度、歌词行和逐字高
 
 ## B / E：右栏和播放栏
 
-窗口持有唯一 PlayerBar，位于整个 NavigationSplitView 和中间 NavigationStack 之外；普通导航只替换中间页面。右侧 LyricsPanel / QueuePanel 由同一稳定容器管理，搜索、返回、侧栏开关属于中间区域。页面重试按钮迁入页面自身安全区，原生窗口按钮不再被 alpha 隐藏。
+窗口持有唯一 PlayerBar，位于整个导航分栏和中间 NavigationStack 之外；普通导航只替换中间页面。分栏使用可拖动的原生 HSplitView：侧栏可收起，中列稳定容器始终持有搜索、返回和显式 NavigationStack，右侧 LyricsPanel / QueuePanel 独立管理。页面重试按钮迁入页面自身安全区，原生窗口按钮不再被 alpha 隐藏。
+
+CI #18 的实际原生视图记录进一步确认：旧 NavigationSplitView 在推入详情后，将目的地提升为整列内容，原中列 VStack 的搜索框和 MainColumn 测量视图消失；窗口级 PlayerBar 本身仍在。这说明仅把播放栏外移尚不足以稳定中列布局，不能把某一个 clipped modifier 当作唯一根因。改用没有隐式页面导航所有权的 HSplitView 后，中列容器与页面导航分开；后续 CI 检查其实际结果，不只验证矩形计算。
 
 打开时以内容宽高比选择模式：小于 16:9 优先外扩并保留原导航/主内容宽度，屏幕右侧不足时左移；否则内部展开。会话保留模式、原窗口 frame，切歌词/队列不再次扩窗。屏幕空间不足以容纳完整控件时，提示放大窗口或手动折叠导航，不自动隐藏控件。全屏使用内部布局，由系统控制窗口 frame。
 
 播放栏固定单排，高 56pt，宽 780–880pt，在中间主内容范围居中，底距 16pt。普通与沉浸页共用最小内容尺寸 1021×640pt；面板会话另计其必要宽度。音质、音量、输出、桌面歌词、AutoMix 和媒体键保留。小于应用最低宽度的屏幕不能保证完整并排布局，此限制会提示用户。外扩恢复、多屏、动画及真实数据页面仍需本机验收。
 
-新增真实 NSWindow / NSHostingView 导航回归使用生产 MainWindow、NavigationSplitView、NavigationStack 和 PlayerBar，只把联网页面替换为离线标记，检查推入/返回后的唯一实例、可见性、命中与真实按钮事件。`.build/window-navigation-validation.json` 保存实际观察。它不替代真实音乐库页面和系统 Spaces/多屏操作。
+新增真实 NSWindow / NSHostingView 导航回归使用生产 MainWindow、HSplitView、NavigationStack 和 PlayerBar，只把联网页面替换为离线标记，检查推入/返回后的唯一实例、可见性、命中与真实按钮事件。测试也检查侧栏切换期间的路径、中列、搜索框和播放栏身份，以及沉浸页切换时真实搜索输入框的焦点。`.build/window-navigation-validation.json` 保存实际观察。测试观察原生几何稳定后才记录恢复基准，不把标题栏异步布局当作用户调整窗口；它不替代真实音乐库页面和系统 Spaces/多屏操作。
 
 ## 沉浸页、顶栏及滚动条
 

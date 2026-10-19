@@ -7,6 +7,7 @@ import Testing
 @MainActor
 private final class NavigationFixtureState: ObservableObject {
     @Published var path: [Destination] = []
+    @Published var columnVisibility: NavigationSplitViewVisibility = .detailOnly
 }
 
 private struct NavigationFixtureLeaf: NSViewRepresentable {
@@ -30,7 +31,8 @@ private struct NavigationFixtureRoot: View {
     var body: some View {
         MainWindow(path: $state.path, testing: MainWindowTestConfiguration(
             leaf: { destination in AnyView(NavigationFixtureLeaf(name: fixtureName(destination))) },
-            panelCoordinator: panels, initialColumnVisibility: columnVisibility))
+            panelCoordinator: panels, initialColumnVisibility: columnVisibility,
+            liveColumnVisibility: $state.columnVisibility))
             .environmentObject(player)
             .environmentObject(AccountStore.shared)
             .environmentObject(SettingsManager.shared)
@@ -56,7 +58,7 @@ private enum NavigationValidationEvidence {
         let url = URL(fileURLWithPath: root).appendingPathComponent(".build/window-navigation-validation.json")
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         try JSONSerialization.data(withJSONObject: [
-            "scope": "Real MainWindow/NavigationSplitView/NavigationStack/PlayerBar in NSHostingView; offline synthetic page leaves. Synthetic screen bounds are explicitly recorded. No physical multi-monitor/full-screen animation claim.",
+            "scope": "Real MainWindow/HSplitView/NavigationStack/PlayerBar in NSHostingView; offline synthetic page leaves. Synthetic screen bounds affect production opening geometry only; NSWindow frame requests remain subject to the physical hosted display. No physical multi-monitor/full-screen animation claim.",
             "cases": cases,
         ], options: [.prettyPrinted, .sortedKeys]).write(to: url, options: .atomic)
     }
@@ -74,12 +76,15 @@ struct WindowNavigationChromeTests {
     @MainActor
     private final class Fixture {
         private static var applicationPrepared = false
-        let state = NavigationFixtureState()
+        let state: NavigationFixtureState
         let panels = WindowPanelCoordinator()
         let player: PlayerService
         let window: NSWindow
         let host: NSHostingView<NavigationFixtureRoot>
         init(columnVisibility: NavigationSplitViewVisibility = .detailOnly) throws {
+            let fixtureState = NavigationFixtureState()
+            fixtureState.columnVisibility = columnVisibility
+            state = fixtureState
             if !Self.applicationPrepared {
                 try NavigationValidationEvidence.record(["scenario": "application-bootstrap", "phase": "before-finishLaunching"])
                 // SwiftPM supplies no NSApplication event loop. Finish the
@@ -201,12 +206,30 @@ struct WindowNavigationChromeTests {
         return main.bounds.width
     }
 
-    private func wait(_ fixture: Fixture, _ description: String,
+    private func wait(_ fixture: Fixture, _ description: String, stableLayout: Bool = false,
                       condition: () -> Bool) async throws {
         let deadline = ProcessInfo.processInfo.systemUptime + 4
+        var previous: NativeLayoutObservation?
+        var unchangedSince = ProcessInfo.processInfo.systemUptime
         while ProcessInfo.processInfo.systemUptime < deadline {
             fixture.host.layoutSubtreeIfNeeded()
-            if condition() { return }
+            let now = ProcessInfo.processInfo.systemUptime
+            if condition() {
+                if !stableLayout { return }
+                if let current = nativeLayoutObservation(fixture) {
+                    if current == previous, now - unchangedSince >= 0.25 { return }
+                    if current != previous {
+                        previous = current
+                        unchangedSince = now
+                    }
+                } else {
+                    previous = nil
+                    unchangedSince = now
+                }
+            } else {
+                previous = nil
+                unchangedSince = now
+            }
             try await Task.sleep(for: .milliseconds(20))
         }
         try NavigationValidationEvidence.record(snapshot(fixture, scenario: "timeout: \(description)", includeTree: true))
@@ -214,10 +237,40 @@ struct WindowNavigationChromeTests {
         throw FixtureFailure.timedOut(description)
     }
 
+    private struct NativeLayoutObservation: Equatable {
+        let windowFrame: CGRect
+        let contentLayoutRect: CGRect
+        let contentMinimum: NSSize
+        let hostBounds: CGRect
+        let mainBounds: CGRect
+        let mainFrame: CGRect
+        let editableFieldCount: Int
+    }
+
+    private func nativeLayoutObservation(_ fixture: Fixture) -> NativeLayoutObservation? {
+        guard fixture.panels.window === fixture.window, !fixture.panels.isAnimating,
+              let main = markers("QieTing.MainColumn", in: fixture.host).first,
+              main.bounds.width >= PlayerLayoutMetrics.minimumMainWidth,
+              main.bounds.height > 0 else { return nil }
+        let fields = descendants(fixture.host).compactMap { $0 as? NSTextField }.filter { $0.isEditable }
+        guard fields.count == 1 else { return nil }
+        // SwiftUI installs native titlebar/toolbar constraints after the
+        // initial host layout. Observe the resulting minimum and geometry,
+        // without assuming any fixed titlebar height or frame adjustment.
+        return NativeLayoutObservation(
+            windowFrame: fixture.window.frame,
+            contentLayoutRect: fixture.window.contentLayoutRect,
+            contentMinimum: fixture.window.contentMinSize,
+            hostBounds: fixture.host.bounds,
+            mainBounds: main.bounds,
+            mainFrame: main.convert(main.bounds, to: fixture.host),
+            editableFieldCount: fields.count)
+    }
+
     private func check(_ fixture: Fixture, destination: Destination?,
                        originalBar: ObjectIdentifier? = nil, scenario: String) async throws -> ObjectIdentifier {
         let expected = fixtureName(destination)
-        try await wait(fixture, "configured window and visible destination \(expected)") {
+        try await wait(fixture, "configured window and visible destination \(expected)", stableLayout: true) {
             guard fixture.panels.window === fixture.window,
                   self.markers(expected, in: fixture.host).contains(where: {
                       !$0.visibleRect.isEmpty && !$0.isHiddenOrHasHiddenAncestor
@@ -308,7 +361,7 @@ struct WindowNavigationChromeTests {
         fixture.panels.visibleFrameForTesting = CGRect(x: -1000, y: -1000, width: 4000, height: 3000)
         try requireOutsidePlan(fixture, scenario: "lyrics-outside-precondition")
         fixture.player.activePanel = .lyrics
-        try await wait(fixture, "outside lyrics") {
+        try await wait(fixture, "outside lyrics", stableLayout: true) {
             fixture.panels.mode == .expandedOutside && !fixture.panels.isAnimating && fixture.window.frame.width > original.width + 280
         }
         let expanded = fixture.window.frame
@@ -364,7 +417,7 @@ struct WindowNavigationChromeTests {
         try NavigationValidationEvidence.record(snapshot(fixture, scenario: "search-refocused-after-immersive"))
         #expect(fixture.window.makeFirstResponder(nil))
         fixture.player.activePanel = nil
-        try await wait(fixture, "original frame restored") {
+        try await wait(fixture, "original frame restored", stableLayout: true) {
             fixture.panels.mode == .closed && abs(fixture.window.frame.width - original.width) < 0.5
         }
         #expect(fixture.window.frame == original)
@@ -424,23 +477,23 @@ struct WindowNavigationChromeTests {
             _ = fixture.panels.request(.queue, mainWidth: mainWidth)
             _ = fixture.panels.request(nil, mainWidth: mainWidth)
         }
-        try await wait(fixture, "rapid session closes") { fixture.panels.mode == .closed && !fixture.panels.isAnimating }
+        try await wait(fixture, "rapid session closes", stableLayout: true) { fixture.panels.mode == .closed && !fixture.panels.isAnimating }
         #expect(fixture.window.frame == original)
         #expect(fixture.panels.request(.lyrics, mainWidth: mainWidth))
-        try await wait(fixture, "manual-resize start") { fixture.panels.mode == .expandedOutside && !fixture.panels.isAnimating }
+        try await wait(fixture, "manual-resize start", stableLayout: true) { fixture.panels.mode == .expandedOutside && !fixture.panels.isAnimating }
         var manuallyChanged = fixture.window.frame
         manuallyChanged.origin.x += 30
         manuallyChanged.origin.y += 20
         manuallyChanged.size.width += 80
         manuallyChanged.size.height += 20
         fixture.window.setFrame(manuallyChanged, display: true)
-        try await wait(fixture, "manual resize rebased") {
+        try await wait(fixture, "manual resize rebased", stableLayout: true) {
             abs((fixture.panels.originalFrame?.width ?? 0) - (original.width + 80)) < 0.5
         }
         let expected = try #require(fixture.panels.originalFrame)
         let resizedMain = try #require(markers("QieTing.MainColumn", in: fixture.host).first)
         #expect(fixture.panels.request(nil, mainWidth: resizedMain.bounds.width))
-        try await wait(fixture, "manual session closes") { fixture.panels.mode == .closed && !fixture.panels.isAnimating }
+        try await wait(fixture, "manual session closes", stableLayout: true) { fixture.panels.mode == .closed && !fixture.panels.isAnimating }
         #expect(fixture.window.frame == expected)
     }
 
@@ -454,6 +507,60 @@ struct WindowNavigationChromeTests {
         #expect(button.bounds.width >= 30 && button.bounds.height >= 30)
         #expect(button.bounds.width <= 40 && button.bounds.height <= 40)
         #expect(fixture.window.contentMinSize == NSSize(width: 1021, height: 640))
+    }
+
+    @Test func sidebarCollapseAndExpansionPreserveNavigationAndChromeInstances() async throws {
+        let fixture = try Fixture(columnVisibility: .all)
+        defer { fixture.dispose() }
+        let bar = try await check(fixture, destination: nil, scenario: "sidebar-toggle-before-navigation")
+        let main = try #require(markers("QieTing.MainColumn", in: fixture.host).first)
+        let header = try #require(markers("QieTing.MainHeader", in: fixture.host).first)
+        let search = try #require(descendants(fixture.host).compactMap { $0 as? NSTextField }.first { $0.isEditable })
+        let serviceID = ObjectIdentifier(fixture.player)
+        let clockID = ObjectIdentifier(fixture.player.clock)
+        let navigationPath: [Destination] = [.artist(42), .album(7)]
+        fixture.state.path = navigationPath
+        _ = try await check(fixture, destination: .album(7), originalBar: bar, scenario: "sidebar-toggle-nested-album")
+        let leaf = try #require(markers(fixtureName(.album(7)), in: fixture.host).first)
+
+        for visibility in [NavigationSplitViewVisibility.detailOnly, .all, .detailOnly, .all] {
+            fixture.state.columnVisibility = visibility
+            let collapsed = visibility == .detailOnly
+            let scenario = collapsed ? "sidebar-toggle-collapsed" : "sidebar-toggle-expanded"
+            try await wait(fixture, "actual split-column geometry for \(scenario)") {
+                guard let current = self.markers("QieTing.MainColumn", in: fixture.host).first else { return false }
+                let frame = current.convert(current.bounds, to: fixture.host)
+                return collapsed
+                    ? abs(frame.minX - fixture.host.bounds.minX) < 0.5
+                        && abs(frame.width - fixture.host.bounds.width) < 0.5
+                    : frame.minX - fixture.host.bounds.minX >= PlayerLayoutMetrics.minimumSidebarWidth
+                        && frame.width >= PlayerLayoutMetrics.minimumMainWidth
+            }
+            _ = try await check(fixture, destination: .album(7), originalBar: bar, scenario: scenario)
+            #expect(fixture.state.path == navigationPath)
+            #expect(markers("QieTing.MainColumn", in: fixture.host).count == 1)
+            #expect(markers("QieTing.MainColumn", in: fixture.host).first === main)
+            #expect(markers("QieTing.MainHeader", in: fixture.host).count == 1)
+            #expect(markers("QieTing.MainHeader", in: fixture.host).first === header)
+            #expect(!header.isHiddenOrHasHiddenAncestor && !header.visibleRect.isEmpty)
+            let editableFields = descendants(fixture.host).compactMap { $0 as? NSTextField }.filter { $0.isEditable }
+            #expect(editableFields.count == 1)
+            #expect(editableFields.first === search)
+            #expect(search.window === fixture.window && !search.visibleRect.isEmpty)
+            #expect(markers(fixtureName(.album(7)), in: fixture.host).first === leaf)
+            #expect(ObjectIdentifier(fixture.player) == serviceID)
+            #expect(ObjectIdentifier(fixture.player.clock) == clockID)
+        }
+
+        fixture.state.path.removeLast()
+        _ = try await check(fixture, destination: .artist(42), originalBar: bar, scenario: "sidebar-toggle-back-to-artist")
+        #expect(fixture.state.path == [.artist(42)])
+        #expect(markers("QieTing.MainColumn", in: fixture.host).first === main)
+        #expect(markers("QieTing.MainHeader", in: fixture.host).first === header)
+        fixture.state.path = []
+        _ = try await check(fixture, destination: nil, originalBar: bar, scenario: "sidebar-toggle-back-to-home")
+        #expect(markers("QieTing.MainColumn", in: fixture.host).first === main)
+        #expect(markers("QieTing.MainHeader", in: fixture.host).first === header)
     }
 
     @Test func collapsedWideWindowUsesAnInsidePaneWithoutGrowingItsFrameOrMinimum() async throws {
@@ -470,7 +577,7 @@ struct WindowNavigationChromeTests {
         let original = fixture.window.frame
         #expect(fixture.window.contentLayoutRect.width / fixture.window.contentLayoutRect.height >= 16.0 / 9.0)
         fixture.player.activePanel = .lyrics
-        try await wait(fixture, "inside lyrics and actual content minimum") {
+        try await wait(fixture, "inside lyrics and actual content minimum", stableLayout: true) {
             fixture.panels.mode == .expandedInside
                 && abs(fixture.window.contentMinSize.width - 1161) < 0.5
                 && self.markers("QieTing.RightPanel", in: fixture.host).contains { $0.bounds.width >= 340 }
@@ -480,7 +587,7 @@ struct WindowNavigationChromeTests {
         #expect(fixture.window.contentMinSize.width <= fixture.window.contentLayoutRect.width)
         _ = try await check(fixture, destination: nil, originalBar: bar, scenario: "inside-collapsed-open")
         fixture.player.activePanel = nil
-        try await wait(fixture, "inside pane closes without resizing") { fixture.panels.mode == .closed }
+        try await wait(fixture, "inside pane closes without resizing", stableLayout: true) { fixture.panels.mode == .closed }
         #expect(fixture.window.frame == original)
         #expect(fixture.window.contentMinSize.width == 1021)
     }
@@ -534,7 +641,7 @@ struct WindowNavigationChromeTests {
         let mainWidth = try requireOutsidePlan(fixture, scenario: "fullscreen-outside-precondition")
         let original = fixture.window.frame
         #expect(fixture.panels.request(.lyrics, mainWidth: mainWidth))
-        try await wait(fixture, "outside session settles") { !fixture.panels.isAnimating }
+        try await wait(fixture, "outside session settles", stableLayout: true) { !fixture.panels.isAnimating }
         let expanded = fixture.window.frame
         // These exercise AppKit notification/state ownership in the real
         // hosted window. They do not create a fullscreen Space or a monitor.
@@ -545,9 +652,19 @@ struct WindowNavigationChromeTests {
         #expect(fixture.panels.isFullScreen)
         #expect(fixture.window.contentMinSize.width == 1161)
         let savedClosedFrame = fixture.panels.originalFrame
-        fixture.window.setFrame(expanded.offsetBy(dx: 15, dy: 0), display: true)
+        let requestedOrigin = expanded.offsetBy(dx: 15, dy: 0).origin
+        // This scenario exercises a native move, not a frame resize. setFrame
+        // would also ask AppKit to constrain the size against the physical CI
+        // display, which our synthetic opening-plan bounds cannot enlarge.
+        fixture.window.setFrameOrigin(requestedOrigin)
+        var moved = snapshot(fixture, scenario: "fullscreen-native-origin-move")
+        moved["requestedOrigin"] = ["x": Double(requestedOrigin.x), "y": Double(requestedOrigin.y)]
+        moved["expectedUnchangedSize"] = ["width": Double(expanded.width), "height": Double(expanded.height)]
+        try NavigationValidationEvidence.record(moved)
+        #expect(fixture.window.frame.size == expanded.size)
         #expect(fixture.panels.originalFrame == savedClosedFrame)
-        fixture.window.setFrame(expanded, display: true)
+        fixture.window.setFrameOrigin(expanded.origin)
+        #expect(fixture.window.frame == expanded)
         NotificationCenter.default.post(name: NSWindow.willExitFullScreenNotification, object: fixture.window)
         NotificationCenter.default.post(name: NSWindow.didExitFullScreenNotification, object: fixture.window)
         #expect(!fixture.panels.isFullScreen)
@@ -556,7 +673,7 @@ struct WindowNavigationChromeTests {
         #expect(fixture.window.frame == expanded)
         #expect(abs(fixture.panels.baseContentWidth - 1021) < 0.5)
         #expect(fixture.panels.request(nil, mainWidth: mainWidth))
-        try await wait(fixture, "post-fullscreen outside close") { fixture.panels.mode == .closed && !fixture.panels.isAnimating }
+        try await wait(fixture, "post-fullscreen outside close", stableLayout: true) { fixture.panels.mode == .closed && !fixture.panels.isAnimating }
         #expect(fixture.window.frame == original)
     }
 
@@ -568,7 +685,7 @@ struct WindowNavigationChromeTests {
         let mainWidth = try requireOutsidePlan(fixture, scenario: "fullscreen-close-outside-precondition")
         let original = fixture.window.frame
         #expect(fixture.panels.request(.queue, mainWidth: mainWidth))
-        try await wait(fixture, "outside queue settles") { !fixture.panels.isAnimating }
+        try await wait(fixture, "outside queue settles", stableLayout: true) { !fixture.panels.isAnimating }
         #expect(fixture.panels.request(nil, mainWidth: mainWidth))
         NotificationCenter.default.post(name: NSWindow.willEnterFullScreenNotification, object: fixture.window)
         #expect(fixture.panels.mode == .closed)
@@ -576,7 +693,7 @@ struct WindowNavigationChromeTests {
         NotificationCenter.default.post(name: NSWindow.didEnterFullScreenNotification, object: fixture.window)
         NotificationCenter.default.post(name: NSWindow.willExitFullScreenNotification, object: fixture.window)
         NotificationCenter.default.post(name: NSWindow.didExitFullScreenNotification, object: fixture.window)
-        try await wait(fixture, "interrupted close restores after native ownership") {
+        try await wait(fixture, "interrupted close restores after native ownership", stableLayout: true) {
             !fixture.panels.isAnimating && fixture.panels.mode == .closed
                 && abs(fixture.window.frame.width - original.width) < 0.5
         }
