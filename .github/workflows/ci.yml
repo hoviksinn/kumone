@@ -42,6 +42,13 @@ jobs:
             cp "$BIN_PATH/mlx.metallib" "$test_bin/mlx.metallib"
           done < <(find "$BIN_PATH" -type d -path '*.xctest/Contents/MacOS' -print0)
 
+      # Catch hosted AppKit/navigation failures before the longer audio/MLX run.
+      # The complete suite below still runs unchanged after this focused check.
+      - name: Hosted window navigation regression
+        run: |
+          swift test --skip-build --triple arm64-apple-macosx26.0 --filter WindowNavigationChromeTests
+          test -s .build/window-navigation-validation.json
+
       - name: Test
         run: |
           swift test --skip-build --triple arm64-apple-macosx26.0
