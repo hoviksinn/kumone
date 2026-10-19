@@ -177,6 +177,12 @@ struct MainWindow: View {
         }
         .onChange(of: player.showNowPlaying) { _, _ in
             if testing == nil { artworkStore.setArtworkNeeded(needsCurrentArtwork) }
+            // Focus belongs to the visible page. A search field underneath
+            // the immersive overlay must not consume keys or pin its header.
+            searchFocused = false
+            topControlsFocused = false
+            topChromeHovering = false
+            if player.showNowPlaying { panels.window?.makeFirstResponder(nil) }
             revealChrome()
         }
     }
@@ -212,6 +218,7 @@ struct MainWindow: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             .frame(minWidth: PlayerLayoutMetrics.minimumMainWidth)
+            .background(WindowChromeProbe(identifier: "QieTing.MainColumn"))
             .background {
                 if settings.showMainWindowAmbientBackground {
                     MainWindowAmbientBackground(colors: artworkStore.colors,
@@ -233,7 +240,8 @@ struct MainWindow: View {
             Button { if !path.isEmpty { path.removeLast() } } label: { Image(systemName: "chevron.left") }
                 .buttonStyle(.plain).frame(width: 28, height: 28).focused($topControlsFocused).disabled(path.isEmpty).help("返回")
             Spacer(minLength: 8)
-            SearchFieldView(loadDefaultKeyword: testing == nil, onFocusChanged: { searchFocused = $0 }) { query in
+            SearchFieldView(isActive: !player.showNowPlaying, loadDefaultKeyword: testing == nil,
+                            onFocusChanged: { searchFocused = $0 }) { query in
                 path.append(.search(query))
             }
         }
@@ -480,6 +488,7 @@ struct MainWindowConfigurator: NSViewRepresentable {
 // MARK: - Search field
 
 struct SearchFieldView: View {
+    var isActive = true
     var loadDefaultKeyword = true
     var onFocusChanged: (Bool) -> Void = { _ in }
     let onSubmit: (String) -> Void
@@ -514,6 +523,9 @@ struct SearchFieldView: View {
         .padding(.trailing, 8)
         .animation(AppAnimation.quick, value: focused)
         .onChange(of: focused) { _, value in onFocusChanged(value) }
+        .onChange(of: isActive) { _, active in
+            if !active { focused = false }
+        }
         .task {
             guard loadDefaultKeyword else { return }
             if let keyword = try? await NeteaseAPI.searchDefaultKeyword(), !keyword.isEmpty {
