@@ -78,6 +78,44 @@ jobs:
           python3 Scripts/verify-test-log.py .build/segment-eof-regression.log --minimum-tests 1 --report .build/segment-eof-test-summary.json
           test -s .build/transition-segment-validation.json
 
+      # Ad-hoc signature only. No certificate, notarization, or release secrets.
+      - name: Build app (macOS 26, arm64)
+        run: FETCH_MLX_METALLIB=1 Scripts/build-app.sh release
+
+      - name: Verify packaged architecture, deployment target and isolation
+        run: |
+          python3 Scripts/verify-app.py ".build/app/且听.app" \
+            --report .build/app-verification.json
+
+      # A Preview is uploaded only after the real hosted UI/seek/PCM/EOF
+      # gates and verified arm64 app packaging. The complete suite still runs
+      # below; its result is never inferred from the earlier Preview upload.
+      - name: Package clearly marked Preview
+        env:
+          QIETING_SOURCE_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          ditto -c -k --sequesterRsrc --keepParent \
+            ".build/app/且听.app" .build/QieTing-Preview-macOS26-arm64.zip
+          python3 Scripts/write-preview-status.py --output .build
+          cat .build/PREVIEW.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload UI Preview before complete regression
+        uses: actions/upload-artifact@v4
+        with:
+          name: QieTing-Preview-macOS26-arm64-${{ github.run_number }}-${{ github.run_attempt }}
+          path: |
+            .build/QieTing-Preview-macOS26-arm64.zip
+            .build/PREVIEW.md
+            .build/preview-status.json
+            .build/app-verification.json
+            .build/window-test-summary.json
+            .build/lyrics-seek-test-summary.json
+            .build/seek-clock-test-summary.json
+            .build/segment-eof-test-summary.json
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
       - name: Test
         shell: bash
         run: |
@@ -90,19 +128,11 @@ jobs:
           test -s .build/window-navigation-validation.json
           test -s .build/playback-boundary-diagnostic.json
 
-      # Ad-hoc signature only. No certificate, notarization, or release secrets.
-      - name: Build app (macOS 26, arm64)
-        run: FETCH_MLX_METALLIB=1 Scripts/build-app.sh release
-
-      - name: Verify packaged architecture, deployment target and isolation
-        run: |
-          python3 Scripts/verify-app.py ".build/app/且听.app" \
-            --report .build/app-verification.json
-
       - name: Zip test app (preserve bundle metadata)
         run: |
-          ditto -c -k --sequesterRsrc --keepParent \
-            ".build/app/且听.app" .build/QieTing-Test-macOS26-arm64.zip
+          # The final package is exactly the app already checked for Preview;
+          # no source or build changes occur between targeted and full tests.
+          cp .build/QieTing-Preview-macOS26-arm64.zip .build/QieTing-Test-macOS26-arm64.zip
           stat -f 'App ZIP bytes: %z' .build/QieTing-Test-macOS26-arm64.zip
           {
             echo '### 且听 QieTing Test — macOS 26 / arm64'
@@ -142,6 +172,8 @@ jobs:
           name: QieTing-Validation-Evidence-${{ github.run_number }}-${{ github.run_attempt }}
           path: |
             .build/app-verification.json
+            .build/preview-status.json
+            .build/PREVIEW.md
             .build/window-test-summary.json
             .build/lyrics-seek-test-summary.json
             .build/seek-clock-test-summary.json
