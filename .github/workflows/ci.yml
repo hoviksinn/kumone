@@ -30,9 +30,11 @@ jobs:
           swift --version
 
       - name: Build
+        id: compile
         run: swift build --build-tests --triple arm64-apple-macosx26.0
 
       - name: Prepare verified MLX Metal kernels for GPU test
+        id: metal
         run: |
           BIN_PATH="$(swift build --triple arm64-apple-macosx26.0 --show-bin-path)"
           Scripts/fetch-mlx-metallib.sh "$BIN_PATH"
@@ -62,6 +64,10 @@ jobs:
           test -s .build/lyrics-seek-viewport-validation.json
 
       - name: Media clock and strict PCM regression
+        # Audio validation is independent of native UI fixture readiness. Run
+        # it after a valid build even if a hosted UI gate failed; packaging
+        # below still requires every earlier gate to succeed.
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' && steps.metal.outcome == 'success' }}
         shell: bash
         run: |
           swift test --skip-build --triple arm64-apple-macosx26.0 --disable-xctest --filter 'PlayerServiceClockTests|PlaybackTransportContinuityTests' 2>&1 | tee .build/seek-clock-regression.log
@@ -72,6 +78,7 @@ jobs:
       # Fail fast on the recently added native EOF/paused-head probe before
       # repeating the complete audio suite. Test below still runs every case.
       - name: Segment EOF regression
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' && steps.metal.outcome == 'success' }}
         shell: bash
         run: |
           swift test --skip-build --triple arm64-apple-macosx26.0 --disable-xctest --filter anObservedOutgoingEOFDuringPausedSegmentHeadPreservesTheSegment 2>&1 | tee .build/segment-eof-regression.log
