@@ -325,6 +325,8 @@ extension WindowNavigationChromeTests {
             "baseContentWidth": Double(fixture.panels.baseContentWidth),
             "insideReveal": Double(fixture.panels.insideReveal),
             "isAnimating": fixture.panels.isAnimating,
+            "coordinatorReduceMotion": fixture.panels.reduceMotion,
+            "configuredAnimationDuration": fixture.panels.animationDuration,
             "isFullScreen": fixture.panels.isFullScreen,
             "insufficientSpace": fixture.panels.insufficientSpace,
             "originalFrame": rectValues(fixture.panels.originalFrame ?? .zero),
@@ -740,6 +742,10 @@ extension WindowNavigationChromeTests {
         let fixture = try await Fixture()
         defer { fixture.dispose() }
         let bar = try await check(fixture, destination: nil, scenario: "right-edge-cycles-before")
+        // Exercise the nonzero native animation path independently of the
+        // hosted machine's accessibility preference, without changing it.
+        fixture.panels.reduceMotion = false
+        expect(fixture.panels.animationDuration > 0)
         let original = fixture.window.frame
         // Only 40pt is left on the right. The synthetic screen has room on
         // the left, so each real window animation must move left to expand.
@@ -1248,7 +1254,11 @@ extension WindowNavigationChromeTests {
         expect(abs(surfaceFrame.minX - fixture.host.bounds.minX) < 0.5)
         expect(surfaceFrame.width >= PlayerLayoutMetrics.minimumSidebarWidth)
         expect(surfaceFrame.maxX <= mainFrame.minX)
-        expect(abs(surfaceFrame.height - fixture.host.bounds.height) < 0.5)
+        // The host includes the native titlebar (672pt in CI), while both
+        // columns occupy its 640pt usable region. Compare the same region,
+        // retaining the original precision and avoiding system controls.
+        expect(abs(surfaceFrame.minY - mainFrame.minY) < 0.5)
+        expect(abs(surfaceFrame.height - mainFrame.height) < 0.5)
 
         let scroll = try require(descendants(fixture.host).compactMap { $0 as? NSScrollView }.first { candidate in
             let frame = candidate.convert(candidate.bounds, to: fixture.host)
@@ -1278,6 +1288,7 @@ extension WindowNavigationChromeTests {
             "clipDrawsBackground": scroll.contentView.drawsBackground,
             "scrollerKnobStyle": Int(scroll.scrollerKnobStyle.rawValue),
             "systemReduceTransparency": NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency,
+            "systemReduceMotion": NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
         ]
         evidence["nativeMaterialScope"] = "NSVisualEffectView configuration and real List attachment only; no pixel transparency, Reduce Transparency appearance, or physical trackpad fading claim"
         evidence["nativeEffectViews"] = nativeEffects.map { effect -> [String: Any] in
