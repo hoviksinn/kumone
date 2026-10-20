@@ -600,11 +600,56 @@ struct TransitionSegmentTests {
         let outgoingDuration = 3.0
         let outgoing = try SegmentFixtures.sine(hz: 440, seconds: outgoingDuration,
                                                name: "seg-head-real-eof")
-        let planned = plan(overlap: 2, outPoint: outgoingDuration)
+        // The outgoing file deliberately ends at the overlap's START so its
+        // real completion can race the segment head. There is no outgoing
+        // overlap left to separate. Exercise the real stem-rendering path on
+        // the incoming window instead; the zero-vocal provider leaves its
+        // sine-wave bed unchanged, just as in the other continuity fixtures.
+        let envelope = StemEnvelope(incomingVocal: [
+            .init(t: 0, gainDB: -9), .init(t: 2, gainDB: -9),
+        ])
+        let planned = plan(overlap: 2, outPoint: outgoingDuration,
+                           technique: .custom(envelope))
+        final class SplitRequests: @unchecked Sendable {
+            struct Window {
+                let source: URL
+                let duration: TimeInterval
+                let sampleRate: Double
+                let channelFrames: [Int]
+            }
+            private let lock = NSLock()
+            private var windows: [Window] = []
+            func record(_ request: VocalStemRequest) {
+                lock.lock(); defer { lock.unlock() }
+                windows.append(Window(source: request.source, duration: request.duration,
+                                      sampleRate: request.sampleRate,
+                                      channelFrames: request.samples.map(\.count)))
+            }
+            var snapshot: [Window] {
+                lock.lock(); defer { lock.unlock() }; return windows
+            }
+        }
+        let splitRequests = SplitRequests()
         let segment = try TransitionSegmentRenderer.render(
             TransitionSegmentRenderer.Request(planned: planned, outgoingURL: outgoing,
                                               incomingURL: SegmentFixtures.incoming),
-            provider: silentVocals)
+            provider: { request in
+                splitRequests.record(request)
+                return try silentVocals(request)
+            })
+        let windows = splitRequests.snapshot
+        #expect(windows.count == 1, "Only the complete incoming overlap must be separated")
+        let separated = try #require(windows.first)
+        #expect(separated.source == SegmentFixtures.incoming)
+        #expect(separated.sampleRate == DeckChain.format.sampleRate)
+        #expect(separated.duration == 2)
+        #expect(separated.channelFrames == [88_200, 88_200])
+        evidence.values([
+            "stemSeparatedSource": separated.source.lastPathComponent,
+            "stemSeparatedDurationSeconds": separated.duration,
+            "stemSeparatedChannelFrames": separated.channelFrames,
+            "stemSeparationRequestCount": windows.count,
+        ])
         // The identical complete file is used for pre-render and playback. It
         // is never shortened or replaced to manufacture a completion callback.
         #expect(segment.buffer.frameLength > 0 && segment.duration > segment.handoffIn + segment.handoffOut)
