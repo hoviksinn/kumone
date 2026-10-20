@@ -200,4 +200,7 @@ jobs:
             .build/lyrics-seek-viewport-validation.json
             .build/playback-boundary-diagnostic.json
           if-no-files-found: warn
+          # The PNG glob makes .build the search root; allow these explicit
+          # synthetic-test receipts in that hidden directory, not its contents.
+          include-hidden-files: true
           retention-days: 14

@@ -148,6 +148,7 @@ extension LyricsSeekViewportTests {
         let host: NSHostingView<HostedLyricsRoot>
         let temporaryDirectory: URL
         var lastAccessibilityQuery: [String: Any] = [:]
+        var wheelReceipts: [[String: Any]] = []
 
         init(presentation: LyricsPanelPresentation, paused: Bool) async throws {
             if !Self.applicationPrepared {
@@ -405,6 +406,7 @@ extension LyricsSeekViewportTests {
             },
             "geometryCapture": geometrySnapshot(fixture),
             "nativeCachedRendering": rendering,
+            "nativeWheelReceipts": fixture.wheelReceipts,
             "accessibilityQuery": fixture.lastAccessibilityQuery,
             "accessibility": accessibility.prefix(240).map { item -> [String: Any] in
                 ["class": item.sourceClass, "role": item.role, "label": item.label,
@@ -437,13 +439,18 @@ extension LyricsSeekViewportTests {
             // otherwise the production 3s manual-follow timeout could hide it.
             try await Task.sleep(for: .milliseconds(20))
         } while ProcessInfo.processInfo.systemUptime < deadline
-        try LyricsViewportEvidence.record(setupSnapshot(fixture, scenario: "setup-failed: \(description)"))
+        let failure = setupSnapshot(fixture, scenario: "setup-failed: \(description)")
+        try LyricsViewportEvidence.record(failure)
+        // Preserve the synthetic failure receipt even if artifact collection
+        // itself fails. This runs only after the unchanged readiness deadline.
+        let data = try JSONSerialization.data(withJSONObject: failure, options: [.sortedKeys])
+        print("LYRICS_VIEWPORT_SETUP_FAILURE " + String(decoding: data, as: UTF8.self))
         XCTFail("Unable to establish actual hosted viewport setup: \(description)")
         throw FixtureFailure.unready(description)
     }
 
     private func wheel(_ delta: Int32, phase: CGScrollPhase, expectedPhase: NSEvent.Phase,
-                       in scroll: NSScrollView, window: NSWindow) throws {
+                       in scroll: NSScrollView, window: NSWindow) throws -> [String: Any] {
         let cg = try XCTUnwrap(CGEvent(scrollWheelEvent2Source: nil, units: .pixel,
                                       wheelCount: 2, wheel1: delta, wheel2: 0, wheel3: 0))
         cg.setIntegerValueField(.scrollWheelEventIsContinuous, value: 1)
@@ -457,14 +464,26 @@ extension LyricsSeekViewportTests {
         let event = try XCTUnwrap(NSEvent(cgEvent: cg))
         XCTAssertEqual(event.type, .scrollWheel)
         XCTAssertEqual(event.phase, expectedPhase, "Reject malformed native phase injection")
+        let before = scroll.documentVisibleRect
         scroll.scrollWheel(with: event)
+        return ["phase": event.phase.rawValue, "delta": delta,
+                "eventWindowNumber": event.windowNumber,
+                "fixtureWindowNumber": window.windowNumber,
+                "eventHasFixtureWindow": event.window === window,
+                "locationInWindow": NSStringFromPoint(event.locationInWindow),
+                "locationInScroll": NSStringFromPoint(scroll.convert(event.locationInWindow, from: nil)),
+                "documentVisibleBefore": NSStringFromRect(before),
+                "documentVisibleAfterDispatch": NSStringFromRect(scroll.documentVisibleRect)]
     }
 
     private func enterRealManualScrolling(_ fixture: Fixture, scroll: NSScrollView) async throws {
         let before = scroll.documentVisibleRect
-        try wheel(-80, phase: .began, expectedPhase: .began, in: scroll, window: fixture.window)
-        try wheel(-100, phase: .changed, expectedPhase: .changed, in: scroll, window: fixture.window)
-        try wheel(0, phase: .ended, expectedPhase: .ended, in: scroll, window: fixture.window)
+        fixture.wheelReceipts.append(try wheel(-80, phase: .began, expectedPhase: .began,
+                                              in: scroll, window: fixture.window))
+        fixture.wheelReceipts.append(try wheel(-100, phase: .changed, expectedPhase: .changed,
+                                              in: scroll, window: fixture.window))
+        fixture.wheelReceipts.append(try wheel(0, phase: .ended, expectedPhase: .ended,
+                                              in: scroll, window: fixture.window))
         try await waitForSetup(fixture, description: "native wheel movement and production follow button") {
             scroll.documentVisibleRect != before && self.hasFollowButton(fixture)
         }
