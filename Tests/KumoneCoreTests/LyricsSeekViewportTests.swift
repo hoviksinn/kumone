@@ -57,7 +57,14 @@ extension LyricsSeekViewportTests {
 
     private struct AccessibilityObservation {
         let label: String
+        let title: String
+        let value: String
+        let role: String
+        let sourceClass: String
+        let childCount: Int
         let frame: NSRect
+
+        var textValues: [String] { [label, title, value].filter { !$0.isEmpty } }
     }
 
     @MainActor
@@ -154,14 +161,27 @@ extension LyricsSeekViewportTests {
         var seen: Set<ObjectIdentifier> = []
         var observations: [AccessibilityObservation] = []
         func visit(_ candidate: AnyObject, depth: Int) {
-            guard depth < 80, seen.insert(ObjectIdentifier(candidate)).inserted,
-                  let element = candidate as? any NSAccessibilityProtocol else { return }
-            let label = element.accessibilityLabel() ?? element.accessibilityTitle() ?? ""
-            if !label.isEmpty {
-                observations.append(AccessibilityObservation(label: label, frame: element.accessibilityFrame()))
+            guard depth < 80, seen.insert(ObjectIdentifier(candidate)).inserted else { return }
+            if let element = candidate as? any NSAccessibilityProtocol {
+                let children = element.accessibilityChildren() ?? []
+                let rawValue = element.accessibilityValue()
+                // Static text can expose its content as AXValue. Query each
+                // public field independently: an empty AXLabel must not hide
+                // a nonempty AXTitle or AXValue on the same native element.
+                let value = (rawValue as? String) ?? (rawValue as? NSAttributedString)?.string ?? ""
+                observations.append(AccessibilityObservation(
+                    label: element.accessibilityLabel() ?? "",
+                    title: element.accessibilityTitle() ?? "", value: value,
+                    role: element.accessibilityRole()?.rawValue ?? "",
+                    sourceClass: String(describing: type(of: candidate)),
+                    childCount: children.count, frame: element.accessibilityFrame()))
+                for child in children { visit(child as AnyObject, depth: depth + 1) }
             }
-            for child in element.accessibilityChildren() ?? [] {
-                visit(child as AnyObject, depth: depth + 1)
+            // A hosting bridge can be ignored by AX while a descendant NSView
+            // owns the actual accessible scroll document. Preserve that route
+            // without assuming every bridge exports its native subviews in AX.
+            if let view = candidate as? NSView {
+                for child in view.subviews { visit(child, depth: depth + 1) }
             }
         }
         visit(root, depth: 0)
@@ -176,12 +196,52 @@ extension LyricsSeekViewportTests {
         // A token boundary avoids line 2 accidentally matching line 24.
         let target = "Seek fixture line \(index)"
         return accessibilityObservations(fixture.host)
-            .first { $0.label.split(separator: "\n").contains(Substring(target)) || $0.label == target }
+            .first { observation in
+                !observation.frame.isEmpty && observation.textValues.contains { text in
+                    text.split(separator: "\n").contains(Substring(target)) || text == target
+                }
+            }
             .map(\.frame)
     }
 
     private func hasFollowButton(_ fixture: Fixture) -> Bool {
-        accessibilityObservations(fixture.host).contains { $0.label.contains("跟随播放") }
+        accessibilityObservations(fixture.host).contains { observation in
+            observation.textValues.contains { $0.contains("跟随播放") }
+        }
+    }
+
+    private func setupSnapshot(_ fixture: Fixture, scenario: String) -> [String: Any] {
+        let views = descendants(fixture.host)
+        return [
+            "scenario": scenario,
+            "windowFrame": NSStringFromRect(fixture.window.frame),
+            "hostBounds": NSStringFromRect(fixture.host.bounds),
+            "windowVisible": fixture.window.isVisible, "windowKey": fixture.window.isKeyWindow,
+            "applicationActive": NSApp.isActive,
+            "lyricLineCount": fixture.player.lyrics?.lines.count ?? -1,
+            "activeIndex": fixture.player.lyricsCursor.activeIndex ?? -1,
+            "progressSeconds": fixture.player.progress,
+            "nativeViews": views.prefix(200).map { view -> [String: Any] in
+                ["class": String(describing: type(of: view)), "bounds": NSStringFromRect(view.bounds),
+                 "frameInWindow": NSStringFromRect(view.convert(view.bounds, to: nil)),
+                 "visibleRect": NSStringFromRect(view.visibleRect),
+                 "hidden": view.isHiddenOrHasHiddenAncestor]
+            },
+            "nativeScrollViews": views.compactMap { $0 as? NSScrollView }.map { scroll -> [String: Any] in
+                ["class": String(describing: type(of: scroll)),
+                 "documentClass": scroll.documentView.map { String(describing: type(of: $0)) } ?? "none",
+                 "documentBounds": NSStringFromRect(scroll.documentView?.bounds ?? .zero),
+                 "documentVisibleRect": NSStringFromRect(scroll.documentVisibleRect),
+                 "clipBounds": NSStringFromRect(scroll.contentView.bounds),
+                 "contentSize": NSStringFromSize(scroll.contentSize),
+                 "viewportScreenFrame": NSStringFromRect(visibleFrame(of: scroll, in: fixture.window))]
+            },
+            "accessibility": accessibilityObservations(fixture.host).prefix(240).map { item -> [String: Any] in
+                ["class": item.sourceClass, "role": item.role, "label": item.label,
+                 "title": item.title, "value": item.value, "children": item.childCount,
+                 "screenFrame": NSStringFromRect(item.frame)]
+            },
+        ]
     }
 
     private func waitForSetup(_ fixture: Fixture, description: String,
@@ -189,11 +249,15 @@ extension LyricsSeekViewportTests {
         let deadline = ProcessInfo.processInfo.systemUptime + 4
         repeat {
             await Fixture.nativeLayoutCommit(fixture.host)
-            if condition() { return }
+            if condition() {
+                try LyricsViewportEvidence.record(setupSnapshot(fixture, scenario: "setup-ready: \(description)"))
+                return
+            }
             // Only readiness polling. No post-seek delay is admitted below:
             // otherwise the production 3s manual-follow timeout could hide it.
             try await Task.sleep(for: .milliseconds(20))
         } while ProcessInfo.processInfo.systemUptime < deadline
+        try LyricsViewportEvidence.record(setupSnapshot(fixture, scenario: "setup-failed: \(description)"))
         XCTFail("Unable to establish actual hosted viewport setup: \(description)")
         throw FixtureFailure.unready(description)
     }
