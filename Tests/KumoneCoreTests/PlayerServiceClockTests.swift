@@ -331,6 +331,86 @@ struct PlayerServiceClockTests {
         ])
     }
 
+    @Test(arguments: [false, true])
+    func thirtyQueuedSeeksPreserveFinalPCMAndEveryPublishedClock(paused: Bool) async throws {
+        let url = try fixture()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let subject = try engine(url), reference = try engine(url)
+        defer { subject.stopAll(); reference.stopAll() }
+        for _ in 0..<8 { _ = try samples(subject); _ = try samples(reference) }
+        let player = try service(subject), control = try service(reference)
+        if paused { player.pause(); control.pause() }
+        _ = try await assertSameClock(player, engine: subject)
+        _ = try await assertSameClock(control, engine: reference)
+        let before = subject.transportSnapshotForTesting(.a)
+        let controlBefore = reference.transportSnapshotForTesting(.a)
+        let revision = player.lyricsCursor.seekRevision
+        let staleRead = try #require(player.beginPlaybackTimeRead())
+        let staleSeconds = await subject.positionAsync(of: staleRead.deck)
+        let pattern = [0.25, 2.5, 0.5, 2.0, 0.75, 1.5]
+        let issued = ProcessInfo.processInfo.systemUptime
+        // No await, engine barrier, render or yield inside this burst: all
+        // thirty actual file seeks are submitted to the production queue.
+        for index in 0..<30 {
+            let target = pattern[index % pattern.count]
+            player.isScrubbing = true
+            player.seek(to: target)
+            #expect(player.progress == target)
+            #expect(player.lyricsCursor.mediaTime == target)
+            #expect(player.lyricsCursor.activeIndex == player.lyrics?.activeIndex(at: target + 0.2))
+            #expect(player.lyricsCursor.seekRevision == revision + UInt64(index) + 1)
+            player.isScrubbing = false
+        }
+        let submitted = ProcessInfo.processInfo.systemUptime
+        #expect(player.acceptPlaybackTime(staleSeconds, for: staleRead) == nil)
+        let finalTarget = try #require(pattern.last)
+        let scheduled = subject.transportSnapshotForTesting(.a) // native FIFO completion barrier
+        #expect(scheduled.generation == before.generation + 30)
+        #expect(abs(scheduled.startOffset - finalTarget) <= 2 / sampleRate)
+        #expect(abs(scheduled.position - finalTarget) <= 2 / sampleRate)
+        #expect(scheduled.paused == paused && scheduled.nodePlaying == !paused)
+        // Same PCM/DSP prehistory, but a single ordinary final-target seek.
+        control.isScrubbing = true
+        control.seek(to: finalTarget)
+        control.isScrubbing = false
+        let controlScheduled = reference.transportSnapshotForTesting(.a)
+        #expect(controlScheduled.generation == controlBefore.generation + 1)
+        _ = try await assertSameClock(player, engine: subject)
+        _ = try await assertSameClock(control, engine: reference)
+        if paused {
+            player.togglePlayPause(); control.togglePlayPause()
+            _ = try await assertSameClock(player, engine: subject)
+            _ = try await assertSameClock(control, engine: reference)
+        }
+        var maximumPCMError: Float = 0, maximumSignal: Float = 0
+        var maximumClockErrorFrames = 0.0
+        for _ in 0..<48 {
+            let actual = try samples(subject), expected = try samples(reference)
+            #expect(actual.count == expected.count)
+            let error = zip(actual, expected).map { abs($0 - $1) }.max() ?? .infinity
+            maximumPCMError = max(maximumPCMError, error)
+            maximumSignal = max(maximumSignal, actual.map(abs).max() ?? 0)
+            #expect(error < 0.000_01, "every final mixed-output sample must match; no offset search or silence omission")
+            let current = try await assertSameClock(player, engine: subject)
+            let controlTime = try await assertSameClock(control, engine: reference)
+            maximumClockErrorFrames = max(maximumClockErrorFrames, abs(current.seconds - controlTime.seconds) * sampleRate)
+            #expect(abs(current.seconds - controlTime.seconds) <= 2 / sampleRate)
+        }
+        #expect(maximumSignal > 0.1, "matching silence cannot validate rapid seeks")
+        #expect(maximumPCMError < 0.000_01)
+        #expect(player.isPlaying && player.lyricsCursor.seekRevision == revision + 30)
+        try ServiceClockEvidence.record([
+            "name": "thirtyQueuedSeeks", "pausedDuringBurst": paused, "seekCommands": 30,
+            "issuedSeconds": issued, "submittedSeconds": submitted,
+            "initialGeneration": before.generation, "finalScheduledGeneration": scheduled.generation,
+            "finalTarget": finalTarget, "finalEngineSeconds": subject.position(of: .a),
+            "finalServiceSeconds": player.progress, "finalLyricsSeconds": player.lyricsCursor.mediaTime,
+            "comparedFramesPerChannel": 48 * Int(quantum), "maximumPCMError": maximumPCMError,
+            "maximumSignal": maximumSignal, "maximumClockErrorFrames": maximumClockErrorFrames,
+            "scope": "Actual offline final mixed DSP output, including existing seek flush; thirty queued seeks versus one final-target seek, no physical DAC/onset claim",
+        ])
+    }
+
     @Test func newerReadWinsEvenWhenAnOlderReadResumesLast() async throws {
         let url = try fixture()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }

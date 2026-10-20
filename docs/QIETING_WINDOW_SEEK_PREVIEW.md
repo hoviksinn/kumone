@@ -27,7 +27,7 @@
 
 `LyricsCursor.seekRevision` 仅在显式 Seek 提交给引擎后变化，不代表时间，也不按帧发布。歌词同时观察行索引与该标记：普通播放继续 Spring，显式 Seek 取消手动跟随等待，在真实下一次布局提交无动画定位。YRC 退休旧绘制代次，立即使用已发布的 Seek 目标，再继续读取实际引擎时间。没有增加 offset、重播、额外 Seek、延长等待或修改引擎 flush。
 
-测试将实际引擎、服务 progress/live time、歌词 cursor 与原生视口分开比较。独立 XCTest 宿主使用生产 LyricsPanel、真实 NSScrollView 滚轮与可访问性行坐标，覆盖普通播放 Seek，以及标准/沉浸歌词在手动滚词后 Seek。必须先确认原生滚动实际发生，不能只生成事件就算覆盖。新增服务用例覆盖播放/暂停时同一 YRC 行前后 Seek、旧读取拒绝和低频标记；原严格 PCM、长暂停和快速切换测试保留。
+测试将实际引擎、服务 progress/live time、歌词 cursor 与原生视口分开比较。独立 XCTest 宿主使用生产 LyricsPanel、真实 NSScrollView 滚轮与可访问性行坐标，覆盖普通播放 Seek，以及标准/沉浸歌词在手动滚词后 Seek。必须先确认原生滚动实际发生，不能只生成事件就算覆盖。新增服务用例覆盖播放/暂停时同一 YRC 行前后 Seek、旧读取拒绝和低频标记；另外在播放/暂停两种状态连续提交 30 次 Seek，与相同前史的单次最终 Seek 对照，严格比较 48 个量子、每声道 49,152 帧最终混音 PCM（误差 < 1e-5）、非静音峰值和两帧内时钟精度。原严格 PCM、长暂停和快速切换测试保留。新增对照只有实际 macOS 运行通过后才算验证结果。
 
 用户描述的完整“一两秒”偏差及 progress 是否同时滞后，不能仅凭上述源码路径认定已全部复现。AutoMix 重新挂接可能阻塞主线程的假设也尚未测量。`QieTing / PlaybackInteraction` 的两个公开 `OSSignposter` 区间可供 Instruments 检查 Seek 提交与重新挂接耗时，不记录歌曲、账号、媒体位置或 PCM。
 

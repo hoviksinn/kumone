@@ -16,7 +16,7 @@ def main():
     for name, minimum in (
         ("window-test-summary.json", 18),
         ("lyrics-seek-test-summary.json", 3),
-        ("seek-clock-test-summary.json", 17),
+        ("seek-clock-test-summary.json", 18),
         ("segment-eof-test-summary.json", 1),
     ):
         summary = json.loads((root / name).read_text())
