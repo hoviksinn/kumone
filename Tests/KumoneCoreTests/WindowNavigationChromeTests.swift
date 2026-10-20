@@ -216,8 +216,14 @@ extension WindowNavigationChromeTests {
     func testSpectrumDisplayRefreshFollowsNativeVisibilityMotionAndAttachment() async throws {
         let fixture = try await Fixture()
         defer { fixture.dispose() }
-        let host = NSHostingView(rootView: PlayingIndicator(animating: true)
-            .environment(\.accessibilityReduceMotion, true))
+        // The system accessibility environment is read-only. Exercise the
+        // production native controller's input, without overriding a system
+        // preference or pretending EnvironmentValues has a writable key path.
+        let host = NSView(frame: CGRect(x: 0, y: 0, width: 100, height: 60))
+        let spectrum = SpectrumBarsView()
+        spectrum.reduceMotion = true
+        spectrum.animating = true
+        host.addSubview(spectrum)
         let probe = NSWindow(contentRect: CGRect(x: 80, y: 80, width: 100, height: 60),
                              styleMask: [.titled], backing: .buffered, defer: false)
         probe.isReleasedWhenClosed = false
@@ -229,15 +235,25 @@ extension WindowNavigationChromeTests {
         }
         probe.orderFront(nil)
         host.layoutSubtreeIfNeeded()
-        try await wait(fixture, "spectrum view with native Reduce Motion") {
-            self.descendants(host).compactMap { $0 as? SpectrumBarsView }.count == 1
+        try await wait(fixture, "native spectrum with reduced-motion input") {
+            spectrum.window === probe
         }
-        let spectrum = try require(descendants(host).compactMap { $0 as? SpectrumBarsView }.first)
+        expect(descendants(host).compactMap { $0 as? SpectrumBarsView }.count == 1)
         expect(spectrum.reduceMotion)
         expect(!spectrum.isDisplayRefreshActive)
 
-        host.rootView = PlayingIndicator(animating: true).environment(\.accessibilityReduceMotion, false)
+        spectrum.reduceMotion = false
         host.layoutSubtreeIfNeeded()
+        try NavigationValidationEvidence.record([
+            "scenario": "spectrum-native-probe-before-refresh",
+            "probeVisible": probe.isVisible,
+            "probeOcclusionState": Int(probe.occlusionState.rawValue),
+            "probeMiniaturized": probe.isMiniaturized,
+            "applicationActive": NSApp.isActive,
+            "nativeViewAttached": spectrum.window === probe,
+            "nativeViewHidden": spectrum.isHiddenOrHasHiddenAncestor,
+            "nativeViewFrame": NSStringFromRect(spectrum.frame),
+        ])
         try await wait(fixture, "visible spectrum display link") { spectrum.isDisplayRefreshActive }
         expect(!spectrum.reduceMotion)
         NotificationCenter.default.post(name: NSWindow.didChangeScreenNotification, object: probe)
@@ -264,7 +280,7 @@ extension WindowNavigationChromeTests {
         try NavigationValidationEvidence.record([
             "scenario": "spectrum-native-refresh-lifecycle",
             "configuredMaximum": maximum,
-            "scope": "Native link state and current screen configuration; no physical 60/120 Hz throughput claim",
+            "scope": "Production native controller with injected motion input; native link lifecycle and screen configuration, no system-setting mutation or physical 60/120 Hz throughput claim",
         ])
     }
 
@@ -1196,6 +1212,22 @@ extension WindowNavigationChromeTests {
 
 @MainActor
 extension WindowNavigationChromeTests {
+    private func sidebarNativeAppearance(_ view: NSView?) -> [String: Any] {
+        guard let view else { return ["attached": false] }
+        var ancestors: [[String: Any]] = []
+        var current: NSView? = view
+        while let item = current {
+            ancestors.append([
+                "class": String(describing: type(of: item)),
+                "identifier": item.identifier?.rawValue ?? "",
+                "allowsVibrancy": item.allowsVibrancy,
+                "appearance": item.effectiveAppearance.name.rawValue,
+            ])
+            current = item.superview
+        }
+        return ["attached": view.window != nil, "ancestors": ancestors]
+    }
+
     func testNativeSidebarSurfaceIsLocalizedAndLeavesTheRealListScrollable() async throws {
         let fixture = try await Fixture(columnVisibility: .all)
         defer { fixture.dispose() }
@@ -1237,6 +1269,16 @@ extension WindowNavigationChromeTests {
         evidence["preferredScrollerStyle"] = Int(NSScroller.preferredScrollerStyle.rawValue)
         evidence["sidebarVerticalAxis"] = scroll.hasVerticalScroller
         evidence["sidebarHorizontalAxis"] = scroll.hasHorizontalScroller
+        evidence["sidebarAppearance"] = [
+            "scroll": sidebarNativeAppearance(scroll),
+            "document": sidebarNativeAppearance(sidebarDocument),
+            "verticalScroller": sidebarNativeAppearance(scroll.verticalScroller),
+            "scrollIsDescendantOfMaterial": scroll.isDescendant(of: surface),
+            "drawsBackground": scroll.drawsBackground,
+            "clipDrawsBackground": scroll.contentView.drawsBackground,
+            "scrollerKnobStyle": Int(scroll.scrollerKnobStyle.rawValue),
+            "systemReduceTransparency": NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency,
+        ]
         evidence["nativeMaterialScope"] = "NSVisualEffectView configuration and real List attachment only; no pixel transparency, Reduce Transparency appearance, or physical trackpad fading claim"
         evidence["nativeEffectViews"] = nativeEffects.map { effect -> [String: Any] in
             ["material": Int(effect.material.rawValue), "blendingMode": Int(effect.blendingMode.rawValue),
