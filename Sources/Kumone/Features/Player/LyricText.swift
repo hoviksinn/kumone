@@ -72,7 +72,7 @@ struct LyricPlaybackText: View {
     var body: some View {
         if isActive, verbatim, let words = line.words, !words.isEmpty {
             DisplayLinkedLyricText(line: line, words: words, size: size, weight: weight,
-                                  color: color, clock: player.clock)
+                                  color: color, lyricsCursor: player.lyricsCursor)
         } else {
             LyricText(line: line, size: size, weight: weight, color: color)
         }
@@ -87,9 +87,9 @@ private struct DisplayLinkedLyricText: View {
     let color: Color
 
     @EnvironmentObject private var player: PlayerService
-    // This small observer also updates the highlight after seeking while
-    // paused, when the display link is intentionally asleep.
-    @ObservedObject var clock: PlaybackClock
+    // Explicit seeks also repaint while playing within the same lyric row.
+    // Ordinary 5 Hz progress changes do not invalidate this small surface.
+    @ObservedObject var lyricsCursor: LyricsCursor
     @State private var displayedAlphas: [Double]?
     @State private var refreshTask: Task<Void, Never>?
     @State private var refreshGeneration = 0
@@ -125,13 +125,14 @@ private struct DisplayLinkedLyricText: View {
             cancelRefresh()
             requestHighlightRefresh()
         }
-        .onChange(of: clock.progress) { _, _ in
-            if !player.isPlaying {
-                // A seek can arrive while a previous paused read is pending.
-                // Only the query queued after that seek may paint the result.
-                cancelRefresh()
-                requestHighlightRefresh()
-            }
+        .onChange(of: lyricsCursor.seekRevision) { _, _ in
+            // A prior engine read may still be suspended. Retire its drawing
+            // generation and immediately use the actual explicit seek target;
+            // the next serialized engine read then resumes normal sampling.
+            cancelRefresh()
+            displayedAlphas = LyricHighlightTiming.alphas(for: line, words: words,
+                                                          at: lyricsCursor.mediaTime)
+            requestHighlightRefresh()
         }
     }
 

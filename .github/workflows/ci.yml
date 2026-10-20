@@ -52,6 +52,23 @@ jobs:
           python3 Scripts/verify-test-log.py .build/window-regression.log --framework xctest --minimum-tests 13 --report .build/window-test-summary.json
           test -s .build/window-navigation-validation.json
 
+      # This real lyric viewport owns NSApplication; keep its event loop out
+      # of both the window fixture process and the parallel Swift Testing run.
+      - name: Hosted lyrics seek regression
+        shell: bash
+        run: |
+          swift test --skip-build --triple arm64-apple-macosx26.0 --disable-swift-testing --filter LyricsSeekViewportTests 2>&1 | tee .build/lyrics-seek-regression.log
+          python3 Scripts/verify-test-log.py .build/lyrics-seek-regression.log --framework xctest --minimum-tests 3 --report .build/lyrics-seek-test-summary.json
+          test -s .build/lyrics-seek-viewport-validation.json
+
+      - name: Media clock and strict PCM regression
+        shell: bash
+        run: |
+          swift test --skip-build --triple arm64-apple-macosx26.0 --disable-xctest --filter 'PlayerServiceClockTests|PlaybackTransportContinuityTests' 2>&1 | tee .build/seek-clock-regression.log
+          python3 Scripts/verify-test-log.py .build/seek-clock-regression.log --minimum-tests 17 --report .build/seek-clock-test-summary.json
+          test -s .build/service-clock-validation.json
+          test -s .build/transport-validation.json
+
       # Fail fast on the recently added native EOF/paused-head probe before
       # repeating the complete audio suite. Test below still runs every case.
       - name: Segment EOF regression
@@ -65,7 +82,7 @@ jobs:
         shell: bash
         run: |
           swift test --skip-build --triple arm64-apple-macosx26.0 --disable-xctest 2>&1 | tee .build/test.log
-          python3 Scripts/verify-test-log.py .build/test.log --minimum-tests 972 --report .build/test-summary.json
+          python3 Scripts/verify-test-log.py .build/test.log --minimum-tests 994 --report .build/test-summary.json
           test -s .build/transport-validation.json
           test -s .build/media-clock-diagnostic.json
           test -s .build/service-clock-validation.json
@@ -103,6 +120,8 @@ jobs:
             .build/QieTing-Test-macOS26-arm64.zip
             .build/app-verification.json
             .build/window-test-summary.json
+            .build/lyrics-seek-test-summary.json
+            .build/seek-clock-test-summary.json
             .build/segment-eof-test-summary.json
             .build/test-summary.json
             .build/transport-validation.json
@@ -110,6 +129,7 @@ jobs:
             .build/service-clock-validation.json
             .build/transition-segment-validation.json
             .build/window-navigation-validation.json
+            .build/lyrics-seek-viewport-validation.json
             .build/playback-boundary-diagnostic.json
           if-no-files-found: error
           retention-days: 14
@@ -123,9 +143,13 @@ jobs:
           path: |
             .build/app-verification.json
             .build/window-test-summary.json
+            .build/lyrics-seek-test-summary.json
+            .build/seek-clock-test-summary.json
             .build/segment-eof-test-summary.json
             .build/test-summary.json
             .build/window-regression.log
+            .build/lyrics-seek-regression.log
+            .build/seek-clock-regression.log
             .build/segment-eof-regression.log
             .build/test.log
             .build/transport-validation.json
@@ -133,6 +157,7 @@ jobs:
             .build/service-clock-validation.json
             .build/transition-segment-validation.json
             .build/window-navigation-validation.json
+            .build/lyrics-seek-viewport-validation.json
             .build/playback-boundary-diagnostic.json
           if-no-files-found: warn
           retention-days: 14

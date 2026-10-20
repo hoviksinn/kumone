@@ -279,6 +279,58 @@ struct PlayerServiceClockTests {
         #expect(current.timelineRevision >= 3)
     }
 
+    @Test(arguments: [false, true])
+    func explicitSeekRevisionRepaintsSameYrcLineWithoutChangingTheClock(paused: Bool) async throws {
+        let url = try fixture()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let engine = try engine(url)
+        defer { engine.stopAll() }
+        let track = try JSONDecoder().decode(Track.self, from: Data(
+            #"{"id":12345,"name":"Same-line seek fixture","dt":4000}"#.utf8))
+        let words = [LyricWord(text: "且听", start: 0, duration: 4)]
+        let line = LyricLine(id: 0, time: 0, text: "且听", words: words)
+        let player = PlayerService(playbackEngineForTesting: engine, track: track,
+                                   lyrics: ParsedLyrics(lines: [line]))
+        if paused { player.pause() }
+        _ = try await assertSameClock(player, engine: engine)
+        let before = player.lyricsCursor.seekRevision
+        let staleRead = try #require(player.beginPlaybackTimeRead())
+        let staleSeconds = await engine.positionAsync(of: staleRead.deck)
+        let targets = [0.5, 2.5, 0.25]
+        var previousAlphas: [Double]?
+        for (index, target) in targets.enumerated() {
+            player.isScrubbing = true
+            player.seek(to: target)
+            // This is the synchronous publication boundary consumed by the
+            // lyric presentation, before a later engine result is accepted.
+            #expect(player.progress == target)
+            #expect(player.lyricsCursor.mediaTime == target)
+            #expect(player.lyricsCursor.activeIndex == 0)
+            #expect(player.lyricsCursor.seekRevision == before + UInt64(index) + 1,
+                    "same-line seek still needs a low-frequency presentation discontinuity")
+            player.isScrubbing = false
+            #expect(player.acceptPlaybackTime(staleSeconds, for: staleRead) == nil,
+                    "the presentation signal must not weaken the existing stale-read fence")
+            let current = try await assertSameClock(player, engine: engine)
+            #expect(abs(current.seconds - target) <= 2 / sampleRate)
+            #expect(player.lyricsCursor.seekRevision == before + UInt64(index) + 1,
+                    "ordinary accepted engine reads do not publish extra discontinuities")
+            let alphas = LyricHighlightTiming.alphas(for: line, words: words,
+                                                   at: player.lyricsCursor.mediaTime)
+            if let previousAlphas { #expect(alphas != previousAlphas) }
+            previousAlphas = alphas
+        }
+        #expect(player.isPlaying == !paused)
+        try ServiceClockEvidence.record([
+            "name": "sameLineSeekPresentationBoundary", "paused": paused,
+            "targets": targets, "initialSeekRevision": before,
+            "finalSeekRevision": player.lyricsCursor.seekRevision,
+            "finalEngineSeconds": engine.position(of: .a), "finalServiceSeconds": player.progress,
+            "finalLyricsSeconds": player.lyricsCursor.mediaTime,
+            "scope": "Real engine/service and same-line discontinuity contract; alpha derivation only, not hosted glyph pixels or a delayed private render-task capture",
+        ])
+    }
+
     @Test func newerReadWinsEvenWhenAnOlderReadResumesLast() async throws {
         let url = try fixture()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }

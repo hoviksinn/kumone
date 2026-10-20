@@ -11,6 +11,11 @@ enum LyricsPanelPresentation: Equatable {
     var horizontalPadding: CGFloat { self == .immersive ? 28 : LyricsVisualParameters.horizontalPadding }
 }
 
+private struct LyricsFocusState: Equatable {
+    let index: Int?
+    let seekRevision: UInt64
+}
+
 struct LyricsPanel: View {
     var presentation: LyricsPanelPresentation = .standard
     @EnvironmentObject private var player: PlayerService
@@ -54,10 +59,7 @@ private struct LyricsPanelContent: View {
                                     line: line,
                                     activeIndex: activeIndex,
                                     presentation: presentation,
-                                    onSeek: {
-                                        player.seek(to: line.time)
-                                        resumeFollowing(proxy: proxy)
-                                    }
+                                    onSeek: { player.seek(to: line.time) }
                                 )
                                 .id(line.id)
                             }
@@ -80,9 +82,16 @@ private struct LyricsPanelContent: View {
                             break // Programmatic .animating is not user input.
                         }
                     }
-                    .onChange(of: lyricsCursor.activeIndex) { _, index in
-                        activeIndex = index
-                        guard !isUserScrolling, let index else { return }
+                    .onChange(of: LyricsFocusState(index: lyricsCursor.activeIndex,
+                                                  seekRevision: lyricsCursor.seekRevision)) { previous, current in
+                        // A single observation keeps an explicit seek from
+                        // racing the ordinary next-line spring in this commit.
+                        if previous.seekRevision != current.seekRevision {
+                            adoptCursor(proxy: proxy)
+                            return
+                        }
+                        activeIndex = current.index
+                        guard !isUserScrolling, let index = current.index else { return }
                         scroll(to: index, proxy: proxy, animated: true)
                     }
                     .onChange(of: player.currentTrack?.id) { _, _ in
@@ -132,10 +141,12 @@ private struct LyricsPanelContent: View {
         isUserScrolling = false
         activeIndex = lyricsCursor.activeIndex
         let trackID = player.currentTrack?.id
+        let seekRevision = lyricsCursor.seekRevision
         // ScrollViewReader needs a laid-out document. Re-read the cursor in
         // the deferred turn, rather than applying a stale pre-seek position.
         DispatchQueue.main.async {
             guard player.currentTrack?.id == trackID,
+                  lyricsCursor.seekRevision == seekRevision,
                   let index = lyricsCursor.activeIndex else { return }
             activeIndex = index
             scroll(to: index, proxy: proxy, animated: false)

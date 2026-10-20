@@ -106,6 +106,11 @@ final class PlaybackClock: ObservableObject {
 @MainActor
 final class LyricsCursor: ObservableObject {
     @Published var activeIndex: Int?
+    /// Explicit transport discontinuities reset presentation state even when
+    /// the active line stays the same. This never advances the media clock.
+    @Published private(set) var seekRevision: UInt64 = 0
+
+    func markExplicitSeek() { seekRevision &+= 1 }
     /// The media timestamp used for line selection, before the established
     /// 200 ms line-focus lead. Not published at display cadence.
     private(set) var mediaTime: TimeInterval = 0
@@ -720,6 +725,9 @@ final class PlayerService: ObservableObject {
         progress = seconds
         updateLyricsCursor(at: seconds)
         engine.seek(deck: activeDeck, to: seconds)
+        // Reads initiated by the lyric renderer must queue after this seek;
+        // presentation can immediately paint the already-published target.
+        lyricsCursor.markExplicitSeek()
         if observesSystemPlayback {
             NowPlayingManager.shared.updateElapsed(seconds, rate: isPlaying ? 1 : 0)
         }
