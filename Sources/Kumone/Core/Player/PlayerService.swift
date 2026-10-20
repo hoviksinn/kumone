@@ -3,6 +3,7 @@
 import Combine
 import AVFoundation
 import Foundation
+import os
 
 enum RepeatMode: String, CaseIterable {
     case off, all, one
@@ -143,6 +144,7 @@ struct PlaybackTimeRead {
 @MainActor
 final class PlayerService: ObservableObject {
     static let shared = PlayerService()
+    private static let seekSignposter = OSSignposter(subsystem: "QieTing", category: "PlaybackInteraction")
 
     // MARK: - Observable state
 
@@ -702,6 +704,10 @@ final class PlayerService: ObservableObject {
     /// before subsequent clock reads. `completion` acknowledges submission,
     /// rather than claiming that an asynchronous render has already occurred.
     func seek(to seconds: TimeInterval, completion: (@MainActor () -> Void)? = nil) {
+        // Optional Instruments evidence for a main-thread submission/re-arm
+        // stall. No song, account, requested position or PCM enters the trace.
+        let interval = Self.seekSignposter.beginInterval("Seek submission")
+        defer { Self.seekSignposter.endInterval("Seek submission", interval) }
         // An armed/overlapping hand-over is anchored to the old timeline —
         // cancel it, seek, then re-arm from the prefetched file.
         //
@@ -733,6 +739,8 @@ final class PlayerService: ObservableObject {
         }
         requestClockRefresh()
         if wasArmed {
+            let rearm = Self.seekSignposter.beginInterval("Seek transition rearm")
+            defer { Self.seekSignposter.endInterval("Seek transition rearm", rearm) }
             armTransitionIfReady()
             reconcileParkedPrerender()
         }
