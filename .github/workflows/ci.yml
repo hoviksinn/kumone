@@ -52,6 +52,15 @@ jobs:
           python3 Scripts/verify-test-log.py .build/window-regression.log --framework xctest --minimum-tests 10 --report .build/window-test-summary.json
           test -s .build/window-navigation-validation.json
 
+      # Fail fast on the recently added native EOF/paused-head probe before
+      # repeating the complete audio suite. Test below still runs every case.
+      - name: Segment EOF regression
+        shell: bash
+        run: |
+          swift test --skip-build --triple arm64-apple-macosx26.0 --disable-xctest --filter anObservedOutgoingEOFDuringPausedSegmentHeadPreservesTheSegment 2>&1 | tee .build/segment-eof-regression.log
+          python3 Scripts/verify-test-log.py .build/segment-eof-regression.log --minimum-tests 1 --report .build/segment-eof-test-summary.json
+          test -s .build/transition-segment-validation.json
+
       - name: Test
         shell: bash
         run: |
@@ -94,6 +103,7 @@ jobs:
             .build/QieTing-Test-macOS26-arm64.zip
             .build/app-verification.json
             .build/window-test-summary.json
+            .build/segment-eof-test-summary.json
             .build/test-summary.json
             .build/transport-validation.json
             .build/media-clock-diagnostic.json
@@ -113,8 +123,10 @@ jobs:
           path: |
             .build/app-verification.json
             .build/window-test-summary.json
+            .build/segment-eof-test-summary.json
             .build/test-summary.json
             .build/window-regression.log
+            .build/segment-eof-regression.log
             .build/test.log
             .build/transport-validation.json
             .build/media-clock-diagnostic.json
