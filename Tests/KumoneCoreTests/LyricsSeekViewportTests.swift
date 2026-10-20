@@ -76,6 +76,7 @@ extension LyricsSeekViewportTests {
         let window: NSWindow
         let host: NSHostingView<HostedLyricsRoot>
         let temporaryDirectory: URL
+        var lastAccessibilityQuery: [String: Any] = [:]
 
         init(presentation: LyricsPanelPresentation, paused: Bool) async throws {
             if !Self.applicationPrepared {
@@ -157,26 +158,54 @@ extension LyricsSeekViewportTests {
         [root] + root.subviews.flatMap(descendants)
     }
 
-    private func accessibilityObservations(_ root: AnyObject) -> [AccessibilityObservation] {
+    private func accessibilityObservations(_ fixture: Fixture) -> [AccessibilityObservation] {
         var seen: Set<ObjectIdentifier> = []
         var observations: [AccessibilityObservation] = []
+        var rawElements: [[String: Any]] = []
+        func protocols(_ candidate: AnyObject) -> [String: Bool] {
+            ["full": candidate is any NSAccessibilityProtocol,
+             "base": candidate is any NSAccessibilityElementProtocol,
+             "staticText": candidate is any NSAccessibilityStaticText,
+             "button": candidate is any NSAccessibilityButton]
+        }
         func visit(_ candidate: AnyObject, depth: Int) {
             guard depth < 80, seen.insert(ObjectIdentifier(candidate)).inserted else { return }
+            rawElements.append(["class": String(describing: type(of: candidate)),
+                                "depth": depth, "protocols": protocols(candidate)])
+            var label = "", title = "", value = "", role = ""
+            var frame = NSRect.zero
+            var children: [Any] = []
             if let element = candidate as? any NSAccessibilityProtocol {
-                let children = element.accessibilityChildren() ?? []
+                children = element.accessibilityChildren() ?? []
                 let rawValue = element.accessibilityValue()
                 // Static text can expose its content as AXValue. Query each
                 // public field independently: an empty AXLabel must not hide
                 // a nonempty AXTitle or AXValue on the same native element.
-                let value = (rawValue as? String) ?? (rawValue as? NSAttributedString)?.string ?? ""
-                observations.append(AccessibilityObservation(
-                    label: element.accessibilityLabel() ?? "",
-                    title: element.accessibilityTitle() ?? "", value: value,
-                    role: element.accessibilityRole()?.rawValue ?? "",
-                    sourceClass: String(describing: type(of: candidate)),
-                    childCount: children.count, frame: element.accessibilityFrame()))
-                for child in children { visit(child as AnyObject, depth: depth + 1) }
+                value = (rawValue as? String) ?? (rawValue as? NSAttributedString)?.string ?? ""
+                label = element.accessibilityLabel() ?? ""
+                title = element.accessibilityTitle() ?? ""
+                role = element.accessibilityRole()?.rawValue ?? ""
+                frame = element.accessibilityFrame()
+            } else {
+                // Role-based elements need not adopt the much larger full
+                // NSAccessibilityProtocol. Use only their public interfaces.
+                if let element = candidate as? any NSAccessibilityElementProtocol {
+                    frame = element.accessibilityFrame()
+                }
+                if let text = candidate as? any NSAccessibilityStaticText {
+                    value = text.accessibilityValue() ?? ""
+                    role = NSAccessibility.Role.staticText.rawValue
+                }
+                if let button = candidate as? any NSAccessibilityButton {
+                    label = button.accessibilityLabel() ?? ""
+                    role = NSAccessibility.Role.button.rawValue
+                }
             }
+            observations.append(AccessibilityObservation(
+                label: label, title: title, value: value, role: role,
+                sourceClass: String(describing: type(of: candidate)),
+                childCount: children.count, frame: frame))
+            for child in children { visit(child as AnyObject, depth: depth + 1) }
             // A hosting bridge can be ignored by AX while a descendant NSView
             // owns the actual accessible scroll document. Preserve that route
             // without assuming every bridge exports its native subviews in AX.
@@ -184,7 +213,44 @@ extension LyricsSeekViewportTests {
                 for child in view.subviews { visit(child, depth: depth + 1) }
             }
         }
-        visit(root, depth: 0)
+        let host = fixture.host
+        let ordered = host.accessibilityChildrenInNavigationOrder() ?? []
+        let unignored = NSAccessibility.unignoredChildren(from: [host])
+        var hitResults: [(point: NSPoint, element: AnyObject?)] = []
+        var points: Set<String> = []
+        // Query actual native leaf centers. Their geometry only supplies AX
+        // hit-test points; identity still requires the returned lyric text.
+        // No row index, guessed row height or synthetic label is substituted.
+        for view in descendants(host) where view.subviews.isEmpty && !view.isHiddenOrHasHiddenAncestor {
+            let rect = view.convert(view.bounds, to: host).intersection(host.bounds)
+            guard !rect.isEmpty else { continue }
+            let point = fixture.window.convertPoint(toScreen: host.convert(
+                NSPoint(x: rect.midX, y: rect.midY), to: nil))
+            guard points.insert(NSStringFromPoint(point)).inserted else { continue }
+            let element = host.accessibilityHitTest(point).map { $0 as AnyObject }
+            hitResults.append((point: point, element: element))
+        }
+        visit(host, depth: 0)
+        for element in ordered { visit(element as AnyObject, depth: 0) }
+        for element in unignored { visit(element as AnyObject, depth: 0) }
+        for result in hitResults {
+            if let element = result.element { visit(element, depth: 0) }
+        }
+        fixture.lastAccessibilityQuery = [
+            "navigationOrderCount": ordered.count, "unignoredCount": unignored.count,
+            "navigationOrder": ordered.map { element -> [String: Any] in
+                ["class": String(describing: type(of: element)), "protocols": protocols(element as AnyObject)]
+            },
+            "unignored": unignored.map { element -> [String: Any] in
+                ["class": String(describing: type(of: element)), "protocols": protocols(element as AnyObject)]
+            },
+            "hitTests": hitResults.map { result -> [String: Any] in
+                ["screenPoint": NSStringFromPoint(result.point),
+                 "class": result.element.map { String(describing: type(of: $0)) } ?? "none",
+                 "protocols": result.element.map(protocols) ?? [:]]
+            },
+            "rawElements": Array(rawElements.prefix(240)),
+        ]
         return observations
     }
 
@@ -195,7 +261,7 @@ extension LyricsSeekViewportTests {
     private func lineFrame(_ index: Int, in fixture: Fixture) -> NSRect? {
         // A token boundary avoids line 2 accidentally matching line 24.
         let target = "Seek fixture line \(index)"
-        return accessibilityObservations(fixture.host)
+        return accessibilityObservations(fixture)
             .first { observation in
                 !observation.frame.isEmpty && observation.textValues.contains { text in
                     text.split(separator: "\n").contains(Substring(target)) || text == target
@@ -205,13 +271,14 @@ extension LyricsSeekViewportTests {
     }
 
     private func hasFollowButton(_ fixture: Fixture) -> Bool {
-        accessibilityObservations(fixture.host).contains { observation in
+        accessibilityObservations(fixture).contains { observation in
             observation.textValues.contains { $0.contains("跟随播放") }
         }
     }
 
     private func setupSnapshot(_ fixture: Fixture, scenario: String) -> [String: Any] {
         let views = descendants(fixture.host)
+        let accessibility = accessibilityObservations(fixture)
         return [
             "scenario": scenario,
             "windowFrame": NSStringFromRect(fixture.window.frame),
@@ -236,7 +303,8 @@ extension LyricsSeekViewportTests {
                  "contentSize": NSStringFromSize(scroll.contentSize),
                  "viewportScreenFrame": NSStringFromRect(visibleFrame(of: scroll, in: fixture.window))]
             },
-            "accessibility": accessibilityObservations(fixture.host).prefix(240).map { item -> [String: Any] in
+            "accessibilityQuery": fixture.lastAccessibilityQuery,
+            "accessibility": accessibility.prefix(240).map { item -> [String: Any] in
                 ["class": item.sourceClass, "role": item.role, "label": item.label,
                  "title": item.title, "value": item.value, "children": item.childCount,
                  "screenFrame": NSStringFromRect(item.frame)]
