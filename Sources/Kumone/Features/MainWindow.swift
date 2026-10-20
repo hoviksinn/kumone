@@ -251,14 +251,15 @@ struct MainWindow: View {
     }
 
     private var middleHeader: some View {
-        HStack(spacing: 10) {
-            Button {
-                columnVisibility = sidebarCollapsed ? .all : .detailOnly
-            } label: { Image(systemName: "sidebar.left") }
-                .buttonStyle(.plain).frame(width: 28, height: 28).focused($topControlsFocused).help("显示或隐藏侧边栏")
-            Button { if !path.isEmpty { path.removeLast() } } label: { Image(systemName: "chevron.left") }
-                .buttonStyle(.plain).frame(width: 28, height: 28).focused($topControlsFocused)
-                .disabled(path.isEmpty).keyboardShortcut("[", modifiers: .command).help("返回（⌘[）")
+        HStack(spacing: 8) {
+            sidebarControl
+            // Keep the trailing search surface stable when the native back
+            // control appears. At the root there is no Button, shortcut or
+            // accessibility element occupying this transparent layout slot.
+            ZStack {
+                if !path.isEmpty { backControl }
+            }
+            .frame(width: 36, height: 36)
             Spacer(minLength: 8)
             SearchFieldView(isActive: !player.showNowPlaying, loadDefaultKeyword: testing == nil,
                             onFocusChanged: { searchFocused = $0 }) { query in
@@ -270,6 +271,42 @@ struct MainWindow: View {
         .allowsHitTesting(!sidebarCollapsed || topChromeVisible)
         .accessibilityHidden(sidebarCollapsed && !topChromeVisible)
         .onHover { topChromeHovering = $0; revealChrome() }
+    }
+
+    private var sidebarControl: some View {
+        Button {
+            columnVisibility = sidebarCollapsed ? .all : .detailOnly
+        } label: {
+            Label("侧边栏", systemImage: "sidebar.left")
+                .labelStyle(.iconOnly)
+        }
+        .buttonStyle(.glass)
+        .buttonBorderShape(.circle)
+        .controlSize(.regular)
+        .frame(width: 36, height: 36)
+        .focused($topControlsFocused)
+        .keyboardShortcut("s", modifiers: [.command, .option])
+        .help(sidebarCollapsed ? "显示侧边栏（⌥⌘S）" : "隐藏侧边栏（⌥⌘S）")
+        .accessibilityValue(sidebarCollapsed ? "已隐藏" : "已显示")
+        .background(WindowChromeProbe(identifier: "QieTing.Navigation.Sidebar"))
+    }
+
+    private var backControl: some View {
+        Button {
+            // A queued native event may arrive after the last push is popped.
+            if !path.isEmpty { path.removeLast() }
+        } label: {
+            Label("返回", systemImage: "chevron.left")
+                .labelStyle(.iconOnly)
+        }
+        .buttonStyle(.glass)
+        .buttonBorderShape(.circle)
+        .controlSize(.regular)
+        .frame(width: 36, height: 36)
+        .focused($topControlsFocused)
+        .keyboardShortcut("[", modifiers: .command)
+        .help("返回（⌘[）")
+        .background(WindowChromeProbe(identifier: "QieTing.Navigation.Back"))
     }
 
     @ViewBuilder private func panelRegion(reveal: CGFloat, outside: Bool) -> some View {
@@ -539,8 +576,9 @@ struct SearchFieldView: View {
                 .foregroundStyle(.secondary)
             TextField(placeholder, text: $text)
                 .textFieldStyle(.plain)
-                .font(.system(size: 12.5))
+                .font(.system(size: 13))
                 .focused($focused)
+                .accessibilityLabel("全局搜索")
                 .frame(width: 168)
                 .onSubmit {
                     let query = text.trimmingCharacters(in: .whitespaces)
@@ -550,10 +588,15 @@ struct SearchFieldView: View {
                     focused = false
                 }
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 5)
-        .background(.primary.opacity(0.05), in: Capsule())
-        .overlay(Capsule().strokeBorder(.primary.opacity(focused ? 0.18 : 0.08), lineWidth: 1))
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
+        // A system Liquid Glass surface in the stable middle column. Keep
+        // the native TextField and global-search submit semantics above.
+        .glassEffect(.regular.interactive(), in: Capsule())
+        .overlay {
+            Capsule().strokeBorder(Color.accentColor.opacity(focused ? 0.45 : 0), lineWidth: 1)
+        }
+        .background(WindowChromeProbe(identifier: "QieTing.Search"))
         // Keep the capsule off the window's rounded top-right corner (#88).
         .padding(.trailing, 8)
         .animation(AppAnimation.quick, value: focused)

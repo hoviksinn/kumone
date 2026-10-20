@@ -991,3 +991,150 @@ extension WindowNavigationChromeTests {
     }
 
 }
+
+@MainActor
+extension WindowNavigationChromeTests {
+    private func clickNavigationControl(_ name: String, in fixture: Fixture,
+                                        eventNumber: Int) throws {
+        let control = try require(markers(name, in: fixture.host).first)
+        try require(!control.isHiddenOrHasHiddenAncestor && !control.visibleRect.isEmpty)
+        let point = control.convert(NSPoint(x: control.bounds.midX, y: control.bounds.midY), to: nil)
+        let down = try require(NSEvent.mouseEvent(
+            with: .leftMouseDown, location: point, modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: fixture.window.windowNumber, context: nil,
+            eventNumber: eventNumber, clickCount: 1, pressure: 1))
+        let up = try require(NSEvent.mouseEvent(
+            with: .leftMouseUp, location: point, modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime + 0.01,
+            windowNumber: fixture.window.windowNumber, context: nil,
+            eventNumber: eventNumber + 1, clickCount: 1, pressure: 0))
+        // Match the existing real PlayerBar click: AppKit may synchronously
+        // track until mouse-up. Never send a consumed up event twice.
+        NSApp.postEvent(up, atStart: true)
+        NSApp.sendEvent(down)
+        if let queued = NSApp.nextEvent(matching: .leftMouseUp, until: .distantPast,
+                                        inMode: .default, dequeue: false),
+           queued.windowNumber == up.windowNumber, queued.eventNumber == up.eventNumber,
+           let pending = NSApp.nextEvent(matching: .leftMouseUp, until: .distantPast,
+                                         inMode: .default, dequeue: true) {
+            NSApp.sendEvent(pending)
+        }
+    }
+
+    func testNativeBackClicksPopRealDestinationsAndRemoveTheRootControl() async throws {
+        let fixture = try await Fixture(columnVisibility: .all)
+        defer { fixture.dispose() }
+        let bar = try await check(fixture, destination: nil, scenario: "native-navigation-root")
+        let header = try require(markers("QieTing.MainHeader", in: fixture.host).first)
+        let search = try require(markers("QieTing.Search", in: fixture.host).first)
+        let searchFrame = search.convert(search.bounds, to: fixture.host)
+        let originalFrame = fixture.window.frame
+        expect(markers("QieTing.Navigation.Back", in: fixture.host).isEmpty,
+               "At the root no disabled Back button should be instantiated")
+        expect(markers("QieTing.Navigation.Sidebar", in: fixture.host).count == 1)
+
+        fixture.state.path = [.artist(42), .album(7)]
+        _ = try await check(fixture, destination: .album(7), originalBar: bar,
+                            scenario: "native-navigation-nested-album")
+        expect(markers("QieTing.Navigation.Back", in: fixture.host).count == 1)
+        try clickNavigationControl("QieTing.Navigation.Back", in: fixture, eventNumber: 901)
+        try await wait(fixture, "native Back pops album") { fixture.state.path == [.artist(42)] }
+        _ = try await check(fixture, destination: .artist(42), originalBar: bar,
+                            scenario: "native-navigation-back-artist")
+        try clickNavigationControl("QieTing.Navigation.Back", in: fixture, eventNumber: 903)
+        try await wait(fixture, "native Back removes root control") {
+            fixture.state.path.isEmpty
+                && self.markers("QieTing.Navigation.Back", in: fixture.host).isEmpty
+        }
+        _ = try await check(fixture, destination: nil, originalBar: bar,
+                            scenario: "native-navigation-back-home")
+        expect(markers("QieTing.MainHeader", in: fixture.host).first === header)
+        expect(markers("QieTing.Search", in: fixture.host).first === search)
+        expect(search.convert(search.bounds, to: fixture.host) == searchFrame,
+               "The reserved Back slot must not shift global search")
+        expect(fixture.window.frame == originalFrame)
+    }
+
+    func testNativeSidebarClicksPreserveNavigationSearchAndTheUniquePlayer() async throws {
+        let fixture = try await Fixture(columnVisibility: .all)
+        defer { fixture.dispose() }
+        let bar = try await check(fixture, destination: nil, scenario: "native-sidebar-before")
+        fixture.state.path = [.artist(42), .album(7)]
+        _ = try await check(fixture, destination: .album(7), originalBar: bar,
+                            scenario: "native-sidebar-nested-album")
+        let search = try require(descendants(fixture.host).compactMap { $0 as? NSTextField }.first { $0.isEditable })
+        let originalFrame = fixture.window.frame
+        for (index, expected) in [NavigationSplitViewVisibility.detailOnly, .all].enumerated() {
+            try clickNavigationControl("QieTing.Navigation.Sidebar", in: fixture,
+                                       eventNumber: 911 + index * 2)
+            try await wait(fixture, "native sidebar visibility action") {
+                fixture.state.columnVisibility == expected
+            }
+            _ = try await check(fixture, destination: .album(7), originalBar: bar,
+                                scenario: "native-sidebar-click-\(index)")
+            expect(fixture.state.path == [.artist(42), .album(7)])
+            let fields = descendants(fixture.host).compactMap { $0 as? NSTextField }.filter { $0.isEditable }
+            expect(fields.count == 1 && fields.first === search)
+            expect(fixture.window.frame == originalFrame)
+        }
+    }
+
+    func testGlassSearchUsesNativeFieldInputAndGlobalSubmitInsideTheMainColumn() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.dispose() }
+        let bar = try await check(fixture, destination: nil, scenario: "glass-search-before")
+        fixture.window.setContentSize(NSSize(width: 1200, height: 640))
+        try await wait(fixture, "wide search fixture layout", stableLayout: true) {
+            abs(fixture.host.bounds.width - 1200) < 0.5
+        }
+        _ = try await check(fixture, destination: nil, originalBar: bar, scenario: "glass-search-wide")
+        let field = try require(descendants(fixture.host).compactMap { $0 as? NSTextField }.first { $0.isEditable })
+        let main = try require(markers("QieTing.MainColumn", in: fixture.host).first)
+        let search = try require(markers("QieTing.Search", in: fixture.host).first)
+        let mainFrame = main.convert(main.bounds, to: fixture.host)
+        let searchFrame = search.convert(search.bounds, to: fixture.host)
+        let trailingGap = mainFrame.maxX - searchFrame.maxX
+        let originalFrame = fixture.window.frame
+
+        fixture.player.activePanel = .lyrics
+        try await wait(fixture, "inside lyrics and search settle", stableLayout: true) {
+            fixture.panels.mode == .expandedInside && !fixture.panels.isAnimating
+                && self.markers("QieTing.RightPanel", in: fixture.host).contains { $0.bounds.width >= 340 }
+        }
+        let narrowedMain = main.convert(main.bounds, to: fixture.host)
+        let narrowedSearch = search.convert(search.bounds, to: fixture.host)
+        expect(narrowedSearch.minX >= narrowedMain.minX && narrowedSearch.maxX <= narrowedMain.maxX)
+        expect(abs(narrowedMain.maxX - narrowedSearch.maxX - trailingGap) < 0.5,
+               "Search must remain at the middle column's trailing edge")
+        expect(fixture.window.frame == originalFrame)
+        expect(fixture.window.makeFirstResponder(field))
+        try await wait(fixture, "native search editor active") {
+            guard let editor = field.currentEditor() else { return false }
+            return fixture.window.firstResponder === editor
+        }
+        let editor = try require(field.currentEditor() as? NSTextView)
+        let query = "且听 native search"
+        editor.selectAll(nil)
+        editor.insertText(query, replacementRange: editor.selectedRange())
+        try await wait(fixture, "native field editor updates search text") { field.stringValue == query }
+        let submit = try require(NSEvent.keyEvent(
+            with: .keyDown, location: .zero, modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: fixture.window.windowNumber, context: nil,
+            characters: "\r", charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36))
+        fixture.window.sendEvent(submit)
+        try await wait(fixture, "native Return submits a global search destination") {
+            fixture.state.path == [.search(query)]
+        }
+        _ = try await check(fixture, destination: .search(query), originalBar: bar,
+                            scenario: "glass-search-native-submit")
+        expect(descendants(fixture.host).compactMap { $0 as? NSTextField }.filter { $0.isEditable }.count == 1)
+        expect(field.window === fixture.window)
+        expect(markers("QieTing.Search", in: fixture.host).first === search)
+        expect(search.convert(search.bounds, to: fixture.host) == narrowedSearch)
+        expect(fixture.panels.panel == .lyrics)
+        expect(fixture.window.frame == originalFrame)
+        try NavigationValidationEvidence.record(snapshot(fixture, scenario: "glass-search-native-input-and-submit"))
+    }
+}
