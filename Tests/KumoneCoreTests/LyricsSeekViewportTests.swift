@@ -60,6 +60,7 @@ extension LyricsSeekViewportTests {
         let frame: NSRect
     }
 
+    @MainActor
     private final class Fixture {
         private static var applicationPrepared = false
         private static let applicationDelegate = LyricsViewportApplicationDelegate()
@@ -212,7 +213,7 @@ extension LyricsSeekViewportTests {
         let event = try XCTUnwrap(NSEvent(cgEvent: cg))
         XCTAssertEqual(event.type, .scrollWheel)
         XCTAssertEqual(event.phase, expectedPhase, "Reject malformed native phase injection")
-        scroll.scrollWheel(event)
+        scroll.scrollWheel(with: event)
     }
 
     private func enterRealManualScrolling(_ fixture: Fixture, scroll: NSScrollView) async throws {
