@@ -213,6 +213,61 @@ extension WindowNavigationChromeTests {
         }
     }
 
+    func testSpectrumDisplayRefreshFollowsNativeVisibilityMotionAndAttachment() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.dispose() }
+        let host = NSHostingView(rootView: PlayingIndicator(animating: true)
+            .environment(\.accessibilityReduceMotion, true))
+        let probe = NSWindow(contentRect: CGRect(x: 80, y: 80, width: 100, height: 60),
+                             styleMask: [.titled], backing: .buffered, defer: false)
+        probe.isReleasedWhenClosed = false
+        probe.contentView = host
+        defer {
+            probe.orderOut(nil)
+            probe.contentView = nil
+            probe.close()
+        }
+        probe.orderFront(nil)
+        host.layoutSubtreeIfNeeded()
+        try await wait(fixture, "spectrum view with native Reduce Motion") {
+            self.descendants(host).compactMap { $0 as? SpectrumBarsView }.count == 1
+        }
+        let spectrum = try require(descendants(host).compactMap { $0 as? SpectrumBarsView }.first)
+        expect(spectrum.reduceMotion)
+        expect(!spectrum.isDisplayRefreshActive)
+
+        host.rootView = PlayingIndicator(animating: true).environment(\.accessibilityReduceMotion, false)
+        host.layoutSubtreeIfNeeded()
+        try await wait(fixture, "visible spectrum display link") { spectrum.isDisplayRefreshActive }
+        expect(!spectrum.reduceMotion)
+        NotificationCenter.default.post(name: NSWindow.didChangeScreenNotification, object: probe)
+        NotificationCenter.default.post(name: NSApplication.didChangeScreenParametersNotification, object: nil)
+        let range = try require(spectrum.preferredDisplayFrameRate)
+        let maximum = Float(max(1, probe.screen?.maximumFramesPerSecond ?? 120))
+        expect(range.maximum == maximum)
+        expect(range.preferred == maximum)
+
+        spectrum.isHidden = true
+        expect(!spectrum.isDisplayRefreshActive)
+        spectrum.isHidden = false
+        try await wait(fixture, "unhidden spectrum display link") { spectrum.isDisplayRefreshActive }
+        spectrum.animating = false
+        expect(!spectrum.isDisplayRefreshActive)
+        spectrum.animating = true
+        try await wait(fixture, "restarted spectrum display link") { spectrum.isDisplayRefreshActive }
+        probe.orderOut(nil)
+        try await wait(fixture, "ordered-out spectrum pauses native refresh") { !spectrum.isDisplayRefreshActive }
+        probe.contentView = nil
+        expect(spectrum.window == nil)
+        expect(!spectrum.isDisplayRefreshActive)
+        expect(spectrum.preferredDisplayFrameRate == nil)
+        try NavigationValidationEvidence.record([
+            "scenario": "spectrum-native-refresh-lifecycle",
+            "configuredMaximum": maximum,
+            "scope": "Native link state and current screen configuration; no physical 60/120 Hz throughput claim",
+        ])
+    }
+
     private func descendants(_ root: NSView) -> [NSView] {
         [root] + root.subviews.flatMap(descendants)
     }

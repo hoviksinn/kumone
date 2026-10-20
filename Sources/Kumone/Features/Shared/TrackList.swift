@@ -1,3 +1,5 @@
+import AppKit
+import QuartzCore
 import SwiftUI
 
 enum TrackRowStyle {
@@ -344,8 +346,10 @@ struct PlayingIndicator: View {
 
 private struct SpectrumBars: NSViewRepresentable {
     var animating: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     func makeNSView(context: Context) -> SpectrumBarsView { SpectrumBarsView() }
     func updateNSView(_ view: SpectrumBarsView, context: Context) {
+        view.reduceMotion = reduceMotion
         view.animating = animating
     }
     static func dismantleNSView(_ view: SpectrumBarsView, coordinator: ()) {
@@ -363,15 +367,27 @@ final class SpectrumBarsView: PlatformView {
         + CGFloat(AudioSpectrum.bandCount - 1) * spacing
 
     private var bars: [CALayer] = []
-    private var timer: Timer?
+    private var uniformScale: CGFloat?
+    private var link: CADisplayLink?
+    private var observers: [NSObjectProtocol] = []
+    private let displayTarget = DisplayTarget()
     private var startedAt = CACurrentMediaTime()
 
     var animating = false {
         didSet {
             guard animating != oldValue else { return }
-            animating ? start() : stop()
+            if animating { startedAt = CACurrentMediaTime() }
+            updateDisplayRefresh()
         }
     }
+
+    var reduceMotion = false {
+        didSet { if reduceMotion != oldValue { updateDisplayRefresh() } }
+    }
+
+    /// Internal diagnostics for native lifecycle tests; no published/UI state.
+    var isDisplayRefreshActive: Bool { link.map { !$0.isPaused } ?? false }
+    var preferredDisplayFrameRate: CAFrameRateRange? { link?.preferredFrameRateRange }
 
     init() {
         super.init(frame: CGRect(x: 0, y: 0, width: Self.width, height: Self.maxHeight))
@@ -382,7 +398,81 @@ final class SpectrumBarsView: PlatformView {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
 
-    deinit { timer?.invalidate() }
+    deinit {
+        link?.invalidate()
+        for token in observers { NotificationCenter.default.removeObserver(token) }
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        stopDisplayRefresh()
+        guard let window else { return }
+        let center = NotificationCenter.default
+        for name in [NSWindow.didChangeScreenNotification, NSWindow.didChangeOcclusionStateNotification,
+                     NSWindow.didMiniaturizeNotification, NSWindow.didDeminiaturizeNotification] {
+            observers.append(center.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.updateDisplayRefresh() }
+            })
+        }
+        observers.append(center.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
+                                            object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.updateDisplayRefresh() }
+        })
+        updateDisplayRefresh()
+    }
+
+    override func viewDidHide() {
+        super.viewDidHide()
+        updateDisplayRefresh()
+    }
+
+    override func viewDidUnhide() {
+        super.viewDidUnhide()
+        updateDisplayRefresh()
+    }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        updateDisplayRefresh()
+    }
+
+    private func updateDisplayRefresh() {
+        guard animating, !reduceMotion, !isHiddenOrHasHiddenAncestor,
+              let window, window.isVisible, !window.isMiniaturized,
+              window.occlusionState.contains(.visible) else {
+            link?.isPaused = true
+            apply(scaleForAll: Self.minHeight / Self.maxHeight)
+            return
+        }
+        if link == nil {
+            displayTarget.view = self
+            let link = displayLink(target: displayTarget, selector: #selector(DisplayTarget.refresh(_:)))
+            self.link = link
+            link.add(to: .main, forMode: .common)
+        }
+        // The view-owned link follows the window. Re-read the current display
+        // after moves or settings changes; no main-display or 60 Hz assumption.
+        let maximum = Float(max(1, window.screen?.maximumFramesPerSecond ?? 120))
+        link?.preferredFrameRateRange = CAFrameRateRange(
+            minimum: min(30, maximum), maximum: maximum, preferred: maximum)
+        link?.isPaused = false
+    }
+
+    private func stopDisplayRefresh() {
+        link?.invalidate()
+        link = nil
+        for token in observers { NotificationCenter.default.removeObserver(token) }
+        observers.removeAll()
+    }
+
+    @MainActor
+    private final class DisplayTarget: NSObject {
+        weak var view: SpectrumBarsView?
+        @objc func refresh(_ link: CADisplayLink) {
+            guard let view, view.isDisplayRefreshActive else { return }
+            view.tick()
+        }
+    }
 
     /// `NSView.layer` is optional; `UIView.layer` is not.
     private var hostLayer: CALayer? { layer }
@@ -416,23 +506,6 @@ final class SpectrumBarsView: PlatformView {
         }
     }
 
-    private func start() {
-        guard timer == nil else { return }
-        startedAt = CACurrentMediaTime()
-        // Common mode so the bars keep moving while a list is being scrolled.
-        let timer = Timer(timeInterval: 1.0 / 30, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.tick() }
-        }
-        RunLoop.main.add(timer, forMode: .common)
-        self.timer = timer
-    }
-
-    private func stop() {
-        timer?.invalidate()
-        timer = nil
-        apply(scaleForAll: Self.minHeight / Self.maxHeight)
-    }
-
     @MainActor
     private func tick() {
         let spectrum = AudioSpectrum.shared
@@ -457,6 +530,7 @@ final class SpectrumBarsView: PlatformView {
 
         let elapsed = CACurrentMediaTime() - startedAt
         let span = Self.maxHeight - Self.minHeight
+        uniformScale = nil
 
         CATransaction.begin()
         CATransaction.setDisableActions(true)
@@ -473,6 +547,8 @@ final class SpectrumBarsView: PlatformView {
     }
 
     private func apply(scaleForAll scale: CGFloat) {
+        guard uniformScale != scale else { return }
+        uniformScale = scale
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         for bar in bars {
