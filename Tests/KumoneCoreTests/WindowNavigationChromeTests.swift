@@ -83,6 +83,23 @@ private struct NavigationFixtureRoot: View {
     }
 }
 
+/// A real hosting view with a one-shot observation point inside the native
+/// constraints callback. The hook is test-only and never changes production UI.
+@MainActor
+private final class ConstraintObservingHostingView: NSHostingView<NavigationFixtureRoot> {
+    var beforeNextConstraintUpdate: (() -> Void)?
+    private(set) var constraintUpdateDepth = 0
+
+    override func updateConstraints() {
+        constraintUpdateDepth += 1
+        defer { constraintUpdateDepth -= 1 }
+        let hook = beforeNextConstraintUpdate
+        beforeNextConstraintUpdate = nil
+        hook?()
+        super.updateConstraints()
+    }
+}
+
 private func fixtureName(_ destination: Destination?) -> String {
     "fixture." + (destination.map { String(describing: $0) } ?? "home")
 }
@@ -120,7 +137,7 @@ extension WindowNavigationChromeTests {
         let panels = WindowPanelCoordinator()
         let player: PlayerService
         let window: NSWindow
-        let host: NSHostingView<NavigationFixtureRoot>
+        let host: ConstraintObservingHostingView
         init(columnVisibility: NavigationSplitViewVisibility = .detailOnly) async throws {
             let fixtureState = NavigationFixtureState()
             fixtureState.columnVisibility = columnVisibility
@@ -153,8 +170,8 @@ extension WindowNavigationChromeTests {
             window.isReleasedWhenClosed = false
             window.contentMinSize = NSSize(width: Theme.Layout.minWindowWidth,
                                            height: Theme.Layout.minWindowHeight)
-            host = NSHostingView(rootView: NavigationFixtureRoot(state: state, player: player, panels: panels,
-                                                               columnVisibility: columnVisibility))
+            host = ConstraintObservingHostingView(rootView: NavigationFixtureRoot(
+                state: state, player: player, panels: panels, columnVisibility: columnVisibility))
             window.contentView = host
             window.makeKeyAndOrderFront(nil)
             // Construct the real native hierarchy as fixture setup. The
@@ -187,6 +204,7 @@ extension WindowNavigationChromeTests {
             try require(panels.window === window, "The real configurator must attach before the fixture is ready")
         }
         func dispose() {
+            host.beforeNextConstraintUpdate = nil
             player.pause()
             panels.detach()
             window.orderOut(nil)
@@ -647,6 +665,138 @@ extension WindowNavigationChromeTests {
                 "The shared minimum reserves 640pt of usable content independently of native chrome")
     }
 
+    func testCompletedPanelCyclesAtTheRightEdgePreserveTheExactClosedFrame() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.dispose() }
+        let bar = try await check(fixture, destination: nil, scenario: "right-edge-cycles-before")
+        let original = fixture.window.frame
+        // Only 40pt is left on the right. The synthetic screen has room on
+        // the left, so each real window animation must move left to expand.
+        fixture.panels.visibleFrameForTesting = CGRect(
+            x: original.minX - 600, y: original.minY - 100,
+            width: original.width + 640, height: original.height + 200)
+        let mainWidth = try requireOutsidePlan(fixture, scenario: "right-edge-cycles-plan")
+        let plan = try require(WindowPanelGeometry.openingPlan(
+            frame: original, contentSize: fixture.window.contentLayoutRect.size,
+            mainWidth: mainWidth, visibleFrame: try require(fixture.panels.visibleFrameForTesting),
+            isFullScreen: false))
+        expect(plan.frame.minX < original.minX)
+        for cycle in 0..<12 {
+            fixture.player.activePanel = cycle.isMultiple(of: 2) ? .lyrics : .queue
+            // This is the user's completed-animation sequence, not commands
+            // sent while a tween is still running. Close without waiting an
+            // extra settling interval after the animation completion flag.
+            try await wait(fixture, "right-edge open \(cycle)") {
+                fixture.panels.mode == .expandedOutside && !fixture.panels.isAnimating
+                    && fixture.window.frame == plan.frame
+            }
+            fixture.host.needsUpdateConstraints = true
+            fixture.host.updateConstraintsForSubtreeIfNeeded()
+            expect(fixture.window.frame == plan.frame)
+            expect(fixture.panels.originalFrame == original)
+            expect(fixture.window.contentMinSize.width == 1362)
+            expect(markers("QieTing.PlayerBar", in: fixture.host).count == 1)
+            fixture.player.activePanel = nil
+            try await wait(fixture, "right-edge close \(cycle)", stableLayout: true) {
+                fixture.panels.mode == .closed && !fixture.panels.isAnimating
+            }
+            expect(fixture.window.frame == original)
+            expect(fixture.window.contentMinSize.width == 1021)
+            _ = try await check(fixture, destination: nil, originalBar: bar,
+                                scenario: "right-edge-cycle-\(cycle)-restored")
+        }
+    }
+
+    func testNativeConstraintCallbacksDoNotReenterPublishedGeometryOrNativeMinimumWrites() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.dispose() }
+        _ = try await check(fixture, destination: nil, scenario: "constraint-callback-before")
+        fixture.panels.visibleFrameForTesting = CGRect(x: -1000, y: -1000, width: 4000, height: 3000)
+        let mainWidth = try requireOutsidePlan(fixture, scenario: "constraint-callback-plan")
+        let original = fixture.window.frame
+        expect(fixture.panels.request(.lyrics, mainWidth: mainWidth))
+        try await wait(fixture, "constraint callback open", stableLayout: true) {
+            !fixture.panels.isAnimating && fixture.panels.mode == .expandedOutside
+        }
+        let expanded = fixture.window.frame
+        let openMinimum = fixture.window.contentMinSize
+        var publications = 0
+        var synchronousPublications = 0
+        let observation = fixture.panels.objectWillChange.sink { _ in
+            publications += 1
+            if fixture.host.constraintUpdateDepth > 0 { synchronousPublications += 1 }
+        }
+        var notificationHookRan = false
+        fixture.host.beforeNextConstraintUpdate = {
+            notificationHookRan = true
+            for name in [NSWindow.didMoveNotification, NSWindow.didResizeNotification,
+                         NSWindow.didEndLiveResizeNotification] {
+                NotificationCenter.default.post(name: name, object: fixture.window)
+            }
+            expect(synchronousPublications == 0)
+        }
+        fixture.host.needsUpdateConstraints = true
+        fixture.host.updateConstraintsForSubtreeIfNeeded()
+        expect(notificationHookRan)
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            DispatchQueue.main.async { continuation.resume() }
+        }
+        observation.cancel()
+        expect(synchronousPublications == 0)
+        expect(publications == 0, "Unchanged native geometry must not publish another SwiftUI layout")
+        expect(fixture.window.frame == expanded)
+        expect(fixture.panels.originalFrame == original)
+        // A normal UI action publishes its intent, but must defer imperative
+        // minimum/frame writes until it has left the caller's layout stack.
+        expect(fixture.panels.request(nil, mainWidth: mainWidth))
+        expect(fixture.window.contentMinSize == openMinimum,
+               "The action must defer its imperative native minimum update")
+        expect(fixture.window.frame == expanded)
+        fixture.host.needsUpdateConstraints = true
+        fixture.host.updateConstraintsForSubtreeIfNeeded()
+        try await wait(fixture, "constraint callback close", stableLayout: true) {
+            fixture.panels.mode == .closed && !fixture.panels.isAnimating
+        }
+        expect(fixture.window.frame == original)
+        expect(fixture.window.contentMinSize.width == 1021)
+        try NavigationValidationEvidence.record([
+            "scenario": "native-constraint-callback-fence",
+            "synchronousPublications": synchronousPublications,
+            "unchangedGeometryPublications": publications,
+            "actionMinimumChangedSynchronously": false,
+        ])
+    }
+
+    func testQueuedWindowWorkCannotReachADetachedAndReattachedSession() async throws {
+        let fixture = try await Fixture()
+        defer { fixture.dispose() }
+        _ = try await check(fixture, destination: nil, scenario: "queued-window-work-before")
+        fixture.panels.visibleFrameForTesting = CGRect(x: -1000, y: -1000, width: 4000, height: 3000)
+        let mainWidth = try requireOutsidePlan(fixture, scenario: "queued-window-work-plan")
+        let original = fixture.window.frame
+        expect(fixture.panels.request(.lyrics, mainWidth: mainWidth))
+        expect(fixture.panels.isAnimating)
+        fixture.panels.detach()
+        let next = NSWindow(contentRect: CGRect(x: 0, y: 80, width: 1021, height: 640),
+                            styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        next.isReleasedWhenClosed = false
+        defer { fixture.panels.detach(); next.close() }
+        let nextOriginal = next.frame
+        fixture.panels.attach(to: next)
+        var laterPublications = 0
+        let observation = fixture.panels.objectWillChange.sink { _ in laterPublications += 1 }
+        defer { observation.cancel() }
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            DispatchQueue.main.async { continuation.resume() }
+        }
+        expect(fixture.panels.window === next)
+        expect(fixture.panels.mode == .closed)
+        expect(!fixture.panels.isAnimating)
+        expect(fixture.window.frame == original)
+        expect(next.frame == nextOriginal)
+        expect(laterPublications == 0)
+    }
+
     func testSidebarCollapseAndExpansionPreserveNavigationAndChromeInstances() async throws {
         let fixture = try await Fixture(columnVisibility: .all)
         defer { fixture.dispose() }
@@ -788,6 +938,7 @@ extension WindowNavigationChromeTests {
         expect(fixture.window.frame == expanded)
         NotificationCenter.default.post(name: NSWindow.didEnterFullScreenNotification, object: fixture.window)
         expect(fixture.panels.isFullScreen)
+        try await wait(fixture, "native fullscreen minimum commits") { fixture.window.contentMinSize.width == 1161 }
         expect(fixture.window.contentMinSize.width == 1161)
         let savedClosedFrame = fixture.panels.originalFrame
         let requestedOrigin = expanded.offsetBy(dx: 15, dy: 0).origin
@@ -807,6 +958,7 @@ extension WindowNavigationChromeTests {
         NotificationCenter.default.post(name: NSWindow.didExitFullScreenNotification, object: fixture.window)
         expect(!fixture.panels.isFullScreen)
         expect(fixture.panels.mode == .expandedOutside)
+        try await wait(fixture, "restored outside minimum commits") { fixture.window.contentMinSize.width == 1362 }
         expect(fixture.window.contentMinSize.width == 1362)
         expect(fixture.window.frame == expanded)
         expect(abs(fixture.panels.baseContentWidth - 1021) < 0.5)

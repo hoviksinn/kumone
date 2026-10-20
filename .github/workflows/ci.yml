@@ -49,7 +49,7 @@ jobs:
         shell: bash
         run: |
           swift test --skip-build --triple arm64-apple-macosx26.0 --disable-swift-testing --filter WindowNavigationChromeTests 2>&1 | tee .build/window-regression.log
-          python3 Scripts/verify-test-log.py .build/window-regression.log --framework xctest --minimum-tests 10 --report .build/window-test-summary.json
+          python3 Scripts/verify-test-log.py .build/window-regression.log --framework xctest --minimum-tests 13 --report .build/window-test-summary.json
           test -s .build/window-navigation-validation.json
 
       # Fail fast on the recently added native EOF/paused-head probe before

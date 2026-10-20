@@ -26,6 +26,8 @@ final class WindowPanelCoordinator: ObservableObject {
     private var observerTokens: [NSObjectProtocol] = []
     private var hideTask: Task<Void, Never>?
     private var lastStableFrame: CGRect?
+    private var pendingGeometry: (generation: Int, checksScreen: Bool)?
+    private var pendingMinimumGeneration: Int?
     var reduceMotion = false
     /// Geometry injection is used only by hosted tests on small CI displays.
     var visibleFrameForTesting: CGRect?
@@ -87,7 +89,7 @@ final class WindowPanelCoordinator: ObservableObject {
         }
         observerTokens.append(center.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
                                                 object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.screenChanged() }
+            MainActor.assumeIsolated { self?.queueGeometryUpdate(checksScreen: true) }
         })
     }
 
@@ -99,6 +101,8 @@ final class WindowPanelCoordinator: ObservableObject {
         programmaticFrame = false
         nativeFullScreenTransition = false
         deferredRequest = nil
+        pendingGeometry = nil
+        pendingMinimumGeneration = nil
         window = nil
         // Do not publish display state here. SwiftUI calls this method from
         // dismantleNSView while GraphHost.invalidate holds exclusive access;
@@ -118,6 +122,12 @@ final class WindowPanelCoordinator: ObservableObject {
             let navigationWidth = mode == .expandedOutside ? baseContentWidth : contentWidth - insideReveal
             deferredRequest = (requested, max(0, navigationWidth - mainWidth))
             return true
+        }
+        // A native drag may have queued its notification immediately before
+        // this action. Preserve that actual geometry before retiring its token.
+        if pendingGeometry?.generation == generation {
+            rebaseFrameIfChanged(in: window)
+            pendingGeometry = nil
         }
         generation += 1
         let requestGeneration = generation
@@ -162,9 +172,8 @@ final class WindowPanelCoordinator: ObservableObject {
         if sessionWasOutside, let originalFrame, let visible = visibleFrame,
            !isFullScreen, !window.styleMask.contains(.fullScreen) {
             mode = .expandedOutside
-            // Lower the constraint before shrinking; never change it merely
-            // because the ordinary/immersive page changes.
-            applyMinimum()
+            // The queued native transaction lowers the constraint before
+            // shrinking, after this SwiftUI action has left its layout stack.
             animateWindow(to: WindowPanelGeometry.restoredFrame(originalFrame, visibleFrame: visible),
                           generation: requestGeneration, closes: true)
         } else {
@@ -195,23 +204,32 @@ final class WindowPanelCoordinator: ObservableObject {
         guard let window else { return }
         programmaticFrame = true
         isAnimating = true
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = reduceMotion ? 0 : animationDuration
-            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-            window.animator().setFrame(frame, display: true)
-        } completionHandler: { [weak self] in
-            Task { @MainActor in
-                guard let self, self.generation == expected else { return }
-                self.programmaticFrame = false
-                self.isAnimating = false
-                self.lastStableFrame = self.window?.frame
-                if closes { self.finishClose() } else { self.applyMinimum() }
-                self.applyDeferredRequest()
+        DispatchQueue.main.async { [weak self, weak window] in
+            guard let self, let window, self.window === window,
+                  self.generation == expected else { return }
+            if closes { self.applyMinimumNow(in: window) }
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = self.reduceMotion ? 0 : self.animationDuration
+                context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                window.animator().setFrame(frame, display: true)
+            } completionHandler: { [weak self, weak window] in
+                // Animation completion is not proof that AppKit has left the
+                // native constraints pass which delivered that completion.
+                DispatchQueue.main.async {
+                    guard let self, let window, self.window === window,
+                          self.generation == expected else { return }
+                    if closes { self.finishClose(updatesMinimum: false) }
+                    else { self.isAnimating = false }
+                    self.applyMinimumNow(in: window)
+                    self.lastStableFrame = window.frame
+                    self.programmaticFrame = false
+                    self.applyDeferredRequest()
+                }
             }
         }
     }
 
-    private func finishClose() {
+    private func finishClose(updatesMinimum: Bool = true) {
         mode = .closed
         panel = nil
         panelWidth = 0
@@ -220,11 +238,23 @@ final class WindowPanelCoordinator: ObservableObject {
         isClosing = false
         sessionWasOutside = false
         isAnimating = false
-        applyMinimum()
+        if updatesMinimum { applyMinimum() }
     }
 
     private func applyMinimum() {
         guard let window else { return }
+        let expected = generation
+        guard pendingMinimumGeneration != expected else { return }
+        pendingMinimumGeneration = expected
+        DispatchQueue.main.async { [weak self, weak window] in
+            guard let self, let window, self.window === window,
+                  self.generation == expected, self.pendingMinimumGeneration == expected else { return }
+            self.pendingMinimumGeneration = nil
+            self.applyMinimumNow(in: window)
+        }
+    }
+
+    private func applyMinimumNow(in window: NSWindow) {
         // Full-size content views include native titlebar/toolbar space in
         // contentMinSize. Reserve 640pt for usable content, not for chrome.
         let nativeContentHeight = window.contentRect(forFrameRect: window.frame).height
@@ -305,8 +335,32 @@ final class WindowPanelCoordinator: ObservableObject {
             }
             return
         }
-        guard !programmaticFrame, !nativeFullScreenTransition,
+        queueGeometryUpdate(checksScreen: name == NSWindow.didChangeScreenNotification)
+    }
+
+    private func queueGeometryUpdate(checksScreen: Bool) {
+        guard let window, !programmaticFrame, !nativeFullScreenTransition,
               !isFullScreen, !window.styleMask.contains(.fullScreen) else { return }
+        if let pending = pendingGeometry, pending.generation == generation {
+            pendingGeometry = (generation, pending.checksScreen || checksScreen)
+            return
+        }
+        let expected = generation
+        pendingGeometry = (expected, checksScreen)
+        // Native notifications can arrive from NSHostingView.updateConstraints.
+        // Never publish back into that same constraints/layout invocation.
+        DispatchQueue.main.async { [weak self, weak window] in
+            guard let self, let window, self.window === window, self.generation == expected,
+                  let pending = self.pendingGeometry, pending.generation == expected else { return }
+            self.pendingGeometry = nil
+            self.rebaseFrameIfChanged(in: window)
+            if pending.checksScreen { self.screenChanged() }
+        }
+    }
+
+    private func rebaseFrameIfChanged(in window: NSWindow) {
+        guard !programmaticFrame, !nativeFullScreenTransition, !isFullScreen,
+              !window.styleMask.contains(.fullScreen), window.frame != lastStableFrame else { return }
         if sessionWasOutside, hasPanel, var original = originalFrame,
            let old = lastStableFrame {
             // User moves/re-sizes rebase the saved closed frame once, instead
@@ -317,11 +371,11 @@ final class WindowPanelCoordinator: ObservableObject {
                                       window.frame.width - addedWidth)
             original.size.height = window.frame.height
             originalFrame = original
-            baseContentWidth = max(PlayerLayoutMetrics.minimumWindowWidth,
-                                   (window.contentView?.bounds.width ?? window.contentLayoutRect.width) - addedWidth)
+            let width = max(PlayerLayoutMetrics.minimumWindowWidth,
+                            (window.contentView?.bounds.width ?? window.contentLayoutRect.width) - addedWidth)
+            if baseContentWidth != width { baseContentWidth = width }
         }
         lastStableFrame = window.frame
-        if name == NSWindow.didChangeScreenNotification { screenChanged() }
     }
 
     private func applyDeferredRequest() {
