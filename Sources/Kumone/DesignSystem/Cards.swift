@@ -114,6 +114,7 @@ struct Shelf<Content: View>: View {
                 cards
                     .padding(.vertical, 6)
             }
+            .scrollIndicators(.hidden, axes: .horizontal)
             .compatScrollClipDisabled()
         }
     }

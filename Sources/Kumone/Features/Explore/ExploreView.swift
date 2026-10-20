@@ -147,6 +147,7 @@ struct ExploreView: View {
             }
             .padding(.vertical, 2)
         }
+        .scrollIndicators(.hidden, axes: .horizontal)
     }
 
     private func playPlaylist(_ id: Int) {

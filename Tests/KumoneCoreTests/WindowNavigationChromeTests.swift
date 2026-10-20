@@ -1138,3 +1138,67 @@ extension WindowNavigationChromeTests {
         try NavigationValidationEvidence.record(snapshot(fixture, scenario: "glass-search-native-input-and-submit"))
     }
 }
+
+@MainActor
+extension WindowNavigationChromeTests {
+    func testNativeSidebarSurfaceIsLocalizedAndLeavesTheRealListScrollable() async throws {
+        let fixture = try await Fixture(columnVisibility: .all)
+        defer { fixture.dispose() }
+        let bar = try await check(fixture, destination: nil, scenario: "native-sidebar-material-before")
+        let main = try require(markers("QieTing.MainColumn", in: fixture.host).first)
+        let originalFrame = fixture.window.frame
+        let nativeEffects = descendants(fixture.host).compactMap { $0 as? NSVisualEffectView }
+        let surface = try require(nativeEffects.first { $0.identifier?.rawValue == "QieTing.SidebarMaterial" })
+        expect(nativeEffects.filter { $0.identifier?.rawValue == "QieTing.SidebarMaterial" }.count == 1)
+        expect(surface.material == .sidebar)
+        expect(surface.blendingMode == .behindWindow)
+        expect(surface.state == .followsWindowActiveState)
+        expect(!surface.acceptsFirstResponder)
+        expect(surface.hitTest(NSPoint(x: surface.bounds.midX, y: surface.bounds.midY)) == nil,
+               "The background cannot consume List clicks or scroll gestures")
+        let mainFrame = main.convert(main.bounds, to: fixture.host)
+        let surfaceFrame = surface.convert(surface.bounds, to: fixture.host)
+        expect(abs(surfaceFrame.minX - fixture.host.bounds.minX) < 0.5)
+        expect(surfaceFrame.width >= PlayerLayoutMetrics.minimumSidebarWidth)
+        expect(surfaceFrame.maxX <= mainFrame.minX)
+        expect(abs(surfaceFrame.height - fixture.host.bounds.height) < 0.5)
+
+        let scroll = try require(descendants(fixture.host).compactMap { $0 as? NSScrollView }.first { candidate in
+            let frame = candidate.convert(candidate.bounds, to: fixture.host)
+            return frame.width >= PlayerLayoutMetrics.minimumSidebarWidth
+                && frame.height > 100 && frame.maxX <= mainFrame.minX + 0.5
+        }, "The production sidebar must still contain its native scrolling List")
+        expect(scroll.scrollerStyle == NSScroller.preferredScrollerStyle,
+               "The native List must use the user's current scrollbar preference")
+        expect(scroll.hasVerticalScroller)
+        let sidebarDocument = try require(scroll.documentView)
+        expect(sidebarDocument.bounds.width <= scroll.contentSize.width + 0.5,
+               "The vertical sidebar must not create actual horizontal overflow")
+        // For a short anonymous library AppKit may legitimately hide an
+        // unnecessary legacy thumb. Do not demand overflow or fabricate rows.
+        expect(sidebarDocument.window === fixture.window)
+        var evidence = snapshot(fixture, scenario: "native-sidebar-material-and-scroll-policy")
+        evidence["sidebarNativeScrollerStyle"] = Int(scroll.scrollerStyle.rawValue)
+        evidence["preferredScrollerStyle"] = Int(NSScroller.preferredScrollerStyle.rawValue)
+        evidence["sidebarVerticalAxis"] = scroll.hasVerticalScroller
+        evidence["sidebarHorizontalAxis"] = scroll.hasHorizontalScroller
+        evidence["nativeMaterialScope"] = "NSVisualEffectView configuration and real List attachment only; no pixel transparency, Reduce Transparency appearance, or physical trackpad fading claim"
+        evidence["nativeEffectViews"] = nativeEffects.map { effect -> [String: Any] in
+            ["material": Int(effect.material.rawValue), "blendingMode": Int(effect.blendingMode.rawValue),
+             "identifier": effect.identifier?.rawValue ?? "", "frame": NSStringFromRect(effect.convert(effect.bounds, to: fixture.host))]
+        }
+        try NavigationValidationEvidence.record(evidence)
+
+        fixture.state.columnVisibility = .detailOnly
+        try await wait(fixture, "sidebar material removed with its own column") {
+            self.markers("QieTing.SidebarMaterial", in: fixture.host).isEmpty
+        }
+        _ = try await check(fixture, destination: nil, originalBar: bar, scenario: "native-sidebar-material-collapsed")
+        fixture.state.columnVisibility = .all
+        try await wait(fixture, "sidebar material restored once") {
+            self.markers("QieTing.SidebarMaterial", in: fixture.host).count == 1
+        }
+        _ = try await check(fixture, destination: nil, originalBar: bar, scenario: "native-sidebar-material-restored")
+        expect(fixture.window.frame == originalFrame)
+    }
+}

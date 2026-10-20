@@ -51,6 +51,7 @@ struct SkeletonShelf: View {
                         }
                     }
                 }
+                .scrollIndicators(.hidden, axes: .horizontal)
             }
             .frame(height: Theme.Layout.coverShelfHeight)
         }

@@ -49,6 +49,7 @@ struct ArtistDetailView: View {
                                 Spacer().frame(width: (Theme.Layout.contentInset) - 16)
                             }
                         }
+                        .scrollIndicators(.hidden, axes: .horizontal)
                     }
 
                     if !epsAndSingles.isEmpty {
@@ -64,6 +65,7 @@ struct ArtistDetailView: View {
                                 Spacer().frame(width: (Theme.Layout.contentInset) - 16)
                             }
                         }
+                        .scrollIndicators(.hidden, axes: .horizontal)
                     }
 
                     if !similar.isEmpty {
@@ -91,6 +93,7 @@ struct ArtistDetailView: View {
                                 Spacer().frame(width: (Theme.Layout.contentInset) - 16)
                             }
                         }
+                        .scrollIndicators(.hidden, axes: .horizontal)
                     }
                 } else if isLoading {
                     loadingHeader

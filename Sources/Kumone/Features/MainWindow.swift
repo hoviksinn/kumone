@@ -225,6 +225,7 @@ struct MainWindow: View {
             if !sidebarCollapsed {
                 SidebarView(selection: $selection, showLogin: $showLogin)
                     .frame(minWidth: 200, idealWidth: Theme.Layout.sidebarWidth, maxWidth: 280)
+                    .background(NativeSidebarMaterial().accessibilityHidden(true))
             }
             middleColumn
         }
