@@ -11,6 +11,22 @@ enum LyricsPanelPresentation: Equatable {
     var horizontalPadding: CGFloat { self == .immersive ? 28 : LyricsVisualParameters.horizontalPadding }
 }
 
+/// Read-only bounds of actual lyric components. The application installs no
+/// reader; tests resolve these public anchors without changing scrolling or
+/// observing the audio clock. No native row view or publisher is added.
+enum LyricsViewportElement: Hashable {
+    case line(id: Int, text: String)
+    case followPlayback
+}
+
+struct LyricsViewportAnchorKey: PreferenceKey {
+    typealias Value = [LyricsViewportElement: Anchor<CGRect>]
+    static var defaultValue: Value { [:] }
+    static func reduce(value: inout Value, nextValue: () -> Value) {
+        value.merge(nextValue(), uniquingKeysWith: { _, latest in latest })
+    }
+}
+
 private struct LyricsFocusState: Equatable {
     let index: Int?
     let seekRevision: UInt64
@@ -61,6 +77,9 @@ private struct LyricsPanelContent: View {
                                     presentation: presentation,
                                     onSeek: { player.seek(to: line.time) }
                                 )
+                                .anchorPreference(key: LyricsViewportAnchorKey.self, value: .bounds) { anchor in
+                                    [.line(id: line.id, text: line.text): anchor]
+                                }
                                 .id(line.id)
                             }
                             Color.clear.frame(height: geometry.size.height * 0.48)
@@ -115,6 +134,9 @@ private struct LyricsPanelContent: View {
                             }
                             .buttonStyle(.plain)
                             .background(.regularMaterial, in: Capsule())
+                            .anchorPreference(key: LyricsViewportAnchorKey.self, value: .bounds) { anchor in
+                                [.followPlayback: anchor]
+                            }
                             .padding(.bottom, 20)
                             .transition(.opacity)
                         }

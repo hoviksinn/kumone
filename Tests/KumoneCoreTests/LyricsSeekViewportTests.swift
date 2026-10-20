@@ -22,6 +22,33 @@ private final class LyricsViewportApplicationDelegate: NSObject, NSApplicationDe
 private enum LyricsViewportEvidence {
     static var cases: [[String: Any]] = []
 
+    // Cache the actual hosted view for diagnosis, not as a readiness signal or
+    // a pixel-match oracle. Calls happen after setup or after Seek assertions,
+    // outside the measured Seek interval. All content is synthetic test data.
+    static func capturePNG(_ host: NSView) -> [String: Any] {
+        guard let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) else {
+            return ["available": false, "reason": "Native bitmap representation unavailable"]
+        }
+        host.cacheDisplay(in: host.bounds, to: bitmap)
+        guard let data = bitmap.representation(using: .png, properties: [:]) else {
+            return ["available": false, "reason": "Native PNG encoding unavailable"]
+        }
+        let root = ProcessInfo.processInfo.environment["GITHUB_WORKSPACE"]
+            ?? FileManager.default.currentDirectoryPath
+        let name = "lyrics-viewport-\(cases.count).png"
+        let destination = URL(fileURLWithPath: root).appendingPathComponent(".build/\(name)")
+        do {
+            try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(),
+                                                    withIntermediateDirectories: true)
+            try data.write(to: destination, options: .atomic)
+            return ["available": true, "file": name, "bytes": data.count,
+                    "pixelsWide": bitmap.pixelsWide, "pixelsHigh": bitmap.pixelsHigh,
+                    "scope": "Public NSView cached rendering of the real production LyricsPanel; not a physical display capture or automated glyph-pixel acceptance"]
+        } catch {
+            return ["available": false, "reason": String(describing: error)]
+        }
+    }
+
     static func record(_ values: [String: Any]) throws {
         cases.append(values)
         let root = ProcessInfo.processInfo.environment["GITHUB_WORKSPACE"]
@@ -31,7 +58,7 @@ private enum LyricsViewportEvidence {
         try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(),
                                                 withIntermediateDirectories: true)
         try JSONSerialization.data(withJSONObject: [
-            "scope": "Actual production LyricsPanel inside NSHostingView, native NSScrollView wheel events and in-process public accessibility frames; internal offline engine/service/cursor positions, no DAC/listening or animation-quality claim",
+            "scope": "Actual production LyricsPanel in NSHostingView; real native wheel/document motion and production row identity/text/bounds from public SwiftUI anchors, converted through one native receiver. AX is supplemental. No glyph-pixel/VoiceOver/DAC/listening/frame-throughput claim.",
             "cases": cases,
         ], options: [.prettyPrinted, .sortedKeys]).write(to: destination, options: .atomic)
     }
@@ -46,6 +73,50 @@ private struct HostedLyricsRoot: View {
         LyricsPanel(presentation: presentation)
             .environmentObject(player)
             .environmentObject(SettingsManager.shared)
+            .overlayPreferenceValue(LyricsViewportAnchorKey.self) { anchors in
+                GeometryReader { geometry in
+                    LyricsGeometryCapture(frames: anchors.mapValues { geometry[$0] })
+                        .frame(width: geometry.size.width, height: geometry.size.height)
+                        .allowsHitTesting(false)
+                        .accessibilityHidden(true)
+                }
+            }
+    }
+}
+
+/// One test-only, transparent receiver for the entire real hosted panel. Its
+/// rectangles come from anchors on existing production rows/the follow button,
+/// never from a row-height estimate, duplicate lyric UI or the cursor index.
+@MainActor
+private struct LyricsGeometryCapture: NSViewRepresentable {
+    let frames: [LyricsViewportElement: CGRect]
+
+    func makeNSView(context: Context) -> CaptureView {
+        let view = CaptureView(frame: .zero)
+        view.setAccessibilityElement(false)
+        return view
+    }
+
+    func updateNSView(_ view: CaptureView, context: Context) {
+        if view.frames != frames {
+            view.frames = frames
+            view.layoutRevision &+= 1
+        }
+    }
+
+    @MainActor
+    final class CaptureView: NSView {
+        var frames: [LyricsViewportElement: CGRect] = [:]
+        var layoutRevision: UInt64 = 0
+        // GeometryReader uses a top-left origin. AppKit conversion handles
+        // flipping and the real window origin instead of assuming an offset.
+        override var isFlipped: Bool { true }
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+        func screenFrame(of element: LyricsViewportElement) -> NSRect? {
+            guard let frame = frames[element], !frame.isEmpty, let window else { return nil }
+            return window.convertToScreen(convert(frame, to: nil))
+        }
     }
 }
 
@@ -258,33 +329,62 @@ extension LyricsSeekViewportTests {
         window.convertToScreen(scroll.contentView.convert(scroll.contentView.bounds, to: nil))
     }
 
+    private func geometryCapture(_ fixture: Fixture) -> LyricsGeometryCapture.CaptureView? {
+        descendants(fixture.host).compactMap { $0 as? LyricsGeometryCapture.CaptureView }.first
+    }
+
     private func lineFrame(_ index: Int, in fixture: Fixture) -> NSRect? {
-        // A token boundary avoids line 2 accidentally matching line 24.
-        let target = "Seek fixture line \(index)"
-        return accessibilityObservations(fixture)
-            .first { observation in
-                !observation.frame.isEmpty && observation.textValues.contains { text in
-                    text.split(separator: "\n").contains(Substring(target)) || text == target
-                }
-            }
-            .map(\.frame)
+        // Both identity and text originate at the existing production row.
+        // A missing/unrealized row stays missing; no coordinate is synthesized.
+        geometryCapture(fixture)?.screenFrame(of: .line(id: index, text: "Seek fixture line \(index)"))
     }
 
     private func hasFollowButton(_ fixture: Fixture) -> Bool {
-        accessibilityObservations(fixture).contains { observation in
-            observation.textValues.contains { $0.contains("跟随播放") }
+        guard let frame = geometryCapture(fixture)?.screenFrame(of: .followPlayback) else { return false }
+        let panel = fixture.window.convertToScreen(fixture.host.convert(fixture.host.bounds, to: nil))
+        return frame.intersects(panel)
+    }
+
+    private func geometrySnapshot(_ fixture: Fixture) -> [String: Any] {
+        guard let capture = geometryCapture(fixture) else { return ["attached": false, "captureCount": 0] }
+        let count = descendants(fixture.host).compactMap { $0 as? LyricsGeometryCapture.CaptureView }.count
+        let rows = capture.frames.map { element, frame -> [String: Any] in
+            var values: [String: Any] = [
+                "frameInCapture": NSStringFromRect(frame),
+                "screenFrame": capture.screenFrame(of: element).map(NSStringFromRect) ?? "detached-or-empty",
+            ]
+            switch element {
+            case .line(let id, let text):
+                values["kind"] = "line"
+                values["lineID"] = id
+                values["text"] = text
+            case .followPlayback:
+                values["kind"] = "actual-follow-button"
+            }
+            return values
         }
+        return [
+            "attached": capture.window === fixture.window, "captureCount": count,
+            "bounds": NSStringFromRect(capture.bounds),
+            "screenFrame": NSStringFromRect(fixture.window.convertToScreen(capture.convert(capture.bounds, to: nil))),
+            "layoutRevision": capture.layoutRevision, "isFlipped": capture.isFlipped,
+            "elements": rows,
+            "scope": "Actual production component identity/text and layout/hit bounds; no cursor-derived or estimated coordinates, no post-blur glyph pixels or AX semantic claim",
+        ]
     }
 
     private func setupSnapshot(_ fixture: Fixture, scenario: String) -> [String: Any] {
         let views = descendants(fixture.host)
         let accessibility = accessibilityObservations(fixture)
+        let rendering = LyricsViewportEvidence.capturePNG(fixture.host)
         return [
             "scenario": scenario,
             "windowFrame": NSStringFromRect(fixture.window.frame),
             "hostBounds": NSStringFromRect(fixture.host.bounds),
             "windowVisible": fixture.window.isVisible, "windowKey": fixture.window.isKeyWindow,
             "applicationActive": NSApp.isActive,
+            "applicationRunning": NSApp.isRunning,
+            "activationPolicy": NSRunningApplication.current.activationPolicy.rawValue,
             "lyricLineCount": fixture.player.lyrics?.lines.count ?? -1,
             "activeIndex": fixture.player.lyricsCursor.activeIndex ?? -1,
             "progressSeconds": fixture.player.progress,
@@ -303,6 +403,8 @@ extension LyricsSeekViewportTests {
                  "contentSize": NSStringFromSize(scroll.contentSize),
                  "viewportScreenFrame": NSStringFromRect(visibleFrame(of: scroll, in: fixture.window))]
             },
+            "geometryCapture": geometrySnapshot(fixture),
+            "nativeCachedRendering": rendering,
             "accessibilityQuery": fixture.lastAccessibilityQuery,
             "accessibility": accessibility.prefix(240).map { item -> [String: Any] in
                 ["class": item.sourceClass, "role": item.role, "label": item.label,
@@ -313,12 +415,22 @@ extension LyricsSeekViewportTests {
     }
 
     private func waitForSetup(_ fixture: Fixture, description: String,
+                              captureInitialRendering: Bool = false,
                               condition: () -> Bool) async throws {
         let deadline = ProcessInfo.processInfo.systemUptime + 4
         repeat {
             await Fixture.nativeLayoutCommit(fixture.host)
             if condition() {
-                try LyricsViewportEvidence.record(setupSnapshot(fixture, scenario: "setup-ready: \(description)"))
+                if captureInitialRendering {
+                    try LyricsViewportEvidence.record(setupSnapshot(fixture, scenario: "setup-ready: \(description)"))
+                } else {
+                    // Do not spend the real manual-follow grace period on
+                    // bitmap caching or semantic-tree diagnostics.
+                    try LyricsViewportEvidence.record([
+                        "scenario": "setup-ready: \(description)",
+                        "geometryCapture": geometrySnapshot(fixture),
+                    ])
+                }
                 return
             }
             // Only readiness polling. No post-seek delay is admitted below:
@@ -365,19 +477,26 @@ extension LyricsSeekViewportTests {
         let fixture = try await Fixture(presentation: presentation, paused: paused)
         defer { fixture.dispose() }
         var nativeScroll: NSScrollView?
-        try await waitForSetup(fixture, description: "initial lyric line and native scroll view") {
+        try await waitForSetup(fixture, description: "initial lyric line and native scroll view",
+                               captureInitialRendering: true) {
             nativeScroll = self.descendants(fixture.host).compactMap { $0 as? NSScrollView }.first
             guard let scroll = nativeScroll, let first = self.lineFrame(0, in: fixture) else { return false }
             return first.intersects(self.visibleFrame(of: scroll, in: fixture.window))
                 && (scroll.documentView?.bounds.height ?? 0) > scroll.contentSize.height
         }
         let scroll = try XCTUnwrap(nativeScroll)
+        let capture = try XCTUnwrap(geometryCapture(fixture), "The real production-row bounds receiver must be mounted")
+        XCTAssertTrue(capture.window === fixture.window)
+        XCTAssertEqual(descendants(fixture.host).compactMap { $0 as? LyricsGeometryCapture.CaptureView }.count, 1)
+        XCTAssertEqual(capture.bounds.size.width, fixture.host.bounds.size.width, accuracy: 0.5)
+        XCTAssertEqual(capture.bounds.size.height, fixture.host.bounds.size.height, accuracy: 0.5)
         if manualScroll {
             try await enterRealManualScrolling(fixture, scroll: scroll)
         } else {
             XCTAssertFalse(hasFollowButton(fixture), "Ordinary seek must start with automatic following enabled")
         }
         let before = scroll.documentVisibleRect
+        let geometryBefore = geometrySnapshot(fixture)
         let target = 12.0
         let targetIndex = 24
         let beforeTargetFrame = lineFrame(targetIndex, in: fixture)
@@ -413,7 +532,9 @@ extension LyricsSeekViewportTests {
             "activeIndex": fixture.player.lyricsCursor.activeIndex ?? -1,
             "elapsedNativeCommitSeconds": elapsed,
             "manualFollowCleared": follows, "targetVisible": targetVisible,
-            "targetAccessibilityFrame": targetFrame.map(NSStringFromRect) ?? "not-realized",
+            "targetRowScreenFrame": targetFrame.map(NSStringFromRect) ?? "not-realized",
+            "rowMeasurement": "Actual production row ID and text with public bounds anchor/native screen conversion",
+            "geometryBeforeSeek": geometryBefore, "geometryAfterSeek": geometrySnapshot(fixture),
             "viewportScreenFrame": NSStringFromRect(viewport),
             "documentVisibleBefore": NSStringFromRect(before),
             "documentVisibleAfter": NSStringFromRect(scroll.documentVisibleRect),
@@ -428,6 +549,11 @@ extension LyricsSeekViewportTests {
         XCTAssertNotEqual(scroll.documentVisibleRect, before,
                           "A new active cursor must move the actual native document after external seek")
         XCTAssertEqual(fixture.player.isPlaying, !paused, "Viewport refresh must not change transport state")
+        try LyricsViewportEvidence.record([
+            "scenario": "native-render-after-seek-assertions",
+            "presentation": presentation == .standard ? "standard" : "immersive",
+            "paused": paused, "nativeCachedRendering": LyricsViewportEvidence.capturePNG(fixture.host),
+        ])
     }
 
     func testPausedExternalSeekReanchorsStandardLyricsAfterRealManualScroll() async throws {

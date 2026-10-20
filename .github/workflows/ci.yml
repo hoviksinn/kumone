@@ -188,6 +188,7 @@ jobs:
             .build/test-summary.json
             .build/window-regression.log
             .build/lyrics-seek-regression.log
+            .build/lyrics-viewport-*.png
             .build/seek-clock-regression.log
             .build/segment-eof-regression.log
             .build/test.log

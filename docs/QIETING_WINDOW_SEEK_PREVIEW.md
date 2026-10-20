@@ -27,9 +27,19 @@
 
 `LyricsCursor.seekRevision` 仅在显式 Seek 提交给引擎后变化，不代表时间，也不按帧发布。歌词同时观察行索引与该标记：普通播放继续 Spring，显式 Seek 取消手动跟随等待，在真实下一次布局提交无动画定位。YRC 退休旧绘制代次，立即使用已发布的 Seek 目标，再继续读取实际引擎时间。没有增加 offset、重播、额外 Seek、延长等待或修改引擎 flush。
 
-测试将实际引擎、服务 progress/live time、歌词 cursor 与原生视口分开比较。独立 XCTest 宿主使用生产 LyricsPanel、真实 NSScrollView 滚轮与可访问性行坐标，覆盖普通播放 Seek，以及标准/沉浸歌词在手动滚词后 Seek。必须先确认原生滚动实际发生，不能只生成事件就算覆盖。新增服务用例覆盖播放/暂停时同一 YRC 行前后 Seek、旧读取拒绝和低频标记；另外在播放/暂停两种状态连续提交 30 次 Seek，与相同前史的单次最终 Seek 对照，严格比较 48 个量子、每声道 49,152 帧最终混音 PCM（误差 < 1e-5）、非静音峰值和两帧内时钟精度。原严格 PCM、长暂停和快速切换测试保留。新增对照只有实际 macOS 运行通过后才算验证结果。
+测试将实际引擎、服务 progress/live time、歌词 cursor 与原生视口分开比较。独立 XCTest 宿主使用生产 LyricsPanel、真实 NSScrollView 滚轮及生产行的公开 bounds anchor，覆盖普通播放 Seek，以及标准/沉浸歌词在手动滚词后 Seek。必须先确认原生滚动实际发生，不能只生成事件就算覆盖。新增服务用例覆盖播放/暂停时同一 YRC 行前后 Seek、旧读取拒绝和低频标记；另外在播放/暂停两种状态连续提交 30 次 Seek，与相同前史的单次最终 Seek 对照，严格比较 48 个量子、每声道 49,152 帧最终混音 PCM（误差 < 1e-5）、非静音峰值和两帧内时钟精度。原严格 PCM、长暂停和快速切换测试保留。新增对照只有实际 macOS 运行通过后才算验证结果。
 
 用户描述的完整“一两秒”偏差及 progress 是否同时滞后，不能仅凭上述源码路径认定已全部复现。AutoMix 重新挂接可能阻塞主线程的假设也尚未测量。`QieTing / PlaybackInteraction` 的两个公开 `OSSignposter` 区间可供 Instruments 检查 Seek 提交与重新挂接耗时，不记录歌曲、账号、媒体位置或 PCM。
+
+### CI #34 Attempt 5：修正视口测试的观察条件
+
+[实际运行](https://github.com/hoviksinn/kumone/actions/runs/39484448425/attempts/5) 已通过编译、18 项窗口、18 项时钟/严格 PCM 和 1 项 EOF 专项。歌词 3 项均停在初始准备，尚未发出 Seek。[原诊断](https://github.com/hoviksinn/kumone/actions/runs/39484448425/artifacts/12302992505) 中 40 行及高于 4000pt 的真实文档已布局，5～6 组原生按钮焦点视图存在，但 navigation order 为 0、unignored 仅宿主、全部实际叶节点中心的 AX hit-test 均返回宿主，没有 SwiftUI 文字语义节点。继续更换角色协议不能解决这个已观察到的空树。
+
+同次运行成功的原生搜索也处于 applicationActive=false、applicationRunning=false、windowKey=false；因此不能认定这些状态使所有渲染或事件失效。是否影响 SwiftUI AX 语义生成仍未证实。生产普通 LRC 使用真实 Text/plain Button，没有隐藏歌词的 Accessibility 代码，当前没有证据应改动它们的语义或激活全局辅助功能。
+
+原测试把“AX 可识别”错误地当成“布局准备完成”的必要条件。新观察方式在现有生产行提供真实 ID、文本和 `.bounds` anchor，实际条件显示的跟随按钮也提供自己的 anchor。只有测试根容器用公开 `overlayPreferenceValue`/GeometryReader 读取它们，经一个不绘制、不处理输入的原生接收器换算真实屏幕坐标；应用没有 reader，没有新增定时器、发布器、音频订阅或每行 NSView。每个已实例化行增加一个小型 preference modifier，未宣称测得零开销。
+
+全部原有断言、4 秒准备期限、三次原生提交、真实滚轮移动、手动跟随暂停、目标初始不可见、Seek 后实际目标行可见、文档位置改变以及音频/服务/歌词两帧精度均保留。缺失的未实例化行仍失败，不补坐标。AX 继续作为诊断，同时记录实际行身份、布局 revision、原生接收器挂载与 frame。测试还通过公开 NSView 缓存渲染接口输出合成歌词 PNG，供检查字形；采集在准备结束或最终断言之后，不用于延长 Seek 等待或判定准备成功。这些证据不等于 VoiceOver 语义、实体屏幕像素或帧率验收。
 
 ## 导航与搜索
 
@@ -71,6 +81,8 @@ NativeScrollPreferences 继续读取并监听系统 preferredScrollerStyle，不
 CI 顺序：编译 → 独立窗口 XCTest → 独立歌词视口 XCTest → 媒体时钟/严格 PCM → AutoMix EOF → App 构建/校验 → Preview 上传 → 未过滤的完整 Swift Testing（含 MLX GPU）→ 最终测试包上传。
 
 Preview 附带 `PREVIEW.md` 和机器可读状态，明确完整回归在上传时尚未完成；缺少必要安全专项或 App 身份/架构校验时不得上传。最终 Test 使用同一次构建的相同 App，只在完整套件成功后上传。现有 Mac 测试身份、ad-hoc 签名及自动更新禁用策略不变。
+
+CI 未分配 Runner 超过 10 分钟时停止主动轮询，保存头提交、链接与待验证项供用户接管；明确容量不足可提前交接。不取消用户接管的排队任务，不创建重复并行运行。一旦开始编译、测试或打包，正常跟进整个运行，不受 10 分钟等待上限限制。
 
 CI #27 未获取到 hosted Runner，GitHub 明确报告 arm64 容量不足；它没有执行编译。CI #28 在新增测试宿主的 actor 标记及滚轮方法名处编译失败，已针对两处修正；不是窗口或音频运行结果。后续实际结果见 PR #3，不以历史成功结果替代当前验证。
 
