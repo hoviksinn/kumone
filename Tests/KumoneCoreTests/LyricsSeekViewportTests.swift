@@ -1,6 +1,7 @@
 import AppKit
 import AVFoundation
 import CoreGraphics
+import Dispatch
 import SwiftUI
 import XCTest
 @testable import KumoneCore
@@ -453,6 +454,10 @@ extension LyricsSeekViewportTests {
                        in scroll: NSScrollView, window: NSWindow) throws -> [String: Any] {
         let cg = try XCTUnwrap(CGEvent(scrollWheelEvent2Source: nil, units: .pixel,
                                       wheelCount: 2, wheel1: delta, wheel2: 0, wheel3: 0))
+        // CGEvent's synthetic default was 0 in the actual CI receipts. Native
+        // scroll processing needs genuine, ordered input timestamps, measured
+        // in host uptime nanoseconds rather than wall time or audio time.
+        cg.timestamp = DispatchTime.now().uptimeNanoseconds
         cg.setIntegerValueField(.scrollWheelEventIsContinuous, value: 1)
         cg.setIntegerValueField(.scrollWheelEventScrollPhase, value: Int64(phase.rawValue))
         let point = scroll.convert(NSPoint(x: scroll.bounds.midX, y: scroll.bounds.midY), to: nil)
@@ -464,6 +469,7 @@ extension LyricsSeekViewportTests {
         let event = try XCTUnwrap(NSEvent(cgEvent: cg))
         XCTAssertEqual(event.type, .scrollWheel)
         XCTAssertEqual(event.phase, expectedPhase, "Reject malformed native phase injection")
+        XCTAssertGreaterThan(event.timestamp, 0, "The native input must carry a real host timestamp")
         let before = scroll.documentVisibleRect
         scroll.scrollWheel(with: event)
         return ["phase": event.phase.rawValue, "delta": delta,
@@ -473,6 +479,7 @@ extension LyricsSeekViewportTests {
                 "cgFixedDeltaY": cg.getDoubleValueField(.scrollWheelEventFixedPtDeltaAxis1),
                 "hasPreciseScrollingDeltas": event.hasPreciseScrollingDeltas,
                 "momentumPhase": event.momentumPhase.rawValue, "eventTimestamp": event.timestamp,
+                "cgTimestampNanoseconds": cg.timestamp,
                 "eventWindowNumber": event.windowNumber,
                 "fixtureWindowNumber": window.windowNumber,
                 "eventHasFixtureWindow": event.window === window,
@@ -500,6 +507,10 @@ extension LyricsSeekViewportTests {
         fixture.wheelReceipts[fixture.wheelReceipts.count - 1]["followButtonAfterNativeCommit"] = hasFollowButton(fixture)
         fixture.wheelReceipts.append(try wheel(0, phase: .ended, expectedPhase: .ended,
                                               in: scroll, window: fixture.window))
+        let timestamps = fixture.wheelReceipts.compactMap { $0["eventTimestamp"] as? TimeInterval }
+        XCTAssertEqual(timestamps.count, 3)
+        XCTAssertTrue(zip(timestamps, timestamps.dropFirst()).allSatisfy { $0.0 < $0.1 },
+                      "Native gesture phases must carry strictly increasing input timestamps")
         try await waitForSetup(fixture, description: "native wheel movement and production follow button") {
             scroll.documentVisibleRect != before && self.hasFollowButton(fixture)
         }

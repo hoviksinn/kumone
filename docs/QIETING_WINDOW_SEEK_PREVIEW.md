@@ -53,6 +53,12 @@
 
 手动两例的三个相位均为预期的 1/4/8，但同步派发后及四秒观察结束时文档分别停在原来的 17/25pt，布局 revision 不变、无跟随按钮。事件 windowNumber=0、未关联测试窗，位置仍在滚动视图范围；这些记录尚不能唯一说明窗口关联或相位合并哪个是原因。下一单变量实验仅在 began/changed 后各完成现有 nativeLayoutCommit，使三个输入相位不在同一同步栈内结束，同时记录提交后的实际文档/按钮与原生 delta。事件窗口、坐标、生产逻辑、四秒期限和 Seek 后三次提交均不变；这是测试宿主输入序列实验，未验证前不宣称修复。
 
+### CI #37：标准手动滚动后 Seek 已通过，修正零时间戳输入
+
+[实际运行](https://github.com/hoviksinn/kumone/actions/runs/39519786456) 的编译、18 项窗口（56.971 秒）、18 项时钟/PCM（20.038 秒）、EOF（5.190 秒）通过；普通播放及暂停后的标准歌词手动滚动/Seek 两项通过。后者真实文档先 17→97pt、跟随按钮实际出现，再 Seek 至 12 秒，约 30ms 内目标行可见、文档 97→2066pt、全部媒体时间一致。它仍使用 windowNumber=0 的事件，所以不能认为未绑定窗口必然导致拒收。
+
+[诊断](https://github.com/hoviksinn/kumone/actions/runs/39519786456/artifacts/12310458043) 中沉浸式的交互已显示跟随按钮，非零精确滚动 delta 为 -80/-100，但文档没有移动；所有合成 NSEvent.timestamp 均为 0。下一单变量仅在 CGEvent→NSEvent 转换前设置真实 `DispatchTime.now().uptimeNanoseconds`，并断言转换后的时间非零且相位严格递增。CGEventTimestamp 官方单位是启动以来纳秒，不使用 Date、Mach rawValue、音乐时间或人为偏移。事件窗口、幅值、相位提交、原四秒期限、Seek 三次提交和生产歌词逻辑不变；是否解决剩余宿主输入仍待实际 CI，不能先认定唯一根因。
+
 ## 导航与搜索
 
 CI #13 的返回和侧栏按钮由系统导航容器生成，没有可直接复制的独立旧样式。本轮按用户确认的原生风格，在现有稳定中列 header 使用公开 `.buttonStyle(.glass)` 与原生 Button；不恢复 NavigationSplitView，不移动唯一 PlayerBar。
