@@ -5,7 +5,7 @@ import SwiftUI
 /// adapted to the existing, navigation-independent HSplitView state.
 @MainActor
 final class MainWindowNativeToolbar: NSObject, NSToolbarDelegate, NSToolbarItemValidation {
-    static let identifier = NSToolbar.Identifier(rawValue: "QieTing.MainWindow.NativeToolbar")
+    static let identifier: NSToolbar.Identifier = "QieTing.MainWindow.NativeToolbar"
     static let backIdentifier = NSToolbarItem.Identifier(rawValue: "QieTing.MainWindow.Back")
     static let searchIdentifier = NSToolbarItem.Identifier(rawValue: "QieTing.MainWindow.Search")
     static let trailingInsetIdentifier = NSToolbarItem.Identifier(rawValue: "QieTing.MainWindow.PanelInset")
