@@ -27,6 +27,32 @@ struct LyricsViewportAnchorKey: PreferenceKey {
     }
 }
 
+// An optional, read-only test observer; the app installs no callback. Position
+// ownership remains in this view and never feeds back into the media clock.
+typealias LyricsScrollDiagnostics = @MainActor (String, Bool, Bool, UInt64) -> Void
+private struct LyricsScrollDiagnosticsKey: EnvironmentKey {
+    static var defaultValue: LyricsScrollDiagnostics? { nil }
+}
+extension EnvironmentValues {
+    var lyricsScrollDiagnostics: LyricsScrollDiagnostics? {
+        get { self[LyricsScrollDiagnosticsKey.self] }
+        set { self[LyricsScrollDiagnosticsKey.self] = newValue }
+    }
+}
+
+/// No Observable/Published state: cancellation during view teardown must not
+/// publish back into the SwiftUI graph being removed.
+private final class LyricsScrollRequests {
+    var generation: UInt64 = 0
+    var pendingReconciliation: UInt64?
+    var isAttached = false
+
+    func invalidate() {
+        generation &+= 1
+        pendingReconciliation = nil
+    }
+}
+
 private struct LyricsFocusState: Equatable {
     let index: Int?
     let seekRevision: UInt64
@@ -48,11 +74,13 @@ private struct LyricsPanelContent: View {
     @EnvironmentObject private var player: PlayerService
     @ObservedObject var lyricsCursor: LyricsCursor
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.lyricsScrollDiagnostics) private var scrollDiagnostics
 
     @State private var activeIndex: Int?
     // Keep the semantic target in the native scroll coordinator rather than
     // issuing a one-shot proxy request that can race pending wheel updates.
     @State private var scrollPosition = ScrollPosition(idType: Int.self)
+    @State private var scrollRequests = LyricsScrollRequests()
     @State private var isUserScrolling = false
     @State private var resumeTask: Task<Void, Never>?
 
@@ -60,7 +88,11 @@ private struct LyricsPanelContent: View {
         content
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(.primary.opacity(presentation == .immersive ? 0 : 0.025))
-            .onDisappear { resumeTask?.cancel() }
+            .onDisappear {
+                resumeTask?.cancel()
+                scrollRequests.isAttached = false
+                scrollRequests.invalidate()
+            }
     }
 
     @ViewBuilder
@@ -99,13 +131,21 @@ private struct LyricsPanelContent: View {
                 .onScrollPhaseChange { _, phase in
                     switch phase {
                     case .tracking, .interacting:
+                        scrollRequests.invalidate()
                         isUserScrolling = true
                         resumeTask?.cancel()
+                        scrollDiagnostics?("new-user-interaction", scrollPosition.isPositionedByUser,
+                                           isUserScrolling, scrollRequests.generation)
                     case .idle where isUserScrolling:
                         scheduleResume()
                     default:
                         break // Programmatic .animating is not user input.
                     }
+                }
+                .onChange(of: scrollPosition) { _, position in
+                    scrollDiagnostics?("native-position-update", position.isPositionedByUser,
+                                       isUserScrolling, scrollRequests.generation)
+                    reconcileLateUserPosition(position)
                 }
                 .onChange(of: LyricsFocusState(index: lyricsCursor.activeIndex,
                                               seekRevision: lyricsCursor.seekRevision)) { previous, current in
@@ -120,6 +160,7 @@ private struct LyricsPanelContent: View {
                     scroll(to: index, animated: true)
                 }
                 .onChange(of: player.currentTrack?.id) { _, _ in
+                    scrollRequests.invalidate()
                     resumeTask?.cancel()
                     isUserScrolling = false
                     activeIndex = nil
@@ -128,7 +169,10 @@ private struct LyricsPanelContent: View {
                 .onChange(of: lyrics) { _, _ in
                     adoptCursor()
                 }
-                .onAppear { adoptCursor() }
+                .onAppear {
+                    scrollRequests.isAttached = true
+                    adoptCursor()
+                }
                 .overlay(alignment: .bottom) {
                     if isUserScrolling {
                         Button {
@@ -165,15 +209,19 @@ private struct LyricsPanelContent: View {
     }
 
     private func adoptCursor() {
+        scrollRequests.invalidate()
         resumeTask?.cancel()
         isUserScrolling = false
         activeIndex = lyricsCursor.activeIndex
         let trackID = player.currentTrack?.id
         let seekRevision = lyricsCursor.seekRevision
+        let generation = scrollRequests.generation
         // The target layout must be mounted. Re-read the cursor in
         // the deferred turn, rather than applying a stale pre-seek position.
         DispatchQueue.main.async {
-            guard player.currentTrack?.id == trackID,
+            guard scrollRequests.isAttached, !isUserScrolling,
+                  scrollRequests.generation == generation,
+                  player.currentTrack?.id == trackID,
                   lyricsCursor.seekRevision == seekRevision,
                   let index = lyricsCursor.activeIndex else { return }
             activeIndex = index
@@ -192,11 +240,38 @@ private struct LyricsPanelContent: View {
     }
 
     private func resumeFollowing() {
+        scrollRequests.invalidate()
         resumeTask?.cancel()
         isUserScrolling = false
         guard let index = lyricsCursor.activeIndex else { return }
         activeIndex = index
         scroll(to: index, animated: true)
+    }
+
+    private func reconcileLateUserPosition(_ position: ScrollPosition) {
+        guard position.isPositionedByUser, !isUserScrolling,
+              scrollRequests.isAttached, scrollRequests.pendingReconciliation == nil else { return }
+        let generation = scrollRequests.generation
+        let trackID = player.currentTrack?.id
+        let seekRevision = lyricsCursor.seekRevision
+        scrollRequests.pendingReconciliation = generation
+        scrollDiagnostics?("late-user-write-queued", position.isPositionedByUser,
+                           isUserScrolling, generation)
+        // A native wheel update from a completed gesture can arrive after the
+        // explicit target. Coalesce its binding feedback outside native layout;
+        // genuine new interaction invalidates this work before it can run.
+        DispatchQueue.main.async {
+            guard scrollRequests.pendingReconciliation == generation else { return }
+            scrollRequests.pendingReconciliation = nil
+            guard scrollRequests.isAttached, !isUserScrolling,
+                  scrollRequests.generation == generation,
+                  player.currentTrack?.id == trackID,
+                  lyricsCursor.seekRevision == seekRevision,
+                  let index = lyricsCursor.activeIndex else { return }
+            scroll(to: index, animated: false)
+            scrollDiagnostics?("late-user-write-reconciled", scrollPosition.isPositionedByUser,
+                               isUserScrolling, generation)
+        }
     }
 
     private func scroll(to index: Int, animated: Bool) {
@@ -206,6 +281,7 @@ private struct LyricsPanelContent: View {
             }
         } else {
             var transaction = Transaction()
+            transaction.animation = nil
             transaction.disablesAnimations = true
             withTransaction(transaction) {
                 scrollPosition.scrollTo(id: index, anchor: UnitPoint(x: 0.5, y: 0.42))

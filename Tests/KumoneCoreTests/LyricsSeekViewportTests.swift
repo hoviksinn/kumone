@@ -66,14 +66,29 @@ private enum LyricsViewportEvidence {
 }
 
 @MainActor
+private final class LyricsScrollRecorder {
+    var events: [[String: Any]] = []
+
+    func record(_ event: String, positionedByUser: Bool, manualMode: Bool, generation: UInt64) {
+        events.append(["event": event, "positionedByUser": positionedByUser,
+                       "manualMode": manualMode, "generation": generation,
+                       "uptimeSeconds": ProcessInfo.processInfo.systemUptime])
+    }
+}
+
+@MainActor
 private struct HostedLyricsRoot: View {
     let player: PlayerService
     let presentation: LyricsPanelPresentation
+    let scrollRecorder: LyricsScrollRecorder
 
     var body: some View {
         LyricsPanel(presentation: presentation)
             .environmentObject(player)
             .environmentObject(SettingsManager.shared)
+            .environment(\.lyricsScrollDiagnostics) { event, byUser, manual, generation in
+                scrollRecorder.record(event, positionedByUser: byUser, manualMode: manual, generation: generation)
+            }
             .overlayPreferenceValue(LyricsViewportAnchorKey.self) { anchors in
                 GeometryReader { geometry in
                     LyricsGeometryCapture(frames: anchors.mapValues { geometry[$0] })
@@ -147,6 +162,7 @@ extension LyricsSeekViewportTests {
         let player: PlayerService
         let window: NSWindow
         let host: NSHostingView<HostedLyricsRoot>
+        let scrollRecorder: LyricsScrollRecorder
         let temporaryDirectory: URL
         var lastAccessibilityQuery: [String: Any] = [:]
         var wheelReceipts: [[String: Any]] = []
@@ -196,12 +212,15 @@ extension LyricsSeekViewportTests {
                               styleMask: [.titled, .closable, .resizable],
                               backing: .buffered, defer: false)
             fixtureWindow.isReleasedWhenClosed = false
-            let fixtureHost = NSHostingView(rootView: HostedLyricsRoot(player: fixturePlayer, presentation: presentation))
+            let recorder = LyricsScrollRecorder()
+            let fixtureHost = NSHostingView(rootView: HostedLyricsRoot(player: fixturePlayer, presentation: presentation,
+                                                                     scrollRecorder: recorder))
             temporaryDirectory = directory
             engine = fixtureEngine
             player = fixturePlayer
             window = fixtureWindow
             host = fixtureHost
+            scrollRecorder = recorder
             fixtureWindow.contentView = fixtureHost
             fixtureWindow.makeKeyAndOrderFront(nil)
             fixtureHost.layoutSubtreeIfNeeded()
@@ -427,6 +446,7 @@ extension LyricsSeekViewportTests {
             "nativeCachedRendering": rendering,
             "nativeWheelReceipts": fixture.wheelReceipts,
             "nativeLiveScrollReceipts": fixture.liveScrollReceipts,
+            "scrollOwnershipEvents": fixture.scrollRecorder.events,
             "accessibilityQuery": fixture.lastAccessibilityQuery,
             "accessibility": accessibility.prefix(240).map { item -> [String: Any] in
                 ["class": item.sourceClass, "role": item.role, "label": item.label,
@@ -452,6 +472,7 @@ extension LyricsSeekViewportTests {
                         "scenario": "setup-ready: \(description)",
                         "geometryCapture": geometrySnapshot(fixture),
                         "nativeWheelReceipts": fixture.wheelReceipts,
+                        "scrollOwnershipEvents": fixture.scrollRecorder.events,
                     ])
                 }
                 return
@@ -511,6 +532,7 @@ extension LyricsSeekViewportTests {
 
     private func enterRealManualScrolling(_ fixture: Fixture, scroll: NSScrollView) async throws {
         let before = scroll.documentVisibleRect
+        let receiptStart = fixture.wheelReceipts.count
         fixture.wheelReceipts.append(try wheel(-80, phase: .began, expectedPhase: .began,
                                               in: scroll, window: fixture.window))
         // A real gesture delivers separate native input turns. Sending its
@@ -527,7 +549,7 @@ extension LyricsSeekViewportTests {
         fixture.wheelReceipts[fixture.wheelReceipts.count - 1]["followButtonAfterNativeCommit"] = hasFollowButton(fixture)
         fixture.wheelReceipts.append(try wheel(0, phase: .ended, expectedPhase: .ended,
                                               in: scroll, window: fixture.window))
-        let timestamps = fixture.wheelReceipts.compactMap { $0["eventTimestamp"] as? TimeInterval }
+        let timestamps = fixture.wheelReceipts.dropFirst(receiptStart).compactMap { $0["eventTimestamp"] as? TimeInterval }
         XCTAssertEqual(timestamps.count, 3)
         XCTAssertTrue(zip(timestamps, timestamps.dropFirst()).allSatisfy { $0.0 < $0.1 },
                       "Native gesture phases must carry strictly increasing input timestamps")
@@ -613,6 +635,7 @@ extension LyricsSeekViewportTests {
             "geometryBeforeSeek": geometryBefore, "geometryAfterSeek": geometrySnapshot(fixture),
             "nativeLayoutCommits": layoutCommits, "nativeWheelReceipts": fixture.wheelReceipts,
             "nativeLiveScrollReceipts": fixture.liveScrollReceipts,
+            "scrollOwnershipEvents": fixture.scrollRecorder.events,
             "seekIssuedUptimeSeconds": issued,
             "viewportScreenFrame": NSStringFromRect(viewport),
             "documentVisibleBefore": NSStringFromRect(before),
@@ -641,6 +664,25 @@ extension LyricsSeekViewportTests {
             "presentation": presentation == .standard ? "standard" : "immersive",
             "paused": paused, "nativeCachedRendering": LyricsViewportEvidence.capturePNG(fixture.host),
         ])
+        if manualScroll {
+            // After all original Seek assertions, a fresh genuine gesture
+            // must take ownership again. Reconciliation must never pin the
+            // document to the cursor while the user is exploring lyrics.
+            try await enterRealManualScrolling(fixture, scroll: scroll)
+            XCTAssertEqual(fixture.player.progress, target)
+            XCTAssertEqual(fixture.player.lyricsCursor.activeIndex, targetIndex)
+            XCTAssertEqual(fixture.engine.position(of: .a), target, accuracy: 2 / DeckChain.format.sampleRate)
+            XCTAssertEqual(fixture.player.isPlaying, !paused)
+            try LyricsViewportEvidence.record([
+                "scenario": "fresh-manual-scroll-after-seek",
+                "presentation": presentation == .standard ? "standard" : "immersive",
+                "paused": paused, "geometryCapture": geometrySnapshot(fixture),
+                "nativeWheelReceipts": fixture.wheelReceipts,
+                "scrollOwnershipEvents": fixture.scrollRecorder.events,
+                "documentVisibleAfter": NSStringFromRect(scroll.documentVisibleRect),
+                "followButtonVisible": hasFollowButton(fixture),
+            ])
+        }
     }
 
     func testPausedExternalSeekReanchorsStandardLyricsAfterRealManualScroll() async throws {

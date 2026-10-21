@@ -75,6 +75,14 @@
 
 局部改为公开 [ScrollPosition](https://developer.apple.com/documentation/swiftui/scrollposition) 与 scrollTargetLayout 持有语义行 ID，替代 ScrollViewReader 的一次性 proxy。保留手动跟随/恢复、原 Spring、无动画显式 Seek 事务、歌曲/Seek 版本 guard、全部字形和真实媒体时钟；不加 snapping，不由滚动位置反写音频。歌曲切换清理新 UI 状态。仍须由原三次提交和真实几何 trace 验证协调效果，不因 API 名称宣称修复；新增 0.5pt 真实焦点对齐断言，防止像旧标准用例那样仅因“还可见”而漏掉约 99pt 的残留位移。
 
+### CI #40：语义绑定仍有残留覆盖，增加事件驱动仲裁
+
+[实际运行](https://github.com/hoviksinn/kumone/actions/runs/39523551764) 编译、18/18 窗口（56.440 秒）、18/18 时钟/PCM（19.452 秒）、EOF（5.277 秒）通过。三个原有的真实目标可见性断言均通过，但新增的 0.5pt 焦点断言在标准暂停场景失败，仍不能交付 Preview。[诊断](https://github.com/hoviksinn/kumone/actions/runs/39523551764/artifacts/12312243887) 中 Seek 后约 30ms 出现原生 didLiveScroll，文档高度恒定而目标行偏离约 122pt；沉浸场景绑定随后纠正至精确焦点，说明语义 API 单独使用尚不能稳定仲裁所有晚到写入。
+
+后续局部候选只观察真实 ScrollPosition 回写：自动跟随时收到 isPositionedByUser 才合并一次主队列重定位；执行前重新核对手动模式、歌曲、Seek 版本和工作代次。新手势、歌曲变化及视图离开取消旧工作，原有延迟 adoptCursor 也遵循相同代次保护。取消 bookkeeping 使用无发布的引用对象，避免窗口销毁时回写 SwiftUI 状态。无 Timer、轮询、媒体时间偏移或额外音频 Seek。只读测试回调记录实际用户位置标记及仲裁事件，不参与位置计算。
+
+原三次提交、4 秒准备期限、17 条原始断言、两帧音频精度及新增严格焦点断言全部保留。原断言及截图完成后，两个手动场景再发送新一轮真实原生手势，验证文档能移动、生产跟随按钮重新出现且媒体位置不变。新行为须由 macOS 实际执行确认，不能根据代码或 Linux 静态解析宣布已修复。
+
 ## 导航与搜索
 
 CI #13 的返回和侧栏按钮由系统导航容器生成，没有可直接复制的独立旧样式。本轮按用户确认的原生风格，在现有稳定中列 header 使用公开 `.buttonStyle(.glass)` 与原生 Button；不恢复 NavigationSplitView，不移动唯一 PlayerBar。
