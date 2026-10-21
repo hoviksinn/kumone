@@ -89,6 +89,16 @@
 
 这反驳了“didLiveScroll 必然等于 ScrollPosition 用户回写”的推断。下一单变量仅把同一真实 NSEvent 先 postEvent 入当前进程队列、由 nextEvent 非阻塞取出，断言 NSApp.currentEvent 对应同一相位和时间，再向原生产滚动视图派发。Apple [currentEvent](https://developer.apple.com/documentation/appkit/nsapplication/currentevent) 定义其来自事件队列；之前的直接方法调用未经过此上下文。没有全局事件注入、TCC、私有 window/event setter、延迟或伪造坐标。生产滚动算法保持不变，仅只读诊断补齐全部相位；真实效果仍待专项运行。
 
+### CI #42：事件上下文已建立，完整输入路由仍缺失
+
+[实际运行](https://github.com/hoviksinn/kumone/actions/runs/39581832844) 编译、18/18 窗口（59.177 秒）、18/18 时钟/PCM、EOF 通过，歌词仍失败，无 App。[诊断](https://github.com/hoviksinn/kumone/actions/runs/39581832844/artifacts/12337561389) 确认每个 currentEvent 与所派发事件相位/时间完全匹配，但 positionedByUser 仍全部 false。首手势正常 interacting→decelerating；Seek 后新手势只有 idle→decelerating，未进入 interacting，且 Follow 不出现。这排除了“仅 currentEvent 缺失”；直接调用 scrollWheel 没有提供可依赖的完整窗口/交互输入环境，不能把它产生的剩余移动全部认定为生产回写缺陷。
+
+[Chromium 原生测试源码](https://chromium.googlesource.com/chromium/src/+/5960a0c6841d5ec6de00978177beb00a93d92a7e/ui/events/test/cocoa_test_event_utils.mm) 明确：公开 CG window 字段不会建立 NSEvent.window，完整关联随后依赖私有反射。本项目不采用该路径，也不为这个已被源码否定的候选再跑 CI。两次未触发的 reconciliation 候选清理掉，保留实际 Seek 代次/挂载/新手势 guard，不交付未经验证的额外补滚。
+
+真实手动行为验证改用公开原生 NSScroller：从实际 knob/slot 的 rect 和窗口转换取输入点，testPart 确认命中真实滑块；带真实 windowNumber 的 mouse down/drag/up 经 NSApp.sendEvent 路由，原生控件自己移动文档。没有改 knob 值、文档 bounds、歌词坐标或系统滚动条偏好。预排 drag/up 避免原生同步 tracking 阻塞，只补发仍属本 fixture 的未消费输入，防止重复分发。
+
+三个测试名称/场景保留；原 15 项实际行为/时间断言逐项保留。原 2 项“滚轮类型与相位”包格式断言由真实鼠标类型、窗口关联、knob 命中、非零且递增时间戳等输入校验替换，属于宿主重设，不删除行为失败。4 秒准备期限、三次 Seek 提交、2 帧音频精度、严格真实焦点对齐及 Seek 后新手动操作仍保留。必须实际文档移动且真实 Follow 出现，缺失行仍失败。此路径等效覆盖手动跟随暂停/外部 Seek 恢复，但不证明触控板惯性或旧 wheel 更新已取消；该边界留待真实 Mac 或完整 XCUITest App 宿主验收，不能改称全部已修复。
+
 ## 导航与搜索
 
 CI #13 的返回和侧栏按钮由系统导航容器生成，没有可直接复制的独立旧样式。本轮按用户确认的原生风格，在现有稳定中列 header 使用公开 `.buttonStyle(.glass)` 与原生 Button；不恢复 NavigationSplitView，不移动唯一 PlayerBar。

@@ -59,7 +59,7 @@ private enum LyricsViewportEvidence {
         try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(),
                                                 withIntermediateDirectories: true)
         try JSONSerialization.data(withJSONObject: [
-            "scope": "Actual production LyricsPanel in NSHostingView; real native wheel/document motion and production row identity/text/bounds from public SwiftUI anchors, converted through one native receiver. AX is supplemental. No glyph-pixel/VoiceOver/DAC/listening/frame-throughput claim.",
+            "scope": "Actual production LyricsPanel in NSHostingView; real native scroller mouse input/document motion and production row identity/text/bounds from public SwiftUI anchors, converted through one native receiver. AX is supplemental. Trackpad momentum is not automated here. No glyph-pixel/VoiceOver/DAC/listening/frame-throughput claim.",
             "cases": cases,
         ], options: [.prettyPrinted, .sortedKeys]).write(to: destination, options: .atomic)
     }
@@ -165,7 +165,7 @@ extension LyricsSeekViewportTests {
         let scrollRecorder: LyricsScrollRecorder
         let temporaryDirectory: URL
         var lastAccessibilityQuery: [String: Any] = [:]
-        var wheelReceipts: [[String: Any]] = []
+        var manualInputReceipts: [[String: Any]] = []
         var liveScrollReceipts: [[String: Any]] = []
         private var liveScrollObserver: NSObjectProtocol?
 
@@ -444,7 +444,7 @@ extension LyricsSeekViewportTests {
             },
             "geometryCapture": geometrySnapshot(fixture),
             "nativeCachedRendering": rendering,
-            "nativeWheelReceipts": fixture.wheelReceipts,
+            "nativeManualInputReceipts": fixture.manualInputReceipts,
             "nativeLiveScrollReceipts": fixture.liveScrollReceipts,
             "scrollOwnershipEvents": fixture.scrollRecorder.events,
             "accessibilityQuery": fixture.lastAccessibilityQuery,
@@ -458,8 +458,9 @@ extension LyricsSeekViewportTests {
 
     private func waitForSetup(_ fixture: Fixture, description: String,
                               captureInitialRendering: Bool = false,
+                              deadline: TimeInterval? = nil,
                               condition: () -> Bool) async throws {
-        let deadline = ProcessInfo.processInfo.systemUptime + 4
+        let expires = deadline ?? (ProcessInfo.processInfo.systemUptime + 4)
         repeat {
             await Fixture.nativeLayoutCommit(fixture.host)
             if condition() {
@@ -471,7 +472,7 @@ extension LyricsSeekViewportTests {
                     try LyricsViewportEvidence.record([
                         "scenario": "setup-ready: \(description)",
                         "geometryCapture": geometrySnapshot(fixture),
-                        "nativeWheelReceipts": fixture.wheelReceipts,
+                        "nativeManualInputReceipts": fixture.manualInputReceipts,
                         "scrollOwnershipEvents": fixture.scrollRecorder.events,
                     ])
                 }
@@ -480,7 +481,7 @@ extension LyricsSeekViewportTests {
             // Only readiness polling. No post-seek delay is admitted below:
             // otherwise the production 3s manual-follow timeout could hide it.
             try await Task.sleep(for: .milliseconds(20))
-        } while ProcessInfo.processInfo.systemUptime < deadline
+        } while ProcessInfo.processInfo.systemUptime < expires
         let failure = setupSnapshot(fixture, scenario: "setup-failed: \(description)")
         try LyricsViewportEvidence.record(failure)
         // Preserve the synthetic failure receipt even if artifact collection
@@ -491,87 +492,85 @@ extension LyricsSeekViewportTests {
         throw FixtureFailure.unready(description)
     }
 
-    private func wheel(_ delta: Int32, phase: CGScrollPhase, expectedPhase: NSEvent.Phase,
-                       in scroll: NSScrollView, window: NSWindow) throws -> [String: Any] {
-        let cg = try XCTUnwrap(CGEvent(scrollWheelEvent2Source: nil, units: .pixel,
-                                      wheelCount: 2, wheel1: delta, wheel2: 0, wheel3: 0))
-        // CGEvent's synthetic default was 0 in the actual CI receipts. Native
-        // scroll processing needs genuine, ordered input timestamps, measured
-        // in host uptime nanoseconds rather than wall time or audio time.
-        cg.timestamp = DispatchTime.now().uptimeNanoseconds
-        cg.setIntegerValueField(.scrollWheelEventIsContinuous, value: 1)
-        cg.setIntegerValueField(.scrollWheelEventScrollPhase, value: Int64(phase.rawValue))
-        let point = scroll.convert(NSPoint(x: scroll.bounds.midX, y: scroll.bounds.midY), to: nil)
-        let screenPoint = window.convertPoint(toScreen: point)
-        // CGEvent positions use global top-left coordinates; the scroll view
-        // receives the event directly, so it needs no global event tap or TCC.
-        let top = NSScreen.screens.first?.frame.maxY ?? 0
-        cg.location = CGPoint(x: screenPoint.x, y: top - screenPoint.y)
-        let event = try XCTUnwrap(NSEvent(cgEvent: cg))
-        XCTAssertEqual(event.type, .scrollWheel)
-        XCTAssertEqual(event.phase, expectedPhase, "Reject malformed native phase injection")
-        XCTAssertGreaterThan(event.timestamp, 0, "The native input must carry a real host timestamp")
-        let previousAppEvent = NSApp.currentEvent
-        // A direct scrollWheel call alone bypasses the application event
-        // context available to native consumers. Establish it through the public
-        // in-process queue, without a global event tap, private setters or
-        // replacing the production scroll view. Never wait for input here.
-        NSApp.postEvent(event, atStart: true)
-        let queued = try XCTUnwrap(NSApp.nextEvent(matching: .scrollWheel, until: Date.distantPast,
-                                                  inMode: .default, dequeue: true))
-        XCTAssertEqual(queued.timestamp, event.timestamp)
-        XCTAssertEqual(queued.phase, expectedPhase)
-        XCTAssertEqual(NSApp.currentEvent?.type, .scrollWheel)
-        XCTAssertEqual(NSApp.currentEvent?.timestamp, queued.timestamp,
-                       "Native dispatch must run in the same actual application event context")
-        let before = scroll.documentVisibleRect
-        scroll.scrollWheel(with: queued)
-        return ["phase": event.phase.rawValue, "delta": delta,
-                "applicationEventTypeBeforeQueue": previousAppEvent.map { String(describing: $0.type) } ?? "none",
-                "applicationCurrentEventMatches": NSApp.currentEvent?.timestamp == queued.timestamp,
-                "applicationCurrentEventPhase": NSApp.currentEvent?.phase.rawValue ?? 0,
-                "scrollingDeltaX": event.scrollingDeltaX, "scrollingDeltaY": event.scrollingDeltaY,
-                "deltaX": event.deltaX, "deltaY": event.deltaY,
-                "cgPointDeltaY": cg.getIntegerValueField(.scrollWheelEventPointDeltaAxis1),
-                "cgFixedDeltaY": cg.getDoubleValueField(.scrollWheelEventFixedPtDeltaAxis1),
-                "hasPreciseScrollingDeltas": event.hasPreciseScrollingDeltas,
-                "momentumPhase": event.momentumPhase.rawValue, "eventTimestamp": event.timestamp,
-                "cgTimestampNanoseconds": cg.timestamp,
-                "eventWindowNumber": event.windowNumber,
-                "fixtureWindowNumber": window.windowNumber,
-                "eventHasFixtureWindow": event.window === window,
-                "locationInWindow": NSStringFromPoint(event.locationInWindow),
-                "locationInScroll": NSStringFromPoint(scroll.convert(event.locationInWindow, from: nil)),
-                "documentVisibleBefore": NSStringFromRect(before),
-                "documentVisibleAfterDispatch": NSStringFromRect(scroll.documentVisibleRect)]
-    }
-
     private func enterRealManualScrolling(_ fixture: Fixture, scroll: NSScrollView) async throws {
+        // CG-created wheel events have no associated NSWindow. Calling
+        // scrollWheel directly moved pixels in CI but did not establish the
+        // complete native interaction lifecycle. Use the actual native knob
+        // and public, window-associated mouse input instead; no fake lyric
+        // coordinates or programmatic document/knob position changes.
+        let deadline = ProcessInfo.processInfo.systemUptime + 4
         let before = scroll.documentVisibleRect
-        let receiptStart = fixture.wheelReceipts.count
-        fixture.wheelReceipts.append(try wheel(-80, phase: .began, expectedPhase: .began,
-                                              in: scroll, window: fixture.window))
-        // A real gesture delivers separate native input turns. Sending its
-        // whole lifetime in one synchronous stack can hide intermediate
-        // interaction phases from the hosted SwiftUI scroll coordinator.
-        // Commit each existing phase; do not sleep or change the Seek budget.
-        await Fixture.nativeLayoutCommit(fixture.host)
-        fixture.wheelReceipts[fixture.wheelReceipts.count - 1]["documentVisibleAfterNativeCommit"] = NSStringFromRect(scroll.documentVisibleRect)
-        fixture.wheelReceipts[fixture.wheelReceipts.count - 1]["followButtonAfterNativeCommit"] = hasFollowButton(fixture)
-        fixture.wheelReceipts.append(try wheel(-100, phase: .changed, expectedPhase: .changed,
-                                              in: scroll, window: fixture.window))
-        await Fixture.nativeLayoutCommit(fixture.host)
-        fixture.wheelReceipts[fixture.wheelReceipts.count - 1]["documentVisibleAfterNativeCommit"] = NSStringFromRect(scroll.documentVisibleRect)
-        fixture.wheelReceipts[fixture.wheelReceipts.count - 1]["followButtonAfterNativeCommit"] = hasFollowButton(fixture)
-        fixture.wheelReceipts.append(try wheel(0, phase: .ended, expectedPhase: .ended,
-                                              in: scroll, window: fixture.window))
-        let timestamps = fixture.wheelReceipts.dropFirst(receiptStart).compactMap { $0["eventTimestamp"] as? TimeInterval }
-        XCTAssertEqual(timestamps.count, 3)
-        XCTAssertTrue(zip(timestamps, timestamps.dropFirst()).allSatisfy { $0.0 < $0.1 },
-                      "Native gesture phases must carry strictly increasing input timestamps")
-        try await waitForSetup(fixture, description: "native wheel movement and production follow button") {
+        scroll.flashScrollers()
+        let scroller = try XCTUnwrap(scroll.verticalScroller)
+        try await waitForSetup(fixture, description: "actual native vertical scroller knob", deadline: deadline) {
+            !scroller.isHiddenOrHasHiddenAncestor && !scroller.rect(for: .knob).isEmpty
+        }
+        let knob = scroller.rect(for: .knob)
+        let slot = scroller.rect(for: .knobSlot)
+        XCTAssertFalse(knob.isEmpty)
+        XCTAssertFalse(slot.isEmpty)
+        let start = scroller.convert(NSPoint(x: knob.midX, y: knob.midY), to: nil)
+        XCTAssertEqual(scroller.testPart(start), .knob, "Input must hit the actual native scroll thumb")
+        let direction: CGFloat = knob.midY < slot.midY ? 1 : -1
+        let endY = min(slot.maxY - knob.height / 2 - 2,
+                       max(slot.minY + knob.height / 2 + 2, knob.midY + direction * 60))
+        let end = scroller.convert(NSPoint(x: knob.midX, y: endY), to: nil)
+        XCTAssertNotEqual(start, end)
+        let number = fixture.manualInputReceipts.count + 1
+        @MainActor func mouse(_ type: NSEvent.EventType, point: NSPoint, number: Int) throws -> NSEvent {
+            let event = try XCTUnwrap(NSEvent.mouseEvent(
+                with: type, location: point, modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: fixture.window.windowNumber, context: nil,
+                eventNumber: number, clickCount: 1, pressure: type == .leftMouseUp ? 0 : 1))
+            XCTAssertEqual(event.type, type)
+            XCTAssertTrue(event.window === fixture.window, "Native input must be associated with the actual host window")
+            XCTAssertGreaterThan(event.timestamp, 0)
+            fixture.manualInputReceipts.append([
+                "input": "native-scroller-mouse-drag", "type": event.type.rawValue,
+                "eventTimestamp": event.timestamp, "eventNumber": event.eventNumber,
+                "eventWindowNumber": event.windowNumber, "eventHasFixtureWindow": event.window === fixture.window,
+                "locationInWindow": NSStringFromPoint(event.locationInWindow),
+                "knobRect": NSStringFromRect(knob), "slotRect": NSStringFromRect(slot),
+            ])
+            return event
+        }
+        let down = try mouse(.leftMouseDown, point: start, number: number)
+        let drag = try mouse(.leftMouseDragged, point: end, number: number)
+        let up = try mouse(.leftMouseUp, point: end, number: number)
+        XCTAssertLessThan(down.timestamp, drag.timestamp)
+        XCTAssertLessThan(drag.timestamp, up.timestamp)
+        // NSScroller may synchronously track until mouse-up. Queue drag/up in
+        // input order before down, as in the already validated native-button
+        // host. NSApplication establishes the real window/responder route.
+        NSApp.postEvent(up, atStart: true)
+        NSApp.postEvent(drag, atStart: true)
+        fixture.manualInputReceipts.append([
+            "stage": "before-native-tracking", "uptimeSeconds": ProcessInfo.processInfo.systemUptime,
+            "documentVisibleRect": NSStringFromRect(scroll.documentVisibleRect),
+            "followButtonVisible": hasFollowButton(fixture),
+        ])
+        NSApp.sendEvent(down)
+        fixture.manualInputReceipts.append([
+            "stage": "after-native-tracking", "uptimeSeconds": ProcessInfo.processInfo.systemUptime,
+            "documentVisibleRect": NSStringFromRect(scroll.documentVisibleRect),
+            "followButtonVisible": hasFollowButton(fixture),
+        ])
+        // If native tracking returned early, dispatch only our still-queued
+        // events; never replay a consumed event or consume other host input.
+        for expected in [drag, up] {
+            let mask: NSEvent.EventTypeMask = expected.type == .leftMouseDragged ? .leftMouseDragged : .leftMouseUp
+            if let queued = NSApp.nextEvent(matching: mask, until: .distantPast, inMode: .default, dequeue: false),
+               queued.windowNumber == expected.windowNumber, queued.eventNumber == expected.eventNumber,
+               let pending = NSApp.nextEvent(matching: mask, until: .distantPast, inMode: .default, dequeue: true) {
+                NSApp.sendEvent(pending)
+            }
+        }
+        try await waitForSetup(fixture, description: "native scroller drag and production follow button", deadline: deadline) {
             scroll.documentVisibleRect != before && self.hasFollowButton(fixture)
         }
+        XCTAssertLessThan(ProcessInfo.processInfo.systemUptime, deadline,
+                          "Scroller preparation and interaction must share the original four-second budget")
         XCTAssertNotEqual(scroll.documentVisibleRect, before, "A generated event without a real scroll is not coverage")
         XCTAssertTrue(hasFollowButton(fixture), "The production manual-follow suspension must actually be active")
     }
@@ -649,7 +648,7 @@ extension LyricsSeekViewportTests {
             "targetRowScreenFrame": targetFrame.map(NSStringFromRect) ?? "not-realized",
             "rowMeasurement": "Actual production row ID and text with public bounds anchor/native screen conversion",
             "geometryBeforeSeek": geometryBefore, "geometryAfterSeek": geometrySnapshot(fixture),
-            "nativeLayoutCommits": layoutCommits, "nativeWheelReceipts": fixture.wheelReceipts,
+            "nativeLayoutCommits": layoutCommits, "nativeManualInputReceipts": fixture.manualInputReceipts,
             "nativeLiveScrollReceipts": fixture.liveScrollReceipts,
             "scrollOwnershipEvents": fixture.scrollRecorder.events,
             "seekIssuedUptimeSeconds": issued,
@@ -681,7 +680,7 @@ extension LyricsSeekViewportTests {
             "paused": paused, "nativeCachedRendering": LyricsViewportEvidence.capturePNG(fixture.host),
         ])
         if manualScroll {
-            // After all original Seek assertions, a fresh genuine gesture
+            // After all original Seek assertions, a fresh genuine native drag
             // must take ownership again. Reconciliation must never pin the
             // document to the cursor while the user is exploring lyrics.
             try await enterRealManualScrolling(fixture, scroll: scroll)
@@ -693,7 +692,7 @@ extension LyricsSeekViewportTests {
                 "scenario": "fresh-manual-scroll-after-seek",
                 "presentation": presentation == .standard ? "standard" : "immersive",
                 "paused": paused, "geometryCapture": geometrySnapshot(fixture),
-                "nativeWheelReceipts": fixture.wheelReceipts,
+                "nativeManualInputReceipts": fixture.manualInputReceipts,
                 "scrollOwnershipEvents": fixture.scrollRecorder.events,
                 "documentVisibleAfter": NSStringFromRect(scroll.documentVisibleRect),
                 "followButtonVisible": hasFollowButton(fixture),
