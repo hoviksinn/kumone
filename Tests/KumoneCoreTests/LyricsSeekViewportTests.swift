@@ -511,9 +511,25 @@ extension LyricsSeekViewportTests {
         XCTAssertEqual(event.type, .scrollWheel)
         XCTAssertEqual(event.phase, expectedPhase, "Reject malformed native phase injection")
         XCTAssertGreaterThan(event.timestamp, 0, "The native input must carry a real host timestamp")
+        let previousAppEvent = NSApp.currentEvent
+        // A direct scrollWheel call alone bypasses the application event
+        // context available to native consumers. Establish it through the public
+        // in-process queue, without a global event tap, private setters or
+        // replacing the production scroll view. Never wait for input here.
+        NSApp.postEvent(event, atStart: true)
+        let queued = try XCTUnwrap(NSApp.nextEvent(matching: .scrollWheel, until: Date.distantPast,
+                                                  inMode: .default, dequeue: true))
+        XCTAssertEqual(queued.timestamp, event.timestamp)
+        XCTAssertEqual(queued.phase, expectedPhase)
+        XCTAssertEqual(NSApp.currentEvent?.type, .scrollWheel)
+        XCTAssertEqual(NSApp.currentEvent?.timestamp, queued.timestamp,
+                       "Native dispatch must run in the same actual application event context")
         let before = scroll.documentVisibleRect
-        scroll.scrollWheel(with: event)
+        scroll.scrollWheel(with: queued)
         return ["phase": event.phase.rawValue, "delta": delta,
+                "applicationEventTypeBeforeQueue": previousAppEvent.map { String(describing: $0.type) } ?? "none",
+                "applicationCurrentEventMatches": NSApp.currentEvent?.timestamp == queued.timestamp,
+                "applicationCurrentEventPhase": NSApp.currentEvent?.phase.rawValue ?? 0,
                 "scrollingDeltaX": event.scrollingDeltaX, "scrollingDeltaY": event.scrollingDeltaY,
                 "deltaX": event.deltaX, "deltaY": event.deltaY,
                 "cgPointDeltaY": cg.getIntegerValueField(.scrollWheelEventPointDeltaAxis1),

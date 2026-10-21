@@ -83,6 +83,12 @@
 
 原三次提交、4 秒准备期限、17 条原始断言、两帧音频精度及新增严格焦点断言全部保留。原断言及截图完成后，两个手动场景再发送新一轮真实原生手势，验证文档能移动、生产跟随按钮重新出现且媒体位置不变。新行为须由 macOS 实际执行确认，不能根据代码或 Linux 静态解析宣布已修复。
 
+### CI #41：用户位置标记反证，先修正事件上下文
+
+[实际运行](https://github.com/hoviksinn/kumone/actions/runs/39525315203) 编译、18/18 窗口（52.585 秒）、18/18 时钟/PCM 与 EOF 通过，歌词仍失败，无 App 上传。[实际回写](https://github.com/hoviksinn/kumone/actions/runs/39525315203/artifacts/12313511620) 的 positionedByUser 从未为 true，故新增仲裁没有执行。标准场景第三次提交仍残留约 25pt 焦点误差；沉浸式原断言通过。两个新增反向手势均实际移动文档，却没有新手动相位及跟随按钮，不能据此认为自动跟随所有权已正确。
+
+这反驳了“didLiveScroll 必然等于 ScrollPosition 用户回写”的推断。下一单变量仅把同一真实 NSEvent 先 postEvent 入当前进程队列、由 nextEvent 非阻塞取出，断言 NSApp.currentEvent 对应同一相位和时间，再向原生产滚动视图派发。Apple [currentEvent](https://developer.apple.com/documentation/appkit/nsapplication/currentevent) 定义其来自事件队列；之前的直接方法调用未经过此上下文。没有全局事件注入、TCC、私有 window/event setter、延迟或伪造坐标。生产滚动算法保持不变，仅只读诊断补齐全部相位；真实效果仍待专项运行。
+
 ## 导航与搜索
 
 CI #13 的返回和侧栏按钮由系统导航容器生成，没有可直接复制的独立旧样式。本轮按用户确认的原生风格，在现有稳定中列 header 使用公开 `.buttonStyle(.glass)` 与原生 Button；不恢复 NavigationSplitView，不移动唯一 PlayerBar。

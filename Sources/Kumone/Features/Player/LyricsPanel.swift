@@ -128,7 +128,9 @@ private struct LyricsPanelContent: View {
                 // NSScrollView supplies overlay scrollers and their fade
                 // timing. Respect the user's "Always" system preference.
                 .scrollIndicators(.automatic)
-                .onScrollPhaseChange { _, phase in
+                .onScrollPhaseChange { previous, phase in
+                    scrollDiagnostics?("native-phase-\(previous)-to-\(phase)", scrollPosition.isPositionedByUser,
+                                       isUserScrolling, scrollRequests.generation)
                     switch phase {
                     case .tracking, .interacting:
                         scrollRequests.invalidate()
