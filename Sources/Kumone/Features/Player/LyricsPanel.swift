@@ -44,12 +44,10 @@ extension EnvironmentValues {
 /// publish back into the SwiftUI graph being removed.
 private final class LyricsScrollRequests {
     var generation: UInt64 = 0
-    var pendingReconciliation: UInt64?
     var isAttached = false
 
     func invalidate() {
         generation &+= 1
-        pendingReconciliation = nil
     }
 }
 
@@ -147,7 +145,6 @@ private struct LyricsPanelContent: View {
                 .onChange(of: scrollPosition) { _, position in
                     scrollDiagnostics?("native-position-update", position.isPositionedByUser,
                                        isUserScrolling, scrollRequests.generation)
-                    reconcileLateUserPosition(position)
                 }
                 .onChange(of: LyricsFocusState(index: lyricsCursor.activeIndex,
                                               seekRevision: lyricsCursor.seekRevision)) { previous, current in
@@ -248,32 +245,6 @@ private struct LyricsPanelContent: View {
         guard let index = lyricsCursor.activeIndex else { return }
         activeIndex = index
         scroll(to: index, animated: true)
-    }
-
-    private func reconcileLateUserPosition(_ position: ScrollPosition) {
-        guard position.isPositionedByUser, !isUserScrolling,
-              scrollRequests.isAttached, scrollRequests.pendingReconciliation == nil else { return }
-        let generation = scrollRequests.generation
-        let trackID = player.currentTrack?.id
-        let seekRevision = lyricsCursor.seekRevision
-        scrollRequests.pendingReconciliation = generation
-        scrollDiagnostics?("late-user-write-queued", position.isPositionedByUser,
-                           isUserScrolling, generation)
-        // A native wheel update from a completed gesture can arrive after the
-        // explicit target. Coalesce its binding feedback outside native layout;
-        // genuine new interaction invalidates this work before it can run.
-        DispatchQueue.main.async {
-            guard scrollRequests.pendingReconciliation == generation else { return }
-            scrollRequests.pendingReconciliation = nil
-            guard scrollRequests.isAttached, !isUserScrolling,
-                  scrollRequests.generation == generation,
-                  player.currentTrack?.id == trackID,
-                  lyricsCursor.seekRevision == seekRevision,
-                  let index = lyricsCursor.activeIndex else { return }
-            scroll(to: index, animated: false)
-            scrollDiagnostics?("late-user-write-reconciled", scrollPosition.isPositionedByUser,
-                               isUserScrolling, generation)
-        }
     }
 
     private func scroll(to index: Int, animated: Bool) {
