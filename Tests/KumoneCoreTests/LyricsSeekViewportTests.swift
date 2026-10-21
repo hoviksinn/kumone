@@ -467,6 +467,12 @@ extension LyricsSeekViewportTests {
         let before = scroll.documentVisibleRect
         scroll.scrollWheel(with: event)
         return ["phase": event.phase.rawValue, "delta": delta,
+                "scrollingDeltaX": event.scrollingDeltaX, "scrollingDeltaY": event.scrollingDeltaY,
+                "deltaX": event.deltaX, "deltaY": event.deltaY,
+                "cgPointDeltaY": cg.getIntegerValueField(.scrollWheelEventPointDeltaAxis1),
+                "cgFixedDeltaY": cg.getDoubleValueField(.scrollWheelEventFixedPtDeltaAxis1),
+                "hasPreciseScrollingDeltas": event.hasPreciseScrollingDeltas,
+                "momentumPhase": event.momentumPhase.rawValue, "eventTimestamp": event.timestamp,
                 "eventWindowNumber": event.windowNumber,
                 "fixtureWindowNumber": window.windowNumber,
                 "eventHasFixtureWindow": event.window === window,
@@ -480,8 +486,18 @@ extension LyricsSeekViewportTests {
         let before = scroll.documentVisibleRect
         fixture.wheelReceipts.append(try wheel(-80, phase: .began, expectedPhase: .began,
                                               in: scroll, window: fixture.window))
+        // A real gesture delivers separate native input turns. Sending its
+        // whole lifetime in one synchronous stack can hide intermediate
+        // interaction phases from the hosted SwiftUI scroll coordinator.
+        // Commit each existing phase; do not sleep or change the Seek budget.
+        await Fixture.nativeLayoutCommit(fixture.host)
+        fixture.wheelReceipts[fixture.wheelReceipts.count - 1]["documentVisibleAfterNativeCommit"] = NSStringFromRect(scroll.documentVisibleRect)
+        fixture.wheelReceipts[fixture.wheelReceipts.count - 1]["followButtonAfterNativeCommit"] = hasFollowButton(fixture)
         fixture.wheelReceipts.append(try wheel(-100, phase: .changed, expectedPhase: .changed,
                                               in: scroll, window: fixture.window))
+        await Fixture.nativeLayoutCommit(fixture.host)
+        fixture.wheelReceipts[fixture.wheelReceipts.count - 1]["documentVisibleAfterNativeCommit"] = NSStringFromRect(scroll.documentVisibleRect)
+        fixture.wheelReceipts[fixture.wheelReceipts.count - 1]["followButtonAfterNativeCommit"] = hasFollowButton(fixture)
         fixture.wheelReceipts.append(try wheel(0, phase: .ended, expectedPhase: .ended,
                                               in: scroll, window: fixture.window))
         try await waitForSetup(fixture, description: "native wheel movement and production follow button") {
