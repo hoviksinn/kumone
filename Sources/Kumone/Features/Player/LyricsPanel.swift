@@ -67,9 +67,6 @@ private struct LyricsPanelContent: View {
                 ScrollViewReader { proxy in
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: presentation.lineSpacing) {
-                            // A proportional inset lets the first and last lines
-                            // reach the same focus position in short windows.
-                            Color.clear.frame(height: geometry.size.height * 0.38)
                             ForEach(lyrics.lines) { line in
                                 LyricsPanelLine(
                                     line: line,
@@ -82,9 +79,14 @@ private struct LyricsPanelContent: View {
                                 }
                                 .id(line.id)
                             }
-                            Color.clear.frame(height: geometry.size.height * 0.48)
                         }
                         .padding(.horizontal, presentation.horizontalPadding)
+                        // Keep large decorative insets out of the lazy row
+                        // height estimate used for off-screen ID scrolling.
+                        // The extra spacing preserves the former gap between
+                        // each inset and its adjacent real lyric row.
+                        .padding(.top, geometry.size.height * 0.38 + presentation.lineSpacing)
+                        .padding(.bottom, geometry.size.height * 0.48 + presentation.lineSpacing)
                         .background(NativeScrollPreferences().frame(width: 0, height: 0))
                     }
                     // NSScrollView supplies overlay scrollers and their fade

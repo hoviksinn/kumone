@@ -150,6 +150,8 @@ extension LyricsSeekViewportTests {
         let temporaryDirectory: URL
         var lastAccessibilityQuery: [String: Any] = [:]
         var wheelReceipts: [[String: Any]] = []
+        var liveScrollReceipts: [[String: Any]] = []
+        private var liveScrollObserver: NSObjectProtocol?
 
         init(presentation: LyricsPanelPresentation, paused: Bool) async throws {
             if !Self.applicationPrepared {
@@ -219,11 +221,27 @@ extension LyricsSeekViewportTests {
         }
 
         func dispose() {
+            if let liveScrollObserver { NotificationCenter.default.removeObserver(liveScrollObserver) }
             engine.stopAll()
             window.orderOut(nil)
             window.contentView = nil
             window.close()
             try? FileManager.default.removeItem(at: temporaryDirectory)
+        }
+
+        func observeLiveScroll(_ scroll: NSScrollView) {
+            liveScrollObserver = NotificationCenter.default.addObserver(
+                forName: NSScrollView.didLiveScrollNotification, object: scroll, queue: .main
+            ) { [weak self, weak scroll] _ in
+                MainActor.assumeIsolated {
+                    guard let self, let scroll else { return }
+                    self.liveScrollReceipts.append([
+                        "uptimeSeconds": ProcessInfo.processInfo.systemUptime,
+                        "documentVisibleRect": NSStringFromRect(scroll.documentVisibleRect),
+                        "documentBounds": NSStringFromRect(scroll.documentView?.bounds ?? .zero),
+                    ])
+                }
+            }
         }
     }
 
@@ -408,6 +426,7 @@ extension LyricsSeekViewportTests {
             "geometryCapture": geometrySnapshot(fixture),
             "nativeCachedRendering": rendering,
             "nativeWheelReceipts": fixture.wheelReceipts,
+            "nativeLiveScrollReceipts": fixture.liveScrollReceipts,
             "accessibilityQuery": fixture.lastAccessibilityQuery,
             "accessibility": accessibility.prefix(240).map { item -> [String: Any] in
                 ["class": item.sourceClass, "role": item.role, "label": item.label,
@@ -432,6 +451,7 @@ extension LyricsSeekViewportTests {
                     try LyricsViewportEvidence.record([
                         "scenario": "setup-ready: \(description)",
                         "geometryCapture": geometrySnapshot(fixture),
+                        "nativeWheelReceipts": fixture.wheelReceipts,
                     ])
                 }
                 return
@@ -531,6 +551,7 @@ extension LyricsSeekViewportTests {
                 && (scroll.documentView?.bounds.height ?? 0) > scroll.contentSize.height
         }
         let scroll = try XCTUnwrap(nativeScroll)
+        fixture.observeLiveScroll(scroll)
         let capture = try XCTUnwrap(geometryCapture(fixture), "The real production-row bounds receiver must be mounted")
         XCTAssertTrue(capture.window === fixture.window)
         XCTAssertEqual(descendants(fixture.host).compactMap { $0 as? LyricsGeometryCapture.CaptureView }.count, 1)
@@ -563,7 +584,16 @@ extension LyricsSeekViewportTests {
         XCTAssertEqual(fixture.player.livePlaybackTime, sample.seconds)
         XCTAssertEqual(fixture.player.lyricsCursor.mediaTime, sample.seconds)
         XCTAssertEqual(fixture.player.lyricsCursor.activeIndex, targetIndex)
-        for _ in 0..<3 { await Fixture.nativeLayoutCommit(fixture.host) }
+        var layoutCommits: [[String: Any]] = []
+        for _ in 0..<3 {
+            await Fixture.nativeLayoutCommit(fixture.host)
+            layoutCommits.append([
+                "uptimeSeconds": ProcessInfo.processInfo.systemUptime,
+                "documentVisibleRect": NSStringFromRect(scroll.documentVisibleRect),
+                "documentBounds": NSStringFromRect(scroll.documentView?.bounds ?? .zero),
+                "geometryCapture": geometrySnapshot(fixture),
+            ])
+        }
         let elapsed = ProcessInfo.processInfo.systemUptime - issued
         let viewport = visibleFrame(of: scroll, in: fixture.window)
         let targetFrame = lineFrame(targetIndex, in: fixture)
@@ -581,6 +611,9 @@ extension LyricsSeekViewportTests {
             "targetRowScreenFrame": targetFrame.map(NSStringFromRect) ?? "not-realized",
             "rowMeasurement": "Actual production row ID and text with public bounds anchor/native screen conversion",
             "geometryBeforeSeek": geometryBefore, "geometryAfterSeek": geometrySnapshot(fixture),
+            "nativeLayoutCommits": layoutCommits, "nativeWheelReceipts": fixture.wheelReceipts,
+            "nativeLiveScrollReceipts": fixture.liveScrollReceipts,
+            "seekIssuedUptimeSeconds": issued,
             "viewportScreenFrame": NSStringFromRect(viewport),
             "documentVisibleBefore": NSStringFromRect(before),
             "documentVisibleAfter": NSStringFromRect(scroll.documentVisibleRect),

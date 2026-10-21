@@ -59,6 +59,14 @@
 
 [诊断](https://github.com/hoviksinn/kumone/actions/runs/39519786456/artifacts/12310458043) 中沉浸式的交互已显示跟随按钮，非零精确滚动 delta 为 -80/-100，但文档没有移动；所有合成 NSEvent.timestamp 均为 0。下一单变量仅在 CGEvent→NSEvent 转换前设置真实 `DispatchTime.now().uptimeNanoseconds`，并断言转换后的时间非零且相位严格递增。CGEventTimestamp 官方单位是启动以来纳秒，不使用 Date、Mach rawValue、音乐时间或人为偏移。事件窗口、幅值、相位提交、原四秒期限、Seek 三次提交和生产歌词逻辑不变；是否解决剩余宿主输入仍待实际 CI，不能先认定唯一根因。
 
+### CI #38：保留真实失败，修正懒布局中的装饰行
+
+[实际运行](https://github.com/hoviksinn/kumone/actions/runs/39520694006) 的编译、18/18 窗口（54.137 秒）、18/18 时钟/PCM（19.025 秒）、EOF（5.092 秒）通过。全部三例均建立真实滚动并执行 Seek，两个标准场景通过；沉浸式唯一失败为实际目标行不可见，未降低断言。
+
+[诊断](https://github.com/hoviksinn/kumone/actions/runs/39520694006/artifacts/12311435047) 记录全部媒体时间 12 秒、游标 24、手动跟随清除，三次提交约 28ms 后文档 105→2776pt，但实际已实现行及缓存 PNG 只有 25～32，行 28 在焦点附近。这是实际视口错误，不能再归为 AX 漏读。初始文档高度 4895pt 明显高于实测 51pt 行高、29.28pt 间距和首尾留白的总和；标准 4154pt 也高于相同算法的约 3294pt。Apple [懒布局说明](https://developer.apple.com/videos/play/wwdc2026/321/)解释了离屏高度估算及新行布局导致的位置变化。
+
+最小生产调整把 LazyVStack 内约 243/307pt 的两条装饰 Color.clear 移到栈外 padding，避免它们参与歌词行高度估算。首尾各加回一段原 lineSpacing，保持原来的首行位置、留白和 41 段间距；不更换 ScrollViewReader、动画、字形或媒体时间轴。预计均匀 fixture 的总高约为标准 3294.4pt、沉浸 3790.9pt，仅作诊断，不以计算值代替真实行坐标。残留原生滚动是否同时参与尚未唯一排除，故在原来的三次提交内增加轻量真实几何记录，并只读记录原生 didLiveScrollNotification 以分辨用户滚动。没有增加 Seek、提交次数、超时或截图计时。
+
 ## 导航与搜索
 
 CI #13 的返回和侧栏按钮由系统导航容器生成，没有可直接复制的独立旧样式。本轮按用户确认的原生风格，在现有稳定中列 header 使用公开 `.buttonStyle(.glass)` 与原生 Button；不恢复 NavigationSplitView，不移动唯一 PlayerBar。
