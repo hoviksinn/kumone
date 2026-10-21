@@ -50,6 +50,9 @@ private struct LyricsPanelContent: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @State private var activeIndex: Int?
+    // Keep the semantic target in the native scroll coordinator rather than
+    // issuing a one-shot proxy request that can race pending wheel updates.
+    @State private var scrollPosition = ScrollPosition(idType: Int.self)
     @State private var isUserScrolling = false
     @State private var resumeTask: Task<Void, Never>?
 
@@ -64,84 +67,85 @@ private struct LyricsPanelContent: View {
     private var content: some View {
         if let lyrics = player.lyrics, !lyrics.isEmpty {
             GeometryReader { geometry in
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: presentation.lineSpacing) {
-                            ForEach(lyrics.lines) { line in
-                                LyricsPanelLine(
-                                    line: line,
-                                    activeIndex: activeIndex,
-                                    presentation: presentation,
-                                    onSeek: { player.seek(to: line.time) }
-                                )
-                                .anchorPreference(key: LyricsViewportAnchorKey.self, value: .bounds) { anchor in
-                                    [.line(id: line.id, text: line.text): anchor]
-                                }
-                                .id(line.id)
-                            }
-                        }
-                        .padding(.horizontal, presentation.horizontalPadding)
-                        // Keep large decorative insets out of the lazy row
-                        // height estimate used for off-screen ID scrolling.
-                        // The extra spacing preserves the former gap between
-                        // each inset and its adjacent real lyric row.
-                        .padding(.top, geometry.size.height * 0.38 + presentation.lineSpacing)
-                        .padding(.bottom, geometry.size.height * 0.48 + presentation.lineSpacing)
-                        .background(NativeScrollPreferences().frame(width: 0, height: 0))
-                    }
-                    // NSScrollView supplies overlay scrollers and their fade
-                    // timing. Respect the user's "Always" system preference.
-                    .scrollIndicators(.automatic)
-                    .onScrollPhaseChange { _, phase in
-                        switch phase {
-                        case .tracking, .interacting:
-                            isUserScrolling = true
-                            resumeTask?.cancel()
-                        case .idle where isUserScrolling:
-                            scheduleResume(proxy: proxy)
-                        default:
-                            break // Programmatic .animating is not user input.
-                        }
-                    }
-                    .onChange(of: LyricsFocusState(index: lyricsCursor.activeIndex,
-                                                  seekRevision: lyricsCursor.seekRevision)) { previous, current in
-                        // A single observation keeps an explicit seek from
-                        // racing the ordinary next-line spring in this commit.
-                        if previous.seekRevision != current.seekRevision {
-                            adoptCursor(proxy: proxy)
-                            return
-                        }
-                        activeIndex = current.index
-                        guard !isUserScrolling, let index = current.index else { return }
-                        scroll(to: index, proxy: proxy, animated: true)
-                    }
-                    .onChange(of: player.currentTrack?.id) { _, _ in
-                        resumeTask?.cancel()
-                        isUserScrolling = false
-                        activeIndex = nil
-                    }
-                    .onChange(of: lyrics) { _, _ in
-                        adoptCursor(proxy: proxy)
-                    }
-                    .onAppear { adoptCursor(proxy: proxy) }
-                    .overlay(alignment: .bottom) {
-                        if isUserScrolling {
-                            Button {
-                                resumeFollowing(proxy: proxy)
-                            } label: {
-                                Label("跟随播放", systemImage: "arrow.down.to.line.compact")
-                                    .font(.system(size: 12, weight: .semibold))
-                                    .padding(.horizontal, 14)
-                                    .padding(.vertical, 9)
-                            }
-                            .buttonStyle(.plain)
-                            .background(.regularMaterial, in: Capsule())
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: presentation.lineSpacing) {
+                        ForEach(lyrics.lines) { line in
+                            LyricsPanelLine(
+                                line: line,
+                                activeIndex: activeIndex,
+                                presentation: presentation,
+                                onSeek: { player.seek(to: line.time) }
+                            )
                             .anchorPreference(key: LyricsViewportAnchorKey.self, value: .bounds) { anchor in
-                                [.followPlayback: anchor]
+                                [.line(id: line.id, text: line.text): anchor]
                             }
-                            .padding(.bottom, 20)
-                            .transition(.opacity)
+                            .id(line.id)
                         }
+                    }
+                    .scrollTargetLayout()
+                    .padding(.horizontal, presentation.horizontalPadding)
+                    // Keep large decorative insets out of the lazy row
+                    // height estimate used for off-screen ID scrolling.
+                    // The extra spacing preserves the former gap between
+                    // each inset and its adjacent real lyric row.
+                    .padding(.top, geometry.size.height * 0.38 + presentation.lineSpacing)
+                    .padding(.bottom, geometry.size.height * 0.48 + presentation.lineSpacing)
+                    .background(NativeScrollPreferences().frame(width: 0, height: 0))
+                }
+                .scrollPosition($scrollPosition, anchor: UnitPoint(x: 0.5, y: 0.42))
+                // NSScrollView supplies overlay scrollers and their fade
+                // timing. Respect the user's "Always" system preference.
+                .scrollIndicators(.automatic)
+                .onScrollPhaseChange { _, phase in
+                    switch phase {
+                    case .tracking, .interacting:
+                        isUserScrolling = true
+                        resumeTask?.cancel()
+                    case .idle where isUserScrolling:
+                        scheduleResume()
+                    default:
+                        break // Programmatic .animating is not user input.
+                    }
+                }
+                .onChange(of: LyricsFocusState(index: lyricsCursor.activeIndex,
+                                              seekRevision: lyricsCursor.seekRevision)) { previous, current in
+                    // A single observation keeps an explicit seek from
+                    // racing the ordinary next-line spring in this commit.
+                    if previous.seekRevision != current.seekRevision {
+                        adoptCursor()
+                        return
+                    }
+                    activeIndex = current.index
+                    guard !isUserScrolling, let index = current.index else { return }
+                    scroll(to: index, animated: true)
+                }
+                .onChange(of: player.currentTrack?.id) { _, _ in
+                    resumeTask?.cancel()
+                    isUserScrolling = false
+                    activeIndex = nil
+                    scrollPosition = ScrollPosition(idType: Int.self)
+                }
+                .onChange(of: lyrics) { _, _ in
+                    adoptCursor()
+                }
+                .onAppear { adoptCursor() }
+                .overlay(alignment: .bottom) {
+                    if isUserScrolling {
+                        Button {
+                            resumeFollowing()
+                        } label: {
+                            Label("跟随播放", systemImage: "arrow.down.to.line.compact")
+                                .font(.system(size: 12, weight: .semibold))
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 9)
+                        }
+                        .buttonStyle(.plain)
+                        .background(.regularMaterial, in: Capsule())
+                        .anchorPreference(key: LyricsViewportAnchorKey.self, value: .bounds) { anchor in
+                            [.followPlayback: anchor]
+                        }
+                        .padding(.bottom, 20)
+                        .transition(.opacity)
                     }
                 }
             }
@@ -160,51 +164,51 @@ private struct LyricsPanelContent: View {
         }
     }
 
-    private func adoptCursor(proxy: ScrollViewProxy) {
+    private func adoptCursor() {
         resumeTask?.cancel()
         isUserScrolling = false
         activeIndex = lyricsCursor.activeIndex
         let trackID = player.currentTrack?.id
         let seekRevision = lyricsCursor.seekRevision
-        // ScrollViewReader needs a laid-out document. Re-read the cursor in
+        // The target layout must be mounted. Re-read the cursor in
         // the deferred turn, rather than applying a stale pre-seek position.
         DispatchQueue.main.async {
             guard player.currentTrack?.id == trackID,
                   lyricsCursor.seekRevision == seekRevision,
                   let index = lyricsCursor.activeIndex else { return }
             activeIndex = index
-            scroll(to: index, proxy: proxy, animated: false)
+            scroll(to: index, animated: false)
         }
     }
 
-    private func scheduleResume(proxy: ScrollViewProxy) {
+    private func scheduleResume() {
         resumeTask?.cancel()
         resumeTask = Task { @MainActor in
             do {
                 try await Task.sleep(for: .seconds(LyricsVisualParameters.followResumeDelay))
             } catch { return }
-            resumeFollowing(proxy: proxy)
+            resumeFollowing()
         }
     }
 
-    private func resumeFollowing(proxy: ScrollViewProxy) {
+    private func resumeFollowing() {
         resumeTask?.cancel()
         isUserScrolling = false
         guard let index = lyricsCursor.activeIndex else { return }
         activeIndex = index
-        scroll(to: index, proxy: proxy, animated: true)
+        scroll(to: index, animated: true)
     }
 
-    private func scroll(to index: Int, proxy: ScrollViewProxy, animated: Bool) {
+    private func scroll(to index: Int, animated: Bool) {
         if animated, !reduceMotion {
             withAnimation(LyricsVisualParameters.scrollAnimation) {
-                proxy.scrollTo(index, anchor: UnitPoint(x: 0.5, y: 0.42))
+                scrollPosition.scrollTo(id: index, anchor: UnitPoint(x: 0.5, y: 0.42))
             }
         } else {
             var transaction = Transaction()
             transaction.disablesAnimations = true
             withTransaction(transaction) {
-                proxy.scrollTo(index, anchor: UnitPoint(x: 0.5, y: 0.42))
+                scrollPosition.scrollTo(id: index, anchor: UnitPoint(x: 0.5, y: 0.42))
             }
         }
     }

@@ -625,6 +625,14 @@ extension LyricsSeekViewportTests {
         XCTAssertTrue(follows, "Explicit external seek must end stale manual-scroll suspension")
         XCTAssertTrue(targetVisible,
                       "Correct engine/service/cursor time is insufficient: the actual target row must become visible")
+        if let targetFrame {
+            // In screen coordinates y grows upward. The real row's 42%
+            // anchor must align with the viewport's, within native rounding.
+            // Merely remaining visible after a stale wheel delta is weaker.
+            XCTAssertEqual(targetFrame.minY + targetFrame.height * 0.58,
+                           viewport.minY + viewport.height * 0.58, accuracy: 0.5,
+                           "A late native scroll must not displace the actual seek target from its focus anchor")
+        }
         XCTAssertNotEqual(scroll.documentVisibleRect, before,
                           "A new active cursor must move the actual native document after external seek")
         XCTAssertEqual(fixture.player.isPlaying, !paused, "Viewport refresh must not change transport state")

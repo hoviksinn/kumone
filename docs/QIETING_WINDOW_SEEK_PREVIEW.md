@@ -67,6 +67,14 @@
 
 最小生产调整把 LazyVStack 内约 243/307pt 的两条装饰 Color.clear 移到栈外 padding，避免它们参与歌词行高度估算。首尾各加回一段原 lineSpacing，保持原来的首行位置、留白和 41 段间距；不更换 ScrollViewReader、动画、字形或媒体时间轴。预计均匀 fixture 的总高约为标准 3294.4pt、沉浸 3790.9pt，仅作诊断，不以计算值代替真实行坐标。残留原生滚动是否同时参与尚未唯一排除，故在原来的三次提交内增加轻量真实几何记录，并只读记录原生 didLiveScrollNotification 以分辨用户滚动。没有增加 Seek、提交次数、超时或截图计时。
 
+### CI #39：实际旧滚动覆盖定位，采用原生语义位置绑定
+
+[实际运行](https://github.com/hoviksinn/kumone/actions/runs/39521991380) 编译、18/18 窗口（59.555 秒）、18/18 时钟/PCM（19.057 秒）、EOF（5.185 秒）通过，两个标准歌词场景通过，沉浸式目标仍不可见。[新 trace](https://github.com/hoviksinn/kumone/actions/runs/39521991380/artifacts/12311297010) 确认 padding 使高度变为 3294/3791pt、初始行位置不变，但这没有解决全部失败。
+
+标准手动场景第一次提交已把真实行 24 正确放在 y=250；此后原生 didLiveScroll 又将文档从 1649 移到 1748pt，真实行变为 y=151，期间文档高度恒定。沉浸式也在 Seek 之后发生 didLiveScroll，最终行 24 离开视口。这直接证明本宿主中旧原生滚动覆盖一次性 UI 定位，不是 AX 漏读、继续行高重估或媒体时间不一致；不能据此概括用户全部一两秒延迟。
+
+局部改为公开 [ScrollPosition](https://developer.apple.com/documentation/swiftui/scrollposition) 与 scrollTargetLayout 持有语义行 ID，替代 ScrollViewReader 的一次性 proxy。保留手动跟随/恢复、原 Spring、无动画显式 Seek 事务、歌曲/Seek 版本 guard、全部字形和真实媒体时钟；不加 snapping，不由滚动位置反写音频。歌曲切换清理新 UI 状态。仍须由原三次提交和真实几何 trace 验证协调效果，不因 API 名称宣称修复；新增 0.5pt 真实焦点对齐断言，防止像旧标准用例那样仅因“还可见”而漏掉约 99pt 的残留位移。
+
 ## 导航与搜索
 
 CI #13 的返回和侧栏按钮由系统导航容器生成，没有可直接复制的独立旧样式。本轮按用户确认的原生风格，在现有稳定中列 header 使用公开 `.buttonStyle(.glass)` 与原生 Button；不恢复 NavigationSplitView，不移动唯一 PlayerBar。
