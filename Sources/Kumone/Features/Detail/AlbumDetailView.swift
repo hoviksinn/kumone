@@ -81,7 +81,7 @@ struct AlbumDetailView: View {
                                 Spacer().frame(width: (Theme.Layout.contentInset) - 16)
                             }
                         }
-                        .scrollIndicators(.hidden, axes: .horizontal)
+                        .scrollIndicators(.never, axes: .horizontal)
                     }
                 } else if isLoading {
                     loadingHeader

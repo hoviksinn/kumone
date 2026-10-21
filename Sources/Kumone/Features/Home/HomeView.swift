@@ -138,7 +138,7 @@ struct HomeView: View {
                     }
                 }
             }
-            .scrollIndicators(.hidden, axes: .horizontal)
+            .scrollIndicators(.never, axes: .horizontal)
             SkeletonShelf()
             SkeletonShelf()
         }
@@ -209,7 +209,7 @@ struct HomeView: View {
                             .padding(.horizontal, Theme.Layout.contentInset)
                             .frame(height: Theme.Layout.coverShelfHeight)
                         }
-                        .scrollIndicators(.hidden, axes: .horizontal)
+                        .scrollIndicators(.never, axes: .horizontal)
                     }
                     .frame(height: Theme.Layout.coverShelfHeight)
                 }
@@ -280,7 +280,7 @@ struct HomeView: View {
             }
             .padding(.vertical, 6)
         }
-        .scrollIndicators(.hidden, axes: .horizontal)
+        .scrollIndicators(.never, axes: .horizontal)
         .compatScrollClipDisabled()
     }
 

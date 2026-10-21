@@ -30,8 +30,12 @@ struct NativeScrollPreferences: NSViewRepresentable {
 
         func applyPreferences() {
             guard let scrollView = enclosingScrollView else { return }
-            scrollView.scrollerStyle = preferredStyle()
-            scrollView.autohidesScrollers = true
+            let style = preferredStyle()
+            if scrollView.scrollerStyle != style { scrollView.scrollerStyle = style }
+            if !scrollView.autohidesScrollers { scrollView.autohidesScrollers = true }
+            // autohidesScrollers removes an unneeded legacy bar when content
+            // fits; it does not fade an overflowing legacy bar on idle. Native
+            // overlay timing belongs to AppKit, while Always stays legacy.
             // Keep the containing ScrollView's enabled axes. Do not enable a
             // horizontal scrollbar on a vertical lyric document, or flash a
             // thumb every time automatic lyric following scrolls the view.

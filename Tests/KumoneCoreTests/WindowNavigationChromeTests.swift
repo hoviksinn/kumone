@@ -291,13 +291,27 @@ extension WindowNavigationChromeTests {
         descendants(root).filter { $0.identifier?.rawValue == name && $0.window != nil }
     }
 
+    /// Native Toolbar controls live beside the content host, not inside its
+    /// NavigationStack. Inspect that real public NSView hierarchy as well.
+    private func windowViews(_ fixture: Fixture) -> [NSView] {
+        descendants(fixture.window.contentView?.superview ?? fixture.host)
+    }
+
+    private func windowMarkers(_ name: String, in fixture: Fixture) -> [NSView] {
+        windowViews(fixture).filter { $0.identifier?.rawValue == name && $0.window === fixture.window }
+    }
+
+    private func toolbarItems(_ identifier: NSToolbarItem.Identifier, in fixture: Fixture) -> [NSToolbarItem] {
+        fixture.window.toolbar?.items.filter { $0.itemIdentifier == identifier } ?? []
+    }
+
     private func rectValues(_ rect: CGRect) -> [String: Double] {
         ["x": Double(rect.minX), "y": Double(rect.minY),
          "width": Double(rect.width), "height": Double(rect.height)]
     }
 
     private func snapshot(_ fixture: Fixture, scenario: String, includeTree: Bool = false) -> [String: Any] {
-        let views = descendants(fixture.host)
+        let views = windowViews(fixture)
         let main = markers("QieTing.MainColumn", in: fixture.host).first
         let contentLayout = fixture.window.contentLayoutRect
         // Build only JSON values here; never hand AppKit objects or enum-keyed
@@ -339,6 +353,12 @@ extension WindowNavigationChromeTests {
             "nativeToolbarVisible": fixture.window.toolbar?.isVisible ?? false,
             "nativeToolbarPresent": fixture.window.toolbar != nil,
             "nativeToolbarItems": fixture.window.toolbar?.items.map { $0.itemIdentifier.rawValue } ?? [],
+            "nativeTitlebarTransparent": fixture.window.titlebarAppearsTransparent,
+            "nativeTitleHidden": fixture.window.titleVisibility == .hidden,
+            "nativeFullSizeContentView": fixture.window.styleMask.contains(.fullSizeContentView),
+            "detailViewportFrame": rectValues(markers("QieTing.DetailViewport", in: fixture.host).first.map {
+                $0.convert($0.bounds, to: fixture.host)
+            } ?? .zero),
             "nativeContentRect": rectValues(fixture.window.contentRect(forFrameRect: fixture.window.frame)),
             "hasAttachedSheet": fixture.window.attachedSheet != nil,
             "hasModalWindow": NSApp.modalWindow != nil,
@@ -409,7 +429,7 @@ extension WindowNavigationChromeTests {
             samples.append([
                 "elapsed": now - started, "layoutSeconds": now - layoutStart,
                 "predicateSatisfied": satisfied, "nativeObservationAvailable": current != nil,
-                "editableFieldCount": descendants(fixture.host).compactMap { $0 as? NSTextField }.filter { $0.isEditable }.count,
+                "editableFieldCount": windowViews(fixture).compactMap { $0 as? NSTextField }.filter { $0.isEditable }.count,
                 "coordinatorAttached": fixture.panels.window === fixture.window,
                 "observationUnchanged": current != nil && current == previous,
                 "unchangedSeconds": now - unchangedSince,
@@ -455,14 +475,21 @@ extension WindowNavigationChromeTests {
         let mainBounds: CGRect
         let mainFrame: CGRect
         let editableFieldCount: Int
+        let toolbarIdentity: ObjectIdentifier
+        let toolbarItems: [String]
+        let searchFrame: CGRect
     }
 
     private func nativeLayoutObservation(_ fixture: Fixture) -> NativeLayoutObservation? {
         guard fixture.panels.window === fixture.window, !fixture.panels.isAnimating,
               let main = markers("QieTing.MainColumn", in: fixture.host).first,
               main.bounds.width >= PlayerLayoutMetrics.minimumMainWidth,
-              main.bounds.height > 0 else { return nil }
-        let fields = descendants(fixture.host).compactMap { $0 as? NSTextField }.filter { $0.isEditable }
+              main.bounds.height > 0,
+              let toolbar = fixture.window.toolbar,
+              toolbar.identifier == MainWindowNativeToolbar.identifier, toolbar.isVisible,
+              toolbarItems(.toggleSidebar, in: fixture).count == 1,
+              let search = windowMarkers("QieTing.Search", in: fixture).first else { return nil }
+        let fields = windowViews(fixture).compactMap { $0 as? NSTextField }.filter { $0.isEditable }
         guard fields.count == 1 else { return nil }
         // SwiftUI installs native titlebar/toolbar constraints after the
         // initial host layout. Observe the resulting minimum and geometry,
@@ -474,7 +501,10 @@ extension WindowNavigationChromeTests {
             hostBounds: fixture.host.bounds,
             mainBounds: main.bounds,
             mainFrame: main.convert(main.bounds, to: fixture.host),
-            editableFieldCount: fields.count)
+            editableFieldCount: fields.count,
+            toolbarIdentity: ObjectIdentifier(toolbar),
+            toolbarItems: toolbar.items.map { $0.itemIdentifier.rawValue },
+            searchFrame: search.convert(search.bounds, to: nil))
     }
 
     private func check(_ fixture: Fixture, destination: Destination?,
@@ -601,7 +631,7 @@ extension WindowNavigationChromeTests {
         fixture.state.path = [.playlist(9)]
         _ = try await check(fixture, destination: .playlist(9), originalBar: bar, scenario: "queue-navigation")
         let minimum = fixture.window.contentMinSize
-        let searchFields = descendants(fixture.host).compactMap { $0 as? NSTextField }.filter { $0.isEditable }
+        let searchFields = windowViews(fixture).compactMap { $0 as? NSTextField }.filter { $0.isEditable }
         expect(searchFields.count == 1)
         let searchField = try require(searchFields.first)
         expect(fixture.window.makeFirstResponder(searchField))
@@ -879,8 +909,9 @@ extension WindowNavigationChromeTests {
         defer { fixture.dispose() }
         let bar = try await check(fixture, destination: nil, scenario: "sidebar-toggle-before-navigation")
         let main = try require(markers("QieTing.MainColumn", in: fixture.host).first)
-        let header = try require(markers("QieTing.MainHeader", in: fixture.host).first)
-        let search = try require(descendants(fixture.host).compactMap { $0 as? NSTextField }.first { $0.isEditable })
+        let toolbar = try require(fixture.window.toolbar)
+        let sidebarItem = try require(toolbarItems(.toggleSidebar, in: fixture).first)
+        let search = try require(windowViews(fixture).compactMap { $0 as? NSTextField }.first { $0.isEditable })
         let serviceID = ObjectIdentifier(fixture.player)
         let clockID = ObjectIdentifier(fixture.player.clock)
         let navigationPath: [Destination] = [.artist(42), .album(7)]
@@ -905,10 +936,10 @@ extension WindowNavigationChromeTests {
             expect(fixture.state.path == navigationPath)
             expect(markers("QieTing.MainColumn", in: fixture.host).count == 1)
             expect(markers("QieTing.MainColumn", in: fixture.host).first === main)
-            expect(markers("QieTing.MainHeader", in: fixture.host).count == 1)
-            expect(markers("QieTing.MainHeader", in: fixture.host).first === header)
-            expect(!header.isHiddenOrHasHiddenAncestor && !header.visibleRect.isEmpty)
-            let editableFields = descendants(fixture.host).compactMap { $0 as? NSTextField }.filter { $0.isEditable }
+            expect(fixture.window.toolbar === toolbar && toolbar.isVisible)
+            expect(toolbarItems(.toggleSidebar, in: fixture).count == 1)
+            expect(toolbarItems(.toggleSidebar, in: fixture).first === sidebarItem)
+            let editableFields = windowViews(fixture).compactMap { $0 as? NSTextField }.filter { $0.isEditable }
             expect(editableFields.count == 1)
             expect(editableFields.first === search)
             expect(search.window === fixture.window && !search.visibleRect.isEmpty)
@@ -921,11 +952,11 @@ extension WindowNavigationChromeTests {
         _ = try await check(fixture, destination: .artist(42), originalBar: bar, scenario: "sidebar-toggle-back-to-artist")
         expect(fixture.state.path == [.artist(42)])
         expect(markers("QieTing.MainColumn", in: fixture.host).first === main)
-        expect(markers("QieTing.MainHeader", in: fixture.host).first === header)
+        expect(fixture.window.toolbar === toolbar && toolbar.isVisible)
         fixture.state.path = []
         _ = try await check(fixture, destination: nil, originalBar: bar, scenario: "sidebar-toggle-back-to-home")
         expect(markers("QieTing.MainColumn", in: fixture.host).first === main)
-        expect(markers("QieTing.MainHeader", in: fixture.host).first === header)
+        expect(fixture.window.toolbar === toolbar && toolbar.isVisible)
     }
 
     func testCollapsedWideWindowUsesAnInsidePaneWithoutGrowingItsFrameOrMinimum() async throws {
@@ -1071,9 +1102,40 @@ extension WindowNavigationChromeTests {
 
 @MainActor
 extension WindowNavigationChromeTests {
-    private func clickNavigationControl(_ name: String, in fixture: Fixture,
-                                        eventNumber: Int) throws {
-        let control = try require(markers(name, in: fixture.host).first)
+    private func clickToolbarItem(_ identifier: NSToolbarItem.Identifier, in fixture: Fixture,
+                                  eventNumber: Int) throws {
+        let item = try require(toolbarItems(identifier, in: fixture).first)
+        try require(item.isEnabled, "The real native toolbar item must be enabled before clicking")
+        let control: NSView
+        if let custom = item.view {
+            control = custom
+        } else {
+            // AppKit image items intentionally do not expose a custom `view`.
+            // Their actual native NSControl is observable through its public
+            // target/action; never fabricate a test-only button or call the
+            // action directly in place of the real mouse dispatch.
+            let matches = windowViews(fixture).compactMap { $0 as? NSControl }.filter {
+                $0.window === fixture.window && !$0.isDescendant(of: fixture.host)
+                    && (($0.action == item.action && $0.target === item.target)
+                        || (item.toolTip != nil && $0.toolTip == item.toolTip)
+                        || $0.accessibilityIdentifier() == identifier.rawValue)
+                    && !$0.isHiddenOrHasHiddenAncestor && !$0.visibleRect.isEmpty
+            }
+            if matches.count != 1 {
+                var diagnostic = snapshot(fixture, scenario: "native-toolbar-click-control-not-found", includeTree: true)
+                diagnostic["requestedToolbarItem"] = identifier.rawValue
+                diagnostic["requestedToolbarAction"] = item.action.map(NSStringFromSelector) ?? "none"
+                diagnostic["nativeControls"] = windowViews(fixture).compactMap { $0 as? NSControl }.map {
+                    ["class": String(describing: type(of: $0)), "action": $0.action.map(NSStringFromSelector) ?? "none",
+                     "sameTarget": $0.target === item.target, "frame": NSStringFromRect($0.convert($0.bounds, to: nil)),
+                     "toolTip": $0.toolTip ?? "", "accessibilityIdentifier": $0.accessibilityIdentifier() ?? "",
+                     "hidden": $0.isHiddenOrHasHiddenAncestor] as [String: Any]
+                }
+                try NavigationValidationEvidence.record(diagnostic)
+            }
+            try require(matches.count == 1, "Expected one actual native toolbar control for \(identifier.rawValue)")
+            control = try require(matches.first)
+        }
         try require(!control.isHiddenOrHasHiddenAncestor && !control.visibleRect.isEmpty)
         let point = control.convert(NSPoint(x: control.bounds.midX, y: control.bounds.midY), to: nil)
         let down = try require(NSEvent.mouseEvent(
@@ -1103,34 +1165,86 @@ extension WindowNavigationChromeTests {
         let fixture = try await Fixture(columnVisibility: .all)
         defer { fixture.dispose() }
         let bar = try await check(fixture, destination: nil, scenario: "native-navigation-root")
-        let header = try require(markers("QieTing.MainHeader", in: fixture.host).first)
-        let search = try require(markers("QieTing.Search", in: fixture.host).first)
+        let toolbar = try require(fixture.window.toolbar)
+        let sidebarItem = try require(toolbarItems(.toggleSidebar, in: fixture).first)
+        let search = try require(windowMarkers("QieTing.Search", in: fixture).first)
         let searchFrame = search.convert(search.bounds, to: fixture.host)
         let originalFrame = fixture.window.frame
-        expect(markers("QieTing.Navigation.Back", in: fixture.host).isEmpty,
+        expect(toolbarItems(MainWindowNativeToolbar.backIdentifier, in: fixture).isEmpty,
                "At the root no disabled Back button should be instantiated")
-        expect(markers("QieTing.Navigation.Sidebar", in: fixture.host).count == 1)
+        expect(toolbarItems(.toggleSidebar, in: fixture).count == 1)
 
         fixture.state.path = [.artist(42), .album(7)]
         _ = try await check(fixture, destination: .album(7), originalBar: bar,
                             scenario: "native-navigation-nested-album")
-        expect(markers("QieTing.Navigation.Back", in: fixture.host).count == 1)
-        try clickNavigationControl("QieTing.Navigation.Back", in: fixture, eventNumber: 901)
+        expect(toolbarItems(MainWindowNativeToolbar.backIdentifier, in: fixture).count == 1)
+        try clickToolbarItem(MainWindowNativeToolbar.backIdentifier, in: fixture, eventNumber: 901)
         try await wait(fixture, "native Back pops album") { fixture.state.path == [.artist(42)] }
         _ = try await check(fixture, destination: .artist(42), originalBar: bar,
                             scenario: "native-navigation-back-artist")
-        try clickNavigationControl("QieTing.Navigation.Back", in: fixture, eventNumber: 903)
+        try clickToolbarItem(MainWindowNativeToolbar.backIdentifier, in: fixture, eventNumber: 903)
         try await wait(fixture, "native Back removes root control") {
             fixture.state.path.isEmpty
-                && self.markers("QieTing.Navigation.Back", in: fixture.host).isEmpty
+                && self.toolbarItems(MainWindowNativeToolbar.backIdentifier, in: fixture).isEmpty
         }
         _ = try await check(fixture, destination: nil, originalBar: bar,
                             scenario: "native-navigation-back-home")
-        expect(markers("QieTing.MainHeader", in: fixture.host).first === header)
-        expect(markers("QieTing.Search", in: fixture.host).first === search)
+        expect(fixture.window.toolbar === toolbar && toolbar.isVisible)
+        expect(toolbarItems(.toggleSidebar, in: fixture).first === sidebarItem)
+        expect(windowMarkers("QieTing.Search", in: fixture).first === search)
         expect(search.convert(search.bounds, to: fixture.host) == searchFrame,
-               "The reserved Back slot must not shift global search")
+               "The native flexible toolbar space must keep global search stable when Back appears or disappears")
         expect(fixture.window.frame == originalFrame)
+    }
+
+    func testTransparentNativeToolbarLeavesNoSecondHeaderInTheRealDetailViewport() async throws {
+        let fixture = try await Fixture(columnVisibility: .all)
+        defer { fixture.dispose() }
+        let bar = try await check(fixture, destination: nil, scenario: "native-toolbar-no-second-header-root")
+        let toolbar = try require(fixture.window.toolbar)
+        let sidebarItem = try require(toolbarItems(.toggleSidebar, in: fixture).first)
+        let searchItem = try require(toolbarItems(MainWindowNativeToolbar.searchIdentifier, in: fixture).first)
+        let searchHost = try require(searchItem.view)
+        expect(toolbar.identifier == MainWindowNativeToolbar.identifier)
+        expect(toolbar.isVisible)
+        expect(sidebarItem.itemIdentifier == .toggleSidebar,
+               "The sidebar control must be AppKit's standard item, not a custom image Button")
+        let adapter = try require(toolbar.delegate as? MainWindowNativeToolbar)
+        expect(adapter.toolbar(toolbar, itemForItemIdentifier: .toggleSidebar, willBeInsertedIntoToolbar: true) == nil,
+               "The adapter must leave standard Sidebar item construction to AppKit")
+        expect(sidebarItem.action != nil && sidebarItem.target != nil)
+        expect(searchHost.window === fixture.window)
+        expect(!searchHost.isDescendant(of: fixture.host),
+               "Search must use native titlebar layout rather than another row in the content stack")
+        expect(fixture.window.styleMask.contains(.fullSizeContentView))
+        expect(fixture.window.titlebarAppearsTransparent)
+        expect(fixture.window.titleVisibility == .hidden)
+        expect(fixture.window.titlebarSeparatorStyle == .none)
+        expect(markers("QieTing.MainHeader", in: fixture.host).isEmpty)
+        let frame = fixture.window.frame
+        let scenarios: [Destination?] = [nil, .artist(42), .album(7), nil]
+        for destination in scenarios {
+            fixture.state.path = destination.map { [$0] } ?? []
+            _ = try await check(fixture, destination: destination, originalBar: bar,
+                                scenario: "native-toolbar-viewport-\(fixtureName(destination))")
+            let main = try require(markers("QieTing.MainColumn", in: fixture.host).first)
+            let viewport = try require(markers("QieTing.DetailViewport", in: fixture.host).first)
+            let mainFrame = main.convert(main.bounds, to: fixture.host)
+            let viewportFrame = viewport.convert(viewport.bounds, to: fixture.host)
+            let usable = fixture.host.convert(fixture.window.contentLayoutRect, from: nil)
+            expect(abs(viewportFrame.minY - mainFrame.minY) < 0.5)
+            expect(abs(viewportFrame.height - mainFrame.height) < 0.5,
+                   "The actual navigated viewport must occupy the full middle column; no invisible 44pt Header is allowed")
+            expect(abs(mainFrame.minY - usable.minY) < 0.5)
+            expect(abs(mainFrame.height - usable.height) < 0.5,
+                   "Only the native titlebar safe area may reduce content height")
+            expect(fixture.window.toolbar === toolbar && toolbar.isVisible)
+            expect(toolbarItems(.toggleSidebar, in: fixture).first === sidebarItem)
+            expect(toolbarItems(MainWindowNativeToolbar.searchIdentifier, in: fixture).first === searchItem)
+            expect(searchItem.view === searchHost)
+            expect(fixture.window.frame == frame)
+        }
+        try NavigationValidationEvidence.record(snapshot(fixture, scenario: "native-toolbar-transparent-full-content-validation"))
     }
 
     func testNativeSidebarClicksPreserveNavigationSearchAndTheUniquePlayer() async throws {
@@ -1140,10 +1254,10 @@ extension WindowNavigationChromeTests {
         fixture.state.path = [.artist(42), .album(7)]
         _ = try await check(fixture, destination: .album(7), originalBar: bar,
                             scenario: "native-sidebar-nested-album")
-        let search = try require(descendants(fixture.host).compactMap { $0 as? NSTextField }.first { $0.isEditable })
+        let search = try require(windowViews(fixture).compactMap { $0 as? NSTextField }.first { $0.isEditable })
         let originalFrame = fixture.window.frame
         for (index, expected) in [NavigationSplitViewVisibility.detailOnly, .all].enumerated() {
-            try clickNavigationControl("QieTing.Navigation.Sidebar", in: fixture,
+            try clickToolbarItem(.toggleSidebar, in: fixture,
                                        eventNumber: 911 + index * 2)
             try await wait(fixture, "native sidebar visibility action") {
                 fixture.state.columnVisibility == expected
@@ -1151,7 +1265,7 @@ extension WindowNavigationChromeTests {
             _ = try await check(fixture, destination: .album(7), originalBar: bar,
                                 scenario: "native-sidebar-click-\(index)")
             expect(fixture.state.path == [.artist(42), .album(7)])
-            let fields = descendants(fixture.host).compactMap { $0 as? NSTextField }.filter { $0.isEditable }
+            let fields = windowViews(fixture).compactMap { $0 as? NSTextField }.filter { $0.isEditable }
             expect(fields.count == 1 && fields.first === search)
             expect(fixture.window.frame == originalFrame)
         }
@@ -1166,9 +1280,9 @@ extension WindowNavigationChromeTests {
             abs(fixture.host.bounds.width - 1200) < 0.5
         }
         _ = try await check(fixture, destination: nil, originalBar: bar, scenario: "glass-search-wide")
-        let field = try require(descendants(fixture.host).compactMap { $0 as? NSTextField }.first { $0.isEditable })
+        let field = try require(windowViews(fixture).compactMap { $0 as? NSTextField }.first { $0.isEditable })
         let main = try require(markers("QieTing.MainColumn", in: fixture.host).first)
-        let search = try require(markers("QieTing.Search", in: fixture.host).first)
+        let search = try require(windowMarkers("QieTing.Search", in: fixture).first)
         let mainFrame = main.convert(main.bounds, to: fixture.host)
         let searchFrame = search.convert(search.bounds, to: fixture.host)
         let trailingGap = mainFrame.maxX - searchFrame.maxX
@@ -1206,9 +1320,9 @@ extension WindowNavigationChromeTests {
         }
         _ = try await check(fixture, destination: .search(query), originalBar: bar,
                             scenario: "glass-search-native-submit")
-        expect(descendants(fixture.host).compactMap { $0 as? NSTextField }.filter { $0.isEditable }.count == 1)
+        expect(windowViews(fixture).compactMap { $0 as? NSTextField }.filter { $0.isEditable }.count == 1)
         expect(field.window === fixture.window)
-        expect(markers("QieTing.Search", in: fixture.host).first === search)
+        expect(windowMarkers("QieTing.Search", in: fixture).first === search)
         expect(search.convert(search.bounds, to: fixture.host) == narrowedSearch)
         expect(fixture.panels.panel == .lyrics)
         expect(fixture.window.frame == originalFrame)
@@ -1254,11 +1368,15 @@ extension WindowNavigationChromeTests {
         expect(abs(surfaceFrame.minX - fixture.host.bounds.minX) < 0.5)
         expect(surfaceFrame.width >= PlayerLayoutMetrics.minimumSidebarWidth)
         expect(surfaceFrame.maxX <= mainFrame.minX)
-        // The host includes the native titlebar (672pt in CI), while both
-        // columns occupy its 640pt usable region. Compare the same region,
-        // retaining the original precision and avoiding system controls.
-        expect(abs(surfaceFrame.minY - mainFrame.minY) < 0.5)
-        expect(abs(surfaceFrame.height - mainFrame.height) < 0.5)
+        // Native sidebar material now extends behind the transparent system
+        // titlebar. Its coverage of the actual usable column must still match
+        // exactly; any extra coverage belongs only to the native safe area.
+        let usable = fixture.host.convert(fixture.window.contentLayoutRect, from: nil)
+        let usableSurface = surfaceFrame.intersection(usable)
+        expect(abs(usableSurface.minY - mainFrame.minY) < 0.5)
+        expect(abs(usableSurface.height - mainFrame.height) < 0.5)
+        expect(surfaceFrame.minY >= fixture.host.bounds.minY - 0.5)
+        expect(surfaceFrame.maxY <= fixture.host.bounds.maxY + 0.5)
 
         let scroll = try require(descendants(fixture.host).compactMap { $0 as? NSScrollView }.first { candidate in
             let frame = candidate.convert(candidate.bounds, to: fixture.host)

@@ -114,7 +114,9 @@ struct Shelf<Content: View>: View {
                 cards
                     .padding(.vertical, 6)
             }
-            .scrollIndicators(.hidden, axes: .horizontal)
+            // macOS may still show `.hidden` indicators for mouse/system
+            // policy. `.never` hides only the bar, keeping horizontal input.
+            .scrollIndicators(.never, axes: .horizontal)
             .compatScrollClipDisabled()
         }
     }

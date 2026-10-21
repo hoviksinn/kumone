@@ -6,7 +6,6 @@ struct MainWindow: View {
     private let externalPath: Binding<[Destination]>?
     private let testing: MainWindowTestConfiguration?
     @Environment(\.openWindow) private var openWindow
-    @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.accessibilityVoiceOverEnabled) private var voiceOverEnabled
     @EnvironmentObject private var player: PlayerService
@@ -22,6 +21,7 @@ struct MainWindow: View {
     @State private var localColumnVisibility: NavigationSplitViewVisibility
     @State private var topChromeVisible = true
     @State private var topChromeHovering = false
+    @State private var nativeTitlebarHovering = false
     @State private var searchFocused = false
     @State private var topPopoverOpen = false
     @State private var menuTracking = false
@@ -125,16 +125,19 @@ struct MainWindow: View {
         windowLayout
         .scrollIndicators(.automatic)
         .toolbarVisibility(.visible, for: .windowToolbar)
+        .toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
+        .background(Color(nsColor: .windowBackgroundColor).ignoresSafeArea())
         .background(MainWindowConfigurator(
-            ambientConfiguration: MainWindowAmbientConfiguration(
-                showsAmbientBackground: settings.showMainWindowAmbientBackground,
-                showsTitlebarAmbientBackground: !player.showNowPlaying,
-                showsNowPlaying: player.showNowPlaying,
-                colors: artworkStore.colors,
-                mainColumnLeadingInset: middleFrame.minX,
-                intensity: settings.mainWindowAmbientBackgroundIntensity,
-                isDark: isDarkAppearance),
-            panels: panels, registersApplicationWindow: testing == nil))
+            panels: panels, sidebarCollapsed: sidebarCollapsed,
+            sidebarAvailable: !player.showNowPlaying,
+            onToggleSidebar: { columnVisibility = sidebarCollapsed ? .all : .detailOnly },
+            controlsVisible: !player.showNowPlaying && (!sidebarCollapsed || topChromeVisible),
+            backAvailable: !path.isEmpty,
+            onBack: { if !path.isEmpty { path.removeLast() } },
+            searchView: globalSearch,
+            trailingInset: trailingToolbarInset,
+            onTitlebarHover: { nativeTitlebarHovering = $0; if $0 { revealChrome() } },
+            registersApplicationWindow: testing == nil))
         .modifier(OfflinePlaybackAlert(player: player, onDownloads: { openDestination(.downloaded) }))
         .modifier(MeteredDownloadAlert())
         .environment(\.openLogin, { showLogin = true })
@@ -225,89 +228,46 @@ struct MainWindow: View {
             if !sidebarCollapsed {
                 SidebarView(selection: $selection, showLogin: $showLogin)
                     .frame(minWidth: 200, idealWidth: Theme.Layout.sidebarWidth, maxWidth: 280)
-                    .background(NativeSidebarMaterial().accessibilityHidden(true))
+                    .background(NativeSidebarMaterial().ignoresSafeArea(.container, edges: .top).accessibilityHidden(true))
             }
             middleColumn
         }
     }
 
     private var middleColumn: some View {
-        VStack(spacing: 0) {
-            middleHeader
-                .frame(height: 44)
-                .background(WindowChromeProbe(identifier: "QieTing.MainHeader"))
-            detailStack
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
+        detailStack
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // Only the native titlebar safe area remains. The page takes all of
+        // this column; search and navigation no longer consume a second row.
+        .background(WindowChromeProbe(identifier: "QieTing.DetailViewport"))
         .frame(minWidth: PlayerLayoutMetrics.minimumMainWidth)
         .background(WindowChromeProbe(identifier: "QieTing.MainColumn"))
         .background {
             if settings.showMainWindowAmbientBackground {
                 MainWindowAmbientBackground(colors: artworkStore.colors,
                                             intensity: settings.mainWindowAmbientBackgroundIntensity)
+                    .ignoresSafeArea(.container, edges: .top)
             }
         }
         .environment(\.playerChromeClearance, PlayerLayoutMetrics.barClearance)
         .onGeometryChange(for: CGRect.self) { $0.frame(in: .named("mainWindow")) } action: { middleFrame = $0 }
     }
 
-    private var middleHeader: some View {
-        HStack(spacing: 8) {
-            sidebarControl
-            // Keep the trailing search surface stable when the native back
-            // control appears. At the root there is no Button, shortcut or
-            // accessibility element occupying this transparent layout slot.
-            ZStack {
-                if !path.isEmpty { backControl }
-            }
-            .frame(width: 36, height: 36)
-            Spacer(minLength: 8)
-            SearchFieldView(isActive: !player.showNowPlaying, loadDefaultKeyword: testing == nil,
-                            onFocusChanged: { searchFocused = $0 }) { query in
-                path.append(.search(query))
-            }
+    private var globalSearch: SearchFieldView {
+        SearchFieldView(isActive: !player.showNowPlaying,
+                        loadDefaultKeyword: testing == nil,
+                        onFocusChanged: { searchFocused = $0 },
+                        onHoverChanged: { topChromeHovering = $0; if $0 { revealChrome() } }) { query in
+            path.append(.search(query))
         }
-        .padding(.horizontal, 12)
-        .opacity(!sidebarCollapsed || topChromeVisible ? 1 : 0)
-        .allowsHitTesting(!sidebarCollapsed || topChromeVisible)
-        .accessibilityHidden(sidebarCollapsed && !topChromeVisible)
-        .onHover { topChromeHovering = $0; revealChrome() }
     }
 
-    private var sidebarControl: some View {
-        Button {
-            columnVisibility = sidebarCollapsed ? .all : .detailOnly
-        } label: {
-            Label("侧边栏", systemImage: "sidebar.left")
-                .labelStyle(.iconOnly)
-        }
-        .buttonStyle(.glass)
-        .buttonBorderShape(.circle)
-        .controlSize(.regular)
-        .frame(width: 36, height: 36)
-        .focused($topControlsFocused)
-        .keyboardShortcut("s", modifiers: [.command, .option])
-        .help(sidebarCollapsed ? "显示侧边栏（⌥⌘S）" : "隐藏侧边栏（⌥⌘S）")
-        .accessibilityValue(sidebarCollapsed ? "已隐藏" : "已显示")
-        .background(WindowChromeProbe(identifier: "QieTing.Navigation.Sidebar"))
-    }
-
-    private var backControl: some View {
-        Button {
-            // A queued native event may arrive after the last push is popped.
-            if !path.isEmpty { path.removeLast() }
-        } label: {
-            Label("返回", systemImage: "chevron.left")
-                .labelStyle(.iconOnly)
-        }
-        .buttonStyle(.glass)
-        .buttonBorderShape(.circle)
-        .controlSize(.regular)
-        .frame(width: 36, height: 36)
-        .focused($topControlsFocused)
-        .keyboardShortcut("[", modifiers: .command)
-        .help("返回（⌘[）")
-        .background(WindowChromeProbe(identifier: "QieTing.Navigation.Back"))
+    /// Reserve the actual inspector reveal, not an assumed screen width.
+    /// AppKit places the search capsule at the middle column's trailing edge.
+    private var trailingToolbarInset: CGFloat {
+        guard middleFrame.width > 0, let window = panels.window,
+              let content = window.contentView else { return 0 }
+        return max(0, content.bounds.width - middleFrame.maxX)
     }
 
     @ViewBuilder private func panelRegion(reveal: CGFloat, outside: Bool) -> some View {
@@ -364,7 +324,7 @@ struct MainWindow: View {
         guard hidesTopChrome else { return }
         chromeTask = Task { @MainActor in
             try? await Task.sleep(for: .seconds(2.5))
-            guard !Task.isCancelled, !topChromeHovering, !searchFocused, !topControlsFocused, !topPopoverOpen, !menuTracking, !voiceOverEnabled,
+            guard !Task.isCancelled, !topChromeHovering, !nativeTitlebarHovering, !searchFocused, !topControlsFocused, !topPopoverOpen, !menuTracking, !voiceOverEnabled,
                   panels.window?.attachedSheet == nil else { return }
             topChromeVisible = false
         }
@@ -455,9 +415,6 @@ struct MainWindow: View {
         settings.showMainWindowAmbientBackground || player.hasCurrentTrack
     }
 
-    private var isDarkAppearance: Bool {
-        (settings.appearance.colorScheme ?? colorScheme) == .dark
-    }
 }
 
 // MARK: - Cursor override
@@ -487,18 +444,37 @@ struct ArrowCursorOverride: NSViewRepresentable {
 /// can front it again on a Dock click. Every other window-delegate callback is
 /// forwarded untouched to SwiftUI's own delegate.
 struct MainWindowConfigurator: NSViewRepresentable {
-    let ambientConfiguration: MainWindowAmbientConfiguration
     let panels: WindowPanelCoordinator
+    var sidebarCollapsed: Bool
+    var sidebarAvailable: Bool
+    var onToggleSidebar: () -> Void
+    var controlsVisible: Bool
+    var backAvailable: Bool
+    var onBack: () -> Void
+    var searchView: SearchFieldView
+    var trailingInset: CGFloat
+    var onTitlebarHover: (Bool) -> Void
     var registersApplicationWindow = true
 
     func makeCoordinator() -> Coordinator { Coordinator(panels: panels, registersApplicationWindow: registersApplicationWindow) }
     func makeNSView(context: Context) -> NSView {
         let view = NSView(frame: .zero)
-        DispatchQueue.main.async { context.coordinator.configure(from: view, ambient: ambientConfiguration) }
+        scheduleConfiguration(from: view, coordinator: context.coordinator)
         return view
     }
     func updateNSView(_ nsView: NSView, context: Context) {
-        DispatchQueue.main.async { context.coordinator.configure(from: nsView, ambient: ambientConfiguration) }
+        scheduleConfiguration(from: nsView, coordinator: context.coordinator)
+    }
+    private func scheduleConfiguration(from view: NSView, coordinator: Coordinator) {
+        // A native toolbar or width constraint must never be changed from
+        // SwiftUI's updateConstraints/view-graph callback stack.
+        DispatchQueue.main.async {
+            coordinator.configure(from: view, sidebarCollapsed: sidebarCollapsed,
+                                  available: sidebarAvailable, onToggle: onToggleSidebar,
+                                  controlsVisible: controlsVisible, backAvailable: backAvailable,
+                                  onBack: onBack, searchView: searchView, trailingInset: trailingInset,
+                                  onTitlebarHover: onTitlebarHover)
+        }
     }
     static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) { coordinator.detach() }
 
@@ -506,13 +482,17 @@ struct MainWindowConfigurator: NSViewRepresentable {
         private weak var window: NSWindow?
         private weak var forwardee: NSWindowDelegate?
         private let ambientAppearance = MainWindowAmbientAppearanceController()
+        private let nativeToolbar = MainWindowNativeToolbar()
         private let panels: WindowPanelCoordinator
         private let registersApplicationWindow: Bool
         init(panels: WindowPanelCoordinator, registersApplicationWindow: Bool) {
             self.panels = panels
             self.registersApplicationWindow = registersApplicationWindow
         }
-        func configure(from view: NSView, ambient: MainWindowAmbientConfiguration) {
+        func configure(from view: NSView, sidebarCollapsed: Bool, available: Bool,
+                       onToggle: @escaping () -> Void, controlsVisible: Bool, backAvailable: Bool,
+                       onBack: @escaping () -> Void, searchView: SearchFieldView, trailingInset: CGFloat,
+                       onTitlebarHover: @escaping (Bool) -> Void) {
             guard let window = view.window else { return }
             if self.window !== window {
                 detach()
@@ -529,9 +509,15 @@ struct MainWindowConfigurator: NSViewRepresentable {
             }
             // Native traffic lights and their accessibility remain intact.
             // Never alpha-hide the titlebar or replace system window buttons.
-            ambientAppearance.configure(ambient, in: window)
+            ambientAppearance.updateLayout(in: window)
+            nativeToolbar.configure(window: window, onToggleSidebar: onToggle,
+                                    sidebarCollapsed: sidebarCollapsed, available: available,
+                                    controlsVisible: controlsVisible, backAvailable: backAvailable,
+                                    onBack: onBack, searchView: searchView, trailingInset: trailingInset,
+                                  onTitlebarHover: onTitlebarHover)
         }
         func detach() {
+            nativeToolbar.detach()
             if let window, window.delegate === self { window.delegate = forwardee }
             panels.detach()
             self.window = nil
@@ -564,6 +550,7 @@ struct SearchFieldView: View {
     var isActive = true
     var loadDefaultKeyword = true
     var onFocusChanged: (Bool) -> Void = { _ in }
+    var onHoverChanged: (Bool) -> Void = { _ in }
     let onSubmit: (String) -> Void
 
     @State private var text = ""
@@ -595,13 +582,15 @@ struct SearchFieldView: View {
         // the native TextField and global-search submit semantics above.
         .glassEffect(.regular.interactive(), in: Capsule())
         .overlay {
-            Capsule().strokeBorder(Color.accentColor.opacity(focused ? 0.45 : 0), lineWidth: 1)
+            Capsule().strokeBorder(Theme.accent.opacity(focused ? 0.45 : 0), lineWidth: 1)
         }
+        .tint(Theme.accent)
         .background(WindowChromeProbe(identifier: "QieTing.Search"))
         // Keep the capsule off the window's rounded top-right corner (#88).
         .padding(.trailing, 8)
         .animation(AppAnimation.quick, value: focused)
         .onChange(of: focused) { _, value in onFocusChanged(value) }
+        .onHover { onHoverChanged($0) }
         .onChange(of: isActive) { _, active in
             if !active { focused = false }
         }

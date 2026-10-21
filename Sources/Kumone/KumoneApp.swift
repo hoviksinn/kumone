@@ -31,6 +31,16 @@ public struct KumoneApp: App {
                      height: Theme.Layout.defaultWindowHeight)
         .windowResizability(.contentMinSize)
         .commands {
+            CommandGroup(after: .toolbar) {
+                Button("显示或隐藏侧边栏") {
+                    MainWindowNativeToolbar.performSidebarToggle(in: NSApp.keyWindow ?? AppDelegate.shared?.mainWindow)
+                }
+                .keyboardShortcut("s", modifiers: [.command, .option])
+                Button("返回") {
+                    MainWindowNativeToolbar.performBack(in: NSApp.keyWindow ?? AppDelegate.shared?.mainWindow)
+                }
+                .keyboardShortcut("[", modifiers: .command)
+            }
             CommandGroup(replacing: .appInfo) {
                 Button("关于且听") {
                     NSApp.orderFrontStandardAboutPanel(options: [
