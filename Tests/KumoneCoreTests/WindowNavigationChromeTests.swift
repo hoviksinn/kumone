@@ -145,6 +145,12 @@ extension WindowNavigationChromeTests {
             if !Self.applicationPrepared {
                 try NavigationValidationEvidence.record(["scenario": "application-bootstrap", "phase": "before-finishLaunching"])
                 NSApplication.shared.delegate = Self.applicationDelegate
+                let policyApplied = NSApplication.shared.setActivationPolicy(.regular)
+                try NavigationValidationEvidence.record([
+                    "scenario": "application-activation-policy",
+                    "regularPolicyApplied": policyApplied,
+                    "activationPolicy": Int(NSApplication.shared.activationPolicy().rawValue),
+                ])
                 // Keep a stack even for a direct exit that bypasses AppKit's
                 // delegate. This is test-process diagnostics, never App code.
                 atexit {
@@ -173,6 +179,10 @@ extension WindowNavigationChromeTests {
             host = ConstraintObservingHostingView(rootView: NavigationFixtureRoot(
                 state: state, player: player, panels: panels, columnVisibility: columnVisibility))
             window.contentView = host
+            // Standard toolbar actions use the real AppKit responder chain.
+            // Unlike an explicit-target Back item, they need this hosted
+            // process to request normal foreground/key-window ownership.
+            NSApplication.shared.activate()
             window.makeKeyAndOrderFront(nil)
             // Construct the real native hierarchy as fixture setup. The
             // following four-second observation budget measures settling and
@@ -348,6 +358,11 @@ extension WindowNavigationChromeTests {
             "windowKey": fixture.window.isKeyWindow,
             "applicationActive": NSApp.isActive,
             "applicationRunning": NSApp.isRunning,
+            "applicationActivationPolicy": Int(NSApp.activationPolicy().rawValue),
+            "applicationKeyWindowIsFixture": NSApp.keyWindow === fixture.window,
+            "applicationMainWindowIsFixture": NSApp.mainWindow === fixture.window,
+            "windowDelegateClass": fixture.window.delegate.map { String(describing: type(of: $0)) } ?? "none",
+            "windowDelegateReceivesSidebarAction": fixture.window.delegate?.responds(to: NSSelectorFromString("toggleSidebar:")) ?? false,
             "applicationDelegateClass": NSApp.delegate.map { String(describing: type(of: $0)) } ?? "none",
             "nativeToolbarStyle": Int(fixture.window.toolbarStyle.rawValue),
             "nativeToolbarVisible": fixture.window.toolbar?.isVisible ?? false,
@@ -367,6 +382,38 @@ extension WindowNavigationChromeTests {
             "physicalVisibleFrame": rectValues(fixture.window.screen?.visibleFrame ?? .zero),
             "syntheticVisibleFrame": rectValues(fixture.panels.visibleFrameForTesting ?? .zero),
         ]
+        let sidebarAction = NSSelectorFromString("toggleSidebar:")
+        let sidebarItem = toolbarItems(.toggleSidebar, in: fixture).first
+        let resolvedSidebarTarget = NSApp.target(forAction: sidebarAction, to: nil, from: sidebarItem)
+        values["sidebarResolvedTargetClass"] = resolvedSidebarTarget.map { String(describing: type(of: $0)) } ?? "none"
+        values["sidebarResolvedTargetIsWindowDelegate"] = (resolvedSidebarTarget as AnyObject?) === (fixture.window.delegate as AnyObject?)
+        values["nativeToolbarItemDetails"] = (fixture.window.toolbar?.items ?? []).map { item -> [String: Any] in
+            var detail: [String: Any] = [
+                "identifier": item.itemIdentifier.rawValue,
+                "action": item.action.map(NSStringFromSelector) ?? "none",
+                "targetClass": item.target.map { String(describing: type(of: $0)) } ?? "none",
+                "enabled": item.isEnabled,
+            ]
+            if let view = item.view {
+                detail["viewClass"] = String(describing: type(of: view))
+                detail["viewFrameInWindow"] = rectValues(view.convert(view.bounds, to: nil))
+                detail["viewBounds"] = rectValues(view.bounds)
+                detail["intrinsicSize"] = ["width": Double(view.intrinsicContentSize.width),
+                                           "height": Double(view.intrinsicContentSize.height)]
+                detail["fittingSize"] = ["width": Double(view.fittingSize.width),
+                                         "height": Double(view.fittingSize.height)]
+                detail["hasAmbiguousLayout"] = view.hasAmbiguousLayout
+                detail["hidden"] = view.isHiddenOrHasHiddenAncestor
+                detail["controls"] = descendants(view).compactMap { $0 as? NSControl }.map { control in
+                    ["class": String(describing: type(of: control)),
+                     "action": control.action.map(NSStringFromSelector) ?? "none",
+                     "targetClass": control.target.map { String(describing: type(of: $0)) } ?? "none",
+                     "enabled": control.isEnabled,
+                     "frameInWindow": rectValues(control.convert(control.bounds, to: nil))] as [String: Any]
+                }
+            }
+            return detail
+        }
         values["markers"] = views.compactMap { view -> [String: Any]? in
             guard let name = view.identifier?.rawValue,
                   name.hasPrefix("QieTing.") || name.hasPrefix("fixture.") else { return nil }
@@ -1102,6 +1149,38 @@ extension WindowNavigationChromeTests {
 
 @MainActor
 extension WindowNavigationChromeTests {
+    /// Observe the same public action route used by AppKit's standard item;
+    /// a nil explicit target is a legitimate First Responder action, not a
+    /// missing connection. This helper never invokes or simulates the action.
+    private func requireNativeSidebarRoute(in fixture: Fixture) async throws {
+        let action = NSSelectorFromString("toggleSidebar:")
+        NSApp.activate()
+        fixture.window.makeKeyAndOrderFront(nil)
+        try await wait(fixture, "native Sidebar key-window responder route") {
+            guard fixture.window.isKeyWindow, NSApp.keyWindow === fixture.window,
+                  let item = self.toolbarItems(.toggleSidebar, in: fixture).first,
+                  let delegate = fixture.window.delegate,
+                  delegate.responds(to: action) else { return false }
+            let resolved = NSApp.target(forAction: action, to: nil, from: item)
+            return (resolved as AnyObject?) === (delegate as AnyObject)
+        }
+        try NavigationValidationEvidence.record(snapshot(fixture, scenario: "native-sidebar-action-route-ready"))
+    }
+
+    private func expectSearchTrailingGap(_ gap: CGFloat, in fixture: Fixture, scenario: String) throws {
+        let main = try require(markers("QieTing.MainColumn", in: fixture.host).first)
+        let search = try require(windowMarkers("QieTing.Search", in: fixture).first)
+        let mainFrame = main.convert(main.bounds, to: fixture.host)
+        let searchFrame = search.convert(search.bounds, to: fixture.host)
+        expect(searchFrame.minX >= mainFrame.minX && searchFrame.maxX <= mainFrame.maxX)
+        expect(abs(mainFrame.maxX - searchFrame.maxX - gap) < 0.5,
+               "Search must retain the same middle-column trailing gap through \(scenario)")
+        var diagnostic = snapshot(fixture, scenario: scenario)
+        diagnostic["expectedSearchTrailingGap"] = Double(gap)
+        diagnostic["actualSearchTrailingGap"] = Double(mainFrame.maxX - searchFrame.maxX)
+        try NavigationValidationEvidence.record(diagnostic)
+    }
+
     private func clickToolbarItem(_ identifier: NSToolbarItem.Identifier, in fixture: Fixture,
                                   eventNumber: Int) throws {
         let item = try require(toolbarItems(identifier, in: fixture).first)
@@ -1212,7 +1291,12 @@ extension WindowNavigationChromeTests {
         let adapter = try require(toolbar.delegate as? MainWindowNativeToolbar)
         expect(adapter.toolbar(toolbar, itemForItemIdentifier: .toggleSidebar, willBeInsertedIntoToolbar: true) == nil,
                "The adapter must leave standard Sidebar item construction to AppKit")
-        expect(sidebarItem.action != nil && sidebarItem.target != nil)
+        try await requireNativeSidebarRoute(in: fixture)
+        let canonicalSidebarAction = NSSelectorFromString("toggleSidebar:")
+        expect(fixture.window.delegate?.responds(to: canonicalSidebarAction) == true)
+        let resolvedSidebarTarget = NSApp.target(forAction: canonicalSidebarAction, to: nil, from: sidebarItem)
+        expect((resolvedSidebarTarget as AnyObject?) === (fixture.window.delegate as AnyObject?),
+               "The AppKit standard Sidebar action must resolve to this window's live delegate")
         expect(searchHost.window === fixture.window)
         expect(!searchHost.isDescendant(of: fixture.host),
                "Search must use native titlebar layout rather than another row in the content stack")
@@ -1256,6 +1340,7 @@ extension WindowNavigationChromeTests {
                             scenario: "native-sidebar-nested-album")
         let search = try require(windowViews(fixture).compactMap { $0 as? NSTextField }.first { $0.isEditable })
         let originalFrame = fixture.window.frame
+        try await requireNativeSidebarRoute(in: fixture)
         for (index, expected) in [NavigationSplitViewVisibility.detailOnly, .all].enumerated() {
             try clickToolbarItem(.toggleSidebar, in: fixture,
                                        eventNumber: 911 + index * 2)
@@ -1327,6 +1412,48 @@ extension WindowNavigationChromeTests {
         expect(fixture.panels.panel == .lyrics)
         expect(fixture.window.frame == originalFrame)
         try NavigationValidationEvidence.record(snapshot(fixture, scenario: "glass-search-native-input-and-submit"))
+        try expectSearchTrailingGap(trailingGap, in: fixture, scenario: "glass-search-after-native-submit")
+
+        fixture.player.activePanel = .queue
+        try await wait(fixture, "search stays aligned while lyrics becomes queue", stableLayout: true) {
+            fixture.panels.panel == .queue && fixture.panels.mode == .expandedInside && !fixture.panels.isAnimating
+        }
+        try expectSearchTrailingGap(trailingGap, in: fixture, scenario: "glass-search-queue-switch")
+        expect(fixture.window.frame == originalFrame)
+        fixture.player.activePanel = nil
+        try await wait(fixture, "search returns with closed pane", stableLayout: true) {
+            fixture.panels.mode == .closed && !fixture.panels.isAnimating
+        }
+        try expectSearchTrailingGap(trailingGap, in: fixture, scenario: "glass-search-pane-closed")
+        expect(fixture.window.frame == originalFrame)
+        fixture.player.activePanel = .lyrics
+        try await wait(fixture, "search pane reopens without accumulating inset", stableLayout: true) {
+            fixture.panels.panel == .lyrics && fixture.panels.mode == .expandedInside && !fixture.panels.isAnimating
+        }
+        try expectSearchTrailingGap(trailingGap, in: fixture, scenario: "glass-search-pane-reopened")
+        expect(fixture.window.frame == originalFrame)
+
+        // At 1200pt, adding the sidebar to a full inside pane would violate
+        // the accepted single-row minimum. Use a genuinely wider window for
+        // this additional combined-control check, not hidden player controls.
+        fixture.window.setContentSize(NSSize(width: 1460, height: 640))
+        try await wait(fixture, "wide search and sidebar fixture layout", stableLayout: true) {
+            abs(fixture.host.bounds.width - 1460) < 0.5 && !fixture.panels.isAnimating
+        }
+        let wideFrame = fixture.window.frame
+        try await requireNativeSidebarRoute(in: fixture)
+        for (index, visibility) in [NavigationSplitViewVisibility.all, .detailOnly].enumerated() {
+            try clickToolbarItem(.toggleSidebar, in: fixture, eventNumber: 931 + index * 2)
+            try await wait(fixture, "search and pane after native Sidebar click \(index)", stableLayout: true) {
+                fixture.state.columnVisibility == visibility && fixture.panels.mode == .expandedInside
+                    && !fixture.panels.isAnimating
+            }
+            try expectSearchTrailingGap(trailingGap, in: fixture, scenario: "glass-search-native-sidebar-\(index)")
+            expect(fixture.window.frame == wideFrame)
+            expect(fixture.state.path == [.search(query)])
+            expect(windowMarkers("QieTing.Search", in: fixture).first === search)
+            expect(windowViews(fixture).compactMap { $0 as? NSTextField }.filter { $0.isEditable }.first === field)
+        }
     }
 }
 

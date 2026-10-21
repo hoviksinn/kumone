@@ -35,3 +35,21 @@ CI 通过 `QIETING_VALIDATION_STAGE` 明示 `ui` / `audio` / `complete`。前两
 - [SwiftUI hidden 指示器策略](https://developer.apple.com/documentation/swiftui/scrollindicatorvisibility/hidden)
 - [SwiftUI never 指示器策略](https://developer.apple.com/documentation/swiftui/scrollindicatorvisibility/never)
 - [NSScrollView 原生自动隐藏](https://developer.apple.com/documentation/appkit/nsscrollview/autohidesscrollers)
+
+## CI #45 attempt 2 的实际失败与修正
+
+[本次运行](https://github.com/hoviksinn/kumone/actions/runs/39674442928/attempts/2) 已编译并执行：窗口 19 项中 3 个场景失败（4 条 failure 含清理派生错误）；媒体时钟/严格 PCM 18 项及 EOF 1 项通过。歌词/滚动专项、完整回归和 App 尚未执行。这不是 Runner 容量故障，也不是音频引擎失败。
+
+### 标准 Sidebar 动作
+
+标准 `.toggleSidebar` 按 Apple 约定向 First Responder 发送 `toggleSidebar:`。旧代码仅在不属于响应链的 Toolbar adapter 上实现动作，没有在已经安装的窗口 delegate 提供入口。现在窗口 delegate 接收并验证这一动作，再调用同一个带 owner/window 保护的 HSplitView 状态操作；保留系统创建的标准项，由 AppKit 管理其 target/action/view。
+
+旧测试要求 item.target 必须非 nil，不适用于合法的 First Responder 路由。改为检查真实窗口的可解析响应目标，并继续用真实鼠标点击断言展开/收起，保留 PlayerBar、导航和搜索身份检查。原证据没有分别记录 action/target，不能断言具体哪项被系统重设；新增诊断区分字段及原生控件可用性、窗口 delegate/Key/Main/响应链。测试宿主还用公开激活策略建立真实 Key Window，再验证默认动作路由，不能用直接 sendAction 模拟状态来代替点击。
+
+### 搜索工具栏尺寸
+
+真实数据：关闭时中列 1200pt，Search 右边缘 1140pt，尾距 60pt；内展 341pt 后中列 859pt，Search 右边缘 835pt，尾距 24pt，差 36pt。窗口 frame 始终 1200×680，Return 提交后几何也不再变化。原生树中空白项本体 0×1pt，而系统包装项占 44×40pt；日志报告宽高 ambiguous/zero frame。这说明独立空项的原生测量占位与声明的零宽不等价，不是应放宽 0.5pt 的坐标误差。
+
+移除独立空白 Toolbar item，把留白合入同一个持久搜索容器；容器的明确 intrinsic 宽度为真实搜索宽度加实际右面板宽度，最小时仍是完整搜索宽度。真实 TextField/Glass 宿主保持同一实例；留白不绘制、不命中，不硬加/减 36pt。关闭、重开、队列/歌词切换、侧栏和复杂导航继续验证同一尾距。
+
+先独立运行原失败 3 项，再运行完整 19 项窗口、3 项歌词、4 项滚动及既有时钟/PCM/EOF。生产修正尚须新的 macOS 结果，不以静态检查宣称成功。

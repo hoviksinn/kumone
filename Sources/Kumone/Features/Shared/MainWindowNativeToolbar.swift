@@ -8,7 +8,6 @@ final class MainWindowNativeToolbar: NSObject, NSToolbarDelegate, NSToolbarItemV
     static let identifier: NSToolbar.Identifier = "QieTing.MainWindow.NativeToolbar"
     static let backIdentifier = NSToolbarItem.Identifier(rawValue: "QieTing.MainWindow.Back")
     static let searchIdentifier = NSToolbarItem.Identifier(rawValue: "QieTing.MainWindow.Search")
-    static let trailingInsetIdentifier = NSToolbarItem.Identifier(rawValue: "QieTing.MainWindow.PanelInset")
     private static let owners = NSMapTable<NSWindow, MainWindowNativeToolbar>.weakToWeakObjects()
     private final class SavedToolbar: NSObject {
         let toolbar: NSToolbar?
@@ -28,8 +27,7 @@ final class MainWindowNativeToolbar: NSObject, NSToolbarDelegate, NSToolbarItemV
     private var searchHost: NSHostingView<SearchFieldView>?
     private var searchItem: NSToolbarItem?
     private var backItem: NSToolbarItem?
-    private var trailingInsetItem: NSToolbarItem?
-    private var trailingInsetWidth: NSLayoutConstraint?
+    private var searchContainer: SearchContainer?
     private var onTitlebarHover: (@MainActor (Bool) -> Void)?
     private var titlebarHovered = false
     private var mouseMonitor: Any?
@@ -118,8 +116,7 @@ final class MainWindowNativeToolbar: NSObject, NSToolbarDelegate, NSToolbarItemV
         searchHost = nil
         searchItem = nil
         backItem = nil
-        trailingInsetItem = nil
-        trailingInsetWidth = nil
+        searchContainer = nil
         onTitlebarHover = nil
         titlebarHovered = false
         // Do not change native layout while SwiftUI is dismantling its graph.
@@ -133,6 +130,11 @@ final class MainWindowNativeToolbar: NSObject, NSToolbarDelegate, NSToolbarItemV
                 Self.originals.removeObject(forKey: oldToolbar)
             }
         }
+    }
+
+    static func canToggleSidebar(in window: NSWindow?) -> Bool {
+        guard let window, let owner = owners.object(forKey: window) else { return false }
+        return owner.window === window && owner.available && owner.onToggleSidebar != nil
     }
 
     @discardableResult
@@ -151,12 +153,12 @@ final class MainWindowNativeToolbar: NSObject, NSToolbarDelegate, NSToolbarItemV
         var identifiers: [NSToolbarItem.Identifier] = [.toggleSidebar]
         if available && controlsVisible && backAvailable { identifiers.append(Self.backIdentifier) }
         identifiers.append(.flexibleSpace)
-        identifiers += [Self.searchIdentifier, Self.trailingInsetIdentifier]
+        identifiers.append(Self.searchIdentifier)
         return identifiers
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.toggleSidebar, Self.backIdentifier, .flexibleSpace, Self.searchIdentifier, Self.trailingInsetIdentifier]
+        [.toggleSidebar, Self.backIdentifier, .flexibleSpace, Self.searchIdentifier]
     }
 
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier,
@@ -164,7 +166,6 @@ final class MainWindowNativeToolbar: NSObject, NSToolbarDelegate, NSToolbarItemV
         switch itemIdentifier {
         case Self.backIdentifier: return backItem
         case Self.searchIdentifier: return searchItem
-        case Self.trailingInsetIdentifier: return trailingInsetItem
         default:
             // AppKit creates the standard sidebar and spacing items itself.
             // In particular, never substitute an image or custom sidebar view.
@@ -186,7 +187,6 @@ final class MainWindowNativeToolbar: NSObject, NSToolbarDelegate, NSToolbarItemV
         }
     }
 
-    @objc private func toggleSidebar(_ sender: Any?) { _ = invokeToggle() }
     @objc private func goBack(_ sender: Any?) { _ = invokeBack() }
 
     private func invokeToggle() -> Bool {
@@ -218,10 +218,12 @@ final class MainWindowNativeToolbar: NSObject, NSToolbarDelegate, NSToolbarItemV
             host.setContentCompressionResistancePriority(.required, for: .vertical)
             host.setFrameSize(host.fittingSize)
             searchHost = host
+            let container = SearchContainer(host: host)
+            searchContainer = container
             let item = NSToolbarItem(itemIdentifier: Self.searchIdentifier)
             item.label = String(localized: "全局搜索")
             item.paletteLabel = item.label
-            item.view = host
+            item.view = container
             item.isBordered = false
             item.visibilityPriority = .high
             searchItem = item
@@ -238,21 +240,7 @@ final class MainWindowNativeToolbar: NSObject, NSToolbarDelegate, NSToolbarItemV
             item.visibilityPriority = .high
             backItem = item
         }
-        if trailingInsetItem == nil {
-            let spacer = NSView()
-            spacer.translatesAutoresizingMaskIntoConstraints = false
-            let width = spacer.widthAnchor.constraint(equalToConstant: 0)
-            NSLayoutConstraint.activate([width, spacer.heightAnchor.constraint(equalToConstant: 1)])
-            trailingInsetWidth = width
-            let item = NSToolbarItem(itemIdentifier: Self.trailingInsetIdentifier)
-            item.label = ""
-            item.view = spacer
-            item.isBordered = false
-            item.visibilityPriority = .high
-            trailingInsetItem = item
-        }
-        let width = trailingInset.isFinite ? max(0, trailingInset) : 0
-        if trailingInsetWidth?.constant != width { trailingInsetWidth?.constant = width }
+        searchContainer?.updateTrailingInset(trailingInset)
         let searchHidden = !available || !controlsVisible
         if searchHost?.isHidden != searchHidden { searchHost?.isHidden = searchHidden }
         if let backItem {
@@ -262,9 +250,9 @@ final class MainWindowNativeToolbar: NSObject, NSToolbarDelegate, NSToolbarItemV
     }
 
     private func configureStandardItem(_ item: NSToolbarItem) {
-        if item.target !== self { item.target = self }
-        let action = #selector(toggleSidebar(_:))
-        if item.action != action { item.action = action }
+        // Standard Sidebar items send toggleSidebar: through the responder
+        // chain. The installed NSWindow delegate owns that public action;
+        // AppKit retains control of the standard item's target/action/view.
         let enabled = window != nil && available && onToggleSidebar != nil
         if item.isEnabled != enabled { item.isEnabled = enabled }
         let tooltip = sidebarCollapsed
@@ -281,7 +269,6 @@ final class MainWindowNativeToolbar: NSObject, NSToolbarDelegate, NSToolbarItemV
         // Keep the same intrinsic toolbar height and native input host when
         // the collapsed-sidebar chrome temporarily hides or immersive starts.
         synchronizeItem(Self.searchIdentifier, present: true, at: toolbar.items.count)
-        synchronizeItem(Self.trailingInsetIdentifier, present: true, at: toolbar.items.count)
         for item in toolbar.items where item.itemIdentifier == .toggleSidebar {
             configureStandardItem(item)
         }
@@ -294,6 +281,58 @@ final class MainWindowNativeToolbar: NSObject, NSToolbarDelegate, NSToolbarItemV
             toolbar.insertItem(withItemIdentifier: identifier, at: min(index, toolbar.items.count))
         } else if !present, let existing {
             toolbar.removeItem(at: existing)
+        }
+    }
+
+    /// One measurable custom item owns both the search capsule and its clear
+    /// panel reserve. A separate zero-width toolbar item has a native fallback
+    /// width, so its size is not a faithful representation of an empty inset.
+    private final class SearchContainer: NSView {
+        let host: NSHostingView<SearchFieldView>
+        private var searchSize: NSSize
+        private var trailingInset: CGFloat = 0
+
+        init(host: NSHostingView<SearchFieldView>) {
+            self.host = host
+            searchSize = host.fittingSize
+            super.init(frame: NSRect(origin: .zero, size: searchSize))
+            identifier = NSUserInterfaceItemIdentifier("QieTing.SearchContainer")
+            addSubview(host)
+            setContentHuggingPriority(.required, for: .horizontal)
+            setContentCompressionResistancePriority(.required, for: .horizontal)
+            setContentCompressionResistancePriority(.required, for: .vertical)
+            setAccessibilityElement(false)
+        }
+
+        required init?(coder: NSCoder) { return nil }
+
+        override var intrinsicContentSize: NSSize {
+            NSSize(width: searchSize.width + trailingInset, height: searchSize.height)
+        }
+
+        func updateTrailingInset(_ requested: CGFloat) {
+            let inset = requested.isFinite ? max(0, requested) : 0
+            let measured = host.fittingSize
+            guard trailingInset != inset || searchSize != measured else { return }
+            trailingInset = inset
+            searchSize = measured
+            invalidateIntrinsicContentSize()
+            needsLayout = true
+        }
+
+        override func layout() {
+            super.layout()
+            let target = NSRect(x: 0, y: (bounds.height - searchSize.height) / 2,
+                                width: searchSize.width, height: searchSize.height)
+            if host.frame != target { host.frame = target }
+        }
+
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            let local = convert(point, from: superview)
+            // The transparent panel reserve cannot intercept native window
+            // dragging or turn the entire item into a giant input surface.
+            guard !host.isHidden, host.frame.contains(local) else { return nil }
+            return super.hitTest(point)
         }
     }
 

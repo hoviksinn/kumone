@@ -52,6 +52,15 @@ jobs:
             cp "$BIN_PATH/mlx.metallib" "$test_bin/mlx.metallib"
           done < <(find "$BIN_PATH" -type d -path '*.xctest/Contents/MacOS' -print0)
 
+      # First exercise the three concrete failures from CI #45 attempt 2.
+      # Real mouse/field input and the original 0.5pt geometry checks remain.
+      - name: Native toolbar repair regression
+        shell: bash
+        run: |
+          swift test --skip-build --triple arm64-apple-macosx26.0 --disable-swift-testing --filter 'testNativeSidebarClicksPreserveNavigationSearchAndTheUniquePlayer|testTransparentNativeToolbarLeavesNoSecondHeaderInTheRealDetailViewport|testGlassSearchUsesNativeFieldInputAndGlobalSubmitInsideTheMainColumn' 2>&1 | tee .build/native-toolbar-regression.log
+          python3 Scripts/verify-test-log.py .build/native-toolbar-regression.log --framework xctest --minimum-tests 3 --report .build/native-toolbar-test-summary.json
+          cp .build/window-navigation-validation.json .build/native-toolbar-validation.json
+
       # Run every hosted window case in its own process. Synchronous GPU/audio
       # work in other suites must not consume its native UI observation deadline.
       # The following step runs all remaining suites; no coverage is omitted.
@@ -133,6 +142,7 @@ jobs:
             .build/PREVIEW.md
             .build/preview-status.json
             .build/app-verification.json
+            .build/native-toolbar-test-summary.json
             .build/native-scroll-test-summary.json
             .build/window-test-summary.json
             .build/lyrics-seek-test-summary.json
@@ -178,6 +188,7 @@ jobs:
           path: |
             .build/QieTing-Test-macOS26-arm64.zip
             .build/app-verification.json
+            .build/native-toolbar-test-summary.json
             .build/native-scroll-test-summary.json
             .build/window-test-summary.json
             .build/lyrics-seek-test-summary.json
@@ -204,12 +215,15 @@ jobs:
             .build/app-verification.json
             .build/preview-status.json
             .build/PREVIEW.md
+            .build/native-toolbar-test-summary.json
             .build/native-scroll-test-summary.json
             .build/window-test-summary.json
             .build/lyrics-seek-test-summary.json
             .build/seek-clock-test-summary.json
             .build/segment-eof-test-summary.json
             .build/test-summary.json
+            .build/native-toolbar-regression.log
+            .build/native-toolbar-validation.json
             .build/native-scroll-regression.log
             .build/window-regression.log
             .build/lyrics-seek-regression.log

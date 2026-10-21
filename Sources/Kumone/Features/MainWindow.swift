@@ -478,7 +478,7 @@ struct MainWindowConfigurator: NSViewRepresentable {
     }
     static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) { coordinator.detach() }
 
-    @MainActor final class Coordinator: NSObject, NSWindowDelegate {
+    @MainActor final class Coordinator: NSObject, NSWindowDelegate, NSUserInterfaceValidations {
         private weak var window: NSWindow?
         private weak var forwardee: NSWindowDelegate?
         private let ambientAppearance = MainWindowAmbientAppearanceController()
@@ -521,6 +521,21 @@ struct MainWindowConfigurator: NSViewRepresentable {
             if let window, window.delegate === self { window.delegate = forwardee }
             panels.detach()
             self.window = nil
+        }
+        /// AppKit's standard Sidebar item deliberately uses First Responder.
+        /// NSWindow includes its delegate in that public action route; the
+        /// toolbar adapter itself is not a responder or a split controller.
+        @objc func toggleSidebar(_ sender: Any?) {
+            MainWindowNativeToolbar.performSidebarToggle(in: window)
+        }
+        func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
+            if item.action == #selector(toggleSidebar(_:)) {
+                return MainWindowNativeToolbar.canToggleSidebar(in: window)
+            }
+            if let validator = forwardee as? NSUserInterfaceValidations {
+                return validator.validateUserInterfaceItem(item)
+            }
+            return true
         }
         func windowDidUpdate(_ notification: Notification) {
             forwardee?.windowDidUpdate?(notification)
