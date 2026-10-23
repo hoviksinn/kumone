@@ -62,7 +62,7 @@ private enum NativeScrollEvidence {
             .appendingPathComponent(".build/native-scroll-validation.json")
         try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(),
                                                 withIntermediateDirectories: true)
-        let scope = "Public CG-created wheel input delivered to the actual native scroll view, with per-phase native document motion. CG-created NSEvents have no associated NSWindow; this does not establish NSApplication/WindowServer routing, physical trackpad momentum, or fading. No programmatic document/clip/knob position changes in the wheel checks."
+        let scope = "Public CG-created discrete line-based mouse-wheel input delivered to the actual native scroll view. Every fixture requires actual forward and reverse native document movement. CG-created NSEvents have no associated NSWindow; this does not establish NSApplication/WindowServer routing, physical trackpad gestures/momentum, or fading. No programmatic document/clip/knob position changes in the wheel checks."
         try JSONSerialization.data(withJSONObject: ["scope": scope, "gestures": gestures],
                                    options: [.prettyPrinted, .sortedKeys])
             .write(to: destination, options: .atomic)
@@ -200,11 +200,6 @@ struct NativeScrollPreferencesTests {
         throw CocoaError(.coderReadCorrupt)
     }
 
-    private enum WheelSequence: String {
-        case originalBeganEnded
-        case completeGesture
-    }
-
     private func scrollSnapshot(_ scroll: NSScrollView, context: [String: Any]) throws -> [String: Any] {
         try NativeScrollJournal.record("snapshot.enter", details: context)
         let value: [String: Any] = ["scrollClass": String(describing: type(of: scroll)),
@@ -227,14 +222,20 @@ struct NativeScrollPreferencesTests {
         return value
     }
 
+    /// Legacy mouse wheels emit independent line-based events with neither a
+    /// gesture phase nor momentum. CI #52 proved that synchronously calling a
+    /// phased began enters AppKit's concurrent gesture monitor before this
+    /// helper can deliver changed/ended. Exercise the supported mouse-wheel
+    /// protocol instead of pretending that sequential calls form that stream.
+    /// https://developer.apple.com/documentation/appkit/nsevent/phase-swift.property
     private func horizontalWheel(in scroll: NSScrollView, window: NSWindow,
-                                 scenario: String, sequence: WheelSequence = .completeGesture) async throws {
-        let context: [String: Any] = ["scenario": scenario, "wheelSequence": sequence.rawValue,
+                                 scenario: String) async throws {
+        let context: [String: Any] = ["scenario": scenario, "wheelProtocol": "discrete-line-mouse-wheel",
                                      "hostWindowNumber": window.windowNumber,
                                      "scrollerStyle": scroll.scrollerStyle.rawValue]
-        try NativeScrollJournal.record("gesture.geometry.enter", details: context)
+        try NativeScrollJournal.record("wheel.geometry.enter", details: context)
         let start = scroll.documentVisibleRect
-        let initial = try scrollSnapshot(scroll, context: context.merging(["snapshotPurpose": "gesture-initial"]) { _, new in new })
+        let initial = try scrollSnapshot(scroll, context: context.merging(["snapshotPurpose": "wheel-initial"]) { _, new in new })
         #expect(scroll.window === window)
         #expect((scroll.documentView?.frame.width ?? 0) > scroll.contentSize.width + 100)
         let visible = scroll.contentView.visibleRect
@@ -244,49 +245,40 @@ struct NativeScrollPreferencesTests {
         let root = try #require(window.contentView)
         let hit = root.hitTest(root.convert(point, from: nil))
         #expect(hit?.enclosingScrollView === scroll,
-                "The wheel point must fall inside the actual visible target scroll view")
-        try NativeScrollJournal.record("gesture.geometry.return", details: context)
-        // Match the public WebKit test helper's complete wheel sequence:
-        // began carries one pixel, changed carries the remainder, ended zero.
-        // Keep the old two-event setup on separate diagnostic fixtures so CI
-        // can distinguish a missing changed phase from a production failure.
-        let phases: [(CGScrollPhase, NSEvent.Phase, Int32)] = sequence == .completeGesture
-            ? [(.began, .began, -1), (.changed, .changed, -79), (.ended, .ended, 0)]
-            : [(.began, .began, -80), (.ended, .ended, 0)]
+                "The wheel target must be inside the actual visible native scroll view")
+        try NativeScrollJournal.record("wheel.geometry.return", details: context)
         var receipts: [[String: Any]] = []
-        for (cgPhase, phase, deltaX) in phases {
-            let phaseContext = context.merging(["cgPhase": cgPhase.rawValue, "signedInputDeltaX": deltaX]) { _, new in new }
-            try NativeScrollJournal.record("phase.create.enter", details: phaseContext)
-            let input = try #require(CGEvent(scrollWheelEvent2Source: nil, units: .pixel,
+        var forwardOffset = start.origin.x
+        var previousTimestamp: TimeInterval = 0
+        // These are two complete discrete inputs, not begin/end fragments.
+        // Their opposite signs also verify the left-edge direction assumption.
+        for (direction, deltaX) in [("forward", Int32(-8)), ("reverse", Int32(8))] {
+            let eventContext = context.merging(["direction": direction, "signedInputLinesX": deltaX]) { _, new in new }
+            try NativeScrollJournal.record("wheel.create.enter", details: eventContext)
+            let input = try #require(CGEvent(scrollWheelEvent2Source: nil, units: .line,
                                             wheelCount: 2, wheel1: 0, wheel2: deltaX, wheel3: 0))
             input.timestamp = UInt64(ProcessInfo.processInfo.systemUptime * 1_000_000_000)
             input.flags = []
-            input.setIntegerValueField(.scrollWheelEventIsContinuous, value: 1)
-            input.setIntegerValueField(.scrollWheelEventScrollPhase, value: Int64(cgPhase.rawValue))
+            input.setIntegerValueField(.scrollWheelEventIsContinuous, value: 0)
+            input.setIntegerValueField(.scrollWheelEventScrollPhase, value: 0)
             input.setIntegerValueField(.scrollWheelEventMomentumPhase, value: 0)
             input.location = CGPoint(x: screen.x, y: (NSScreen.screens.first?.frame.maxY ?? 0) - screen.y)
+            #expect(input.getIntegerValueField(.scrollWheelEventDeltaAxis2) == Int64(deltaX))
+            #expect(input.getIntegerValueField(.scrollWheelEventDeltaAxis1) == 0)
+            #expect(input.getIntegerValueField(.scrollWheelEventIsContinuous) == 0)
+            #expect(input.getIntegerValueField(.scrollWheelEventScrollPhase) == 0)
+            #expect(input.getIntegerValueField(.scrollWheelEventMomentumPhase) == 0)
             let event = try #require(NSEvent(cgEvent: input))
             #expect(event.type == .scrollWheel)
-            #expect(event.timestamp > 0)
-            #expect(event.phase == phase && event.momentumPhase.isEmpty)
-            #expect(event.hasPreciseScrollingDeltas)
-            #expect(event.scrollingDeltaX == CGFloat(deltaX) && event.scrollingDeltaY == 0)
-            try NativeScrollJournal.record("phase.ready", details: phaseContext.merging([
-                "eventType": event.type.rawValue, "eventTimestamp": event.timestamp,
-                "eventWindowNumber": event.windowNumber, "eventHasHostWindow": event.window === window,
-                "eventHasAnyWindow": event.window != nil, "phase": event.phase.rawValue,
-                "momentumPhase": event.momentumPhase.rawValue,
-                "scrollingDeltaX": event.scrollingDeltaX, "scrollingDeltaY": event.scrollingDeltaY,
-                "locationInWindow": NSStringFromPoint(event.locationInWindow),
-                "intendedWindowPoint": NSStringFromPoint(point), "screenPoint": NSStringFromPoint(screen),
-            ]) { _, new in new })
-            let before = try scrollSnapshot(scroll, context: phaseContext.merging(["snapshotPurpose": "phase-before"]) { _, new in new })
-            try NativeScrollJournal.record("scrollWheel.enter", details: phaseContext)
-            scroll.scrollWheel(with: event)
-            try NativeScrollJournal.record("scrollWheel.return", details: phaseContext)
-            try await nativeCommit(scroll, context: phaseContext)
-            let after = try scrollSnapshot(scroll, context: phaseContext.merging(["snapshotPurpose": "phase-after"]) { _, new in new })
-            receipts.append([
+            #expect(event.modifierFlags.isEmpty)
+            #expect(event.timestamp > previousTimestamp)
+            previousTimestamp = event.timestamp
+            #expect(event.phase.isEmpty && event.momentumPhase.isEmpty)
+            #expect(!event.hasPreciseScrollingDeltas)
+            #expect(event.scrollingDeltaX.isFinite && event.scrollingDeltaX != 0)
+            #expect((event.scrollingDeltaX < 0) == (deltaX < 0))
+            #expect(event.scrollingDeltaY == 0)
+            let format: [String: Any] = [
                 "eventType": event.type.rawValue, "eventTimestamp": event.timestamp,
                 "modifierFlags": event.modifierFlags.rawValue,
                 "eventWindowNumber": event.windowNumber, "eventHasHostWindow": event.window === window,
@@ -295,63 +287,86 @@ struct NativeScrollPreferencesTests {
                 "intendedWindowPoint": NSStringFromPoint(point), "screenPoint": NSStringFromPoint(screen),
                 "hitViewClass": hit.map { String(describing: type(of: $0)) } ?? "none",
                 "hitViewEnclosingScrollIsTarget": hit?.enclosingScrollView === scroll,
-                "phase": event.phase.rawValue, "cgPhase": cgPhase.rawValue,
-                "momentumPhase": event.momentumPhase.rawValue,
+                "phase": event.phase.rawValue, "momentumPhase": event.momentumPhase.rawValue,
+                "hasPreciseScrollingDeltas": event.hasPreciseScrollingDeltas,
+                "isDirectionInvertedFromDevice": event.isDirectionInvertedFromDevice,
                 "scrollingDeltaX": event.scrollingDeltaX, "scrollingDeltaY": event.scrollingDeltaY,
                 "deltaX": event.deltaX, "deltaY": event.deltaY,
+                "cgIsContinuous": input.getIntegerValueField(.scrollWheelEventIsContinuous),
+                "cgPhase": input.getIntegerValueField(.scrollWheelEventScrollPhase),
+                "cgMomentumPhase": input.getIntegerValueField(.scrollWheelEventMomentumPhase),
+                "cgLineDeltaX": input.getIntegerValueField(.scrollWheelEventDeltaAxis2),
                 "cgPointDeltaX": input.getIntegerValueField(.scrollWheelEventPointDeltaAxis2),
                 "cgFixedDeltaX": input.getDoubleValueField(.scrollWheelEventFixedPtDeltaAxis2),
+            ]
+            try NativeScrollJournal.record("wheel.ready", details: eventContext.merging(format) { _, new in new })
+            let before = try scrollSnapshot(scroll, context: eventContext.merging(["snapshotPurpose": "wheel-before"]) { _, new in new })
+            let beforeOffset = scroll.documentVisibleRect.origin.x
+            try NativeScrollJournal.record("scrollWheel.enter", details: eventContext)
+            scroll.scrollWheel(with: event)
+            try NativeScrollJournal.record("scrollWheel.return", details: eventContext)
+            try await nativeCommit(scroll, context: eventContext)
+            let after = try scrollSnapshot(scroll, context: eventContext.merging(["snapshotPurpose": "wheel-after"]) { _, new in new })
+            let afterOffset = scroll.documentVisibleRect.origin.x
+            if direction == "forward" {
+                forwardOffset = afterOffset
+                #expect(scroll.documentVisibleRect.origin.x > start.origin.x,
+                        "The native horizontal mouse wheel must move the actual document forward")
+            } else {
+                #expect(scroll.documentVisibleRect.origin.x < forwardOffset,
+                        "The opposite native mouse-wheel input must move the actual document back")
+            }
+            receipts.append(format.merging([
+                "direction": direction, "signedInputLinesX": deltaX,
                 "before": before, "afterNativeCommit": after,
-            ])
+                "actualOffsetBefore": beforeOffset, "actualOffsetAfter": afterOffset,
+                "actualHorizontalMotion": direction == "forward" ? afterOffset > beforeOffset : afterOffset < beforeOffset,
+            ]) { _, new in new })
         }
-        let final = try scrollSnapshot(scroll, context: context.merging(["snapshotPurpose": "gesture-final"]) { _, new in new })
-        try NativeScrollJournal.record("gesture.evidence.enter", details: context)
+        let final = try scrollSnapshot(scroll, context: context.merging(["snapshotPurpose": "wheel-final"]) { _, new in new })
+        try NativeScrollJournal.record("wheel.evidence.enter", details: context)
         try NativeScrollEvidence.record([
-            "scenario": scenario, "sequence": sequence.rawValue,
-            "delivery": "direct NSScrollView.scrollWheel(with:) using public CG/NSEvent APIs",
+            "scenario": scenario, "sequence": "discrete-line-forward-and-reverse",
+            "delivery": "direct NSScrollView.scrollWheel(with:) using public CG/NSEvent APIs; no NSApplication routing claim",
             "hostWindowNumber": window.windowNumber, "hostWindowFrame": NSStringFromRect(window.frame),
             "before": initial, "after": final, "events": receipts,
-            "actualHorizontalMotion": scroll.documentVisibleRect.origin.x > start.origin.x,
+            "forwardOffsetX": forwardOffset,
+            "actualForwardMotion": forwardOffset > start.origin.x,
+            "actualReverseMotion": scroll.documentVisibleRect.origin.x < forwardOffset,
         ])
-        try NativeScrollJournal.record("gesture.evidence.return", details: context)
-        if sequence == .completeGesture {
-            #expect(scroll.documentVisibleRect.origin.x > start.origin.x,
-                    "The complete native horizontal wheel gesture must move the actual document")
-        }
-        try NativeScrollJournal.record("gesture.return", details: context)
+        try NativeScrollJournal.record("wheel.evidence.return", details: context)
+        try NativeScrollJournal.record("wheel.return", details: context)
     }
 
     @Test func completeHorizontalWheelGestureMovesNativeControl() async throws {
         try NativeScrollJournal.record("test.begin", details: ["test": "completeHorizontalWheelGestureMovesNativeControl"])
         defer { NativeScrollJournal.scopeExit("completeHorizontalWheelGestureMovesNativeControl") }
         for style in [NSScroller.Style.legacy, .overlay] {
-            for sequence in [WheelSequence.originalBeganEnded, .completeGesture] {
-                let context: [String: Any] = ["scrollerStyle": style.rawValue, "wheelSequence": sequence.rawValue,
-                                             "scenario": "ordinary-native-control"]
-                try NativeScrollJournal.record("native-control.create.enter", details: context)
-                _ = NSApplication.shared
-                try NativeScrollJournal.record("native-control.application.ready", details: context)
-                let window = NSWindow(contentRect: NSRect(x: 40, y: 40, width: 420, height: 300),
-                                      styleMask: [.titled, .closable], backing: .buffered, defer: false)
-                try NativeScrollJournal.record("native-control.window.created", details: context.merging(["hostWindowNumber": window.windowNumber]) { _, new in new })
-                window.isReleasedWhenClosed = false
-                defer { close(window) }
-                let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 420, height: 300))
-                scroll.documentView = NSView(frame: NSRect(x: 0, y: 0, width: 3600, height: 260))
-                scroll.hasHorizontalScroller = true
-                scroll.hasVerticalScroller = false
-                scroll.scrollerStyle = style
-                scroll.autohidesScrollers = true
-                try NativeScrollJournal.record("native-control.content.enter", details: context)
-                window.contentView = scroll
-                try NativeScrollJournal.record("native-control.content.return", details: context)
-                try NativeScrollJournal.record("window.orderFront.enter", details: context)
-                window.orderFront(nil)
-                try NativeScrollJournal.record("window.orderFront.return", details: context)
-                try await nativeCommit(scroll, context: context.merging(["purpose": "native-control-initial"]) { _, new in new })
-                try await horizontalWheel(in: scroll, window: window,
-                                          scenario: "ordinary-native-control", sequence: sequence)
-            }
+            let context: [String: Any] = ["scrollerStyle": style.rawValue,
+                                         "wheelProtocol": "discrete-line-mouse-wheel",
+                                         "scenario": "ordinary-native-control"]
+            try NativeScrollJournal.record("native-control.create.enter", details: context)
+            _ = NSApplication.shared
+            try NativeScrollJournal.record("native-control.application.ready", details: context)
+            let window = NSWindow(contentRect: NSRect(x: 40, y: 40, width: 420, height: 300),
+                                  styleMask: [.titled, .closable], backing: .buffered, defer: false)
+            try NativeScrollJournal.record("native-control.window.created", details: context.merging(["hostWindowNumber": window.windowNumber]) { _, new in new })
+            window.isReleasedWhenClosed = false
+            defer { close(window) }
+            let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 420, height: 300))
+            scroll.documentView = NSView(frame: NSRect(x: 0, y: 0, width: 3600, height: 260))
+            scroll.hasHorizontalScroller = true
+            scroll.hasVerticalScroller = false
+            scroll.scrollerStyle = style
+            scroll.autohidesScrollers = true
+            try NativeScrollJournal.record("native-control.content.enter", details: context)
+            window.contentView = scroll
+            try NativeScrollJournal.record("native-control.content.return", details: context)
+            try NativeScrollJournal.record("window.orderFront.enter", details: context)
+            window.orderFront(nil)
+            try NativeScrollJournal.record("window.orderFront.return", details: context)
+            try await nativeCommit(scroll, context: context.merging(["purpose": "native-control-initial"]) { _, new in new })
+            try await horizontalWheel(in: scroll, window: window, scenario: "ordinary-native-control")
         }
     }
 
@@ -424,24 +439,13 @@ struct NativeScrollPreferencesTests {
         defer { NativeScrollJournal.scopeExit("productionShelvesNeverShowHorizontalIndicatorsUnderNativeStyles") }
         let (window, hosting) = try host(shelves(identity: 0))
         defer { close(window) }
-        let (originalWindow, originalHosting) = try host(shelves(identity: 0))
-        defer { close(originalWindow) }
         let horizontal = try await horizontalProbes(in: hosting)
-        let originalHorizontal = try await horizontalProbes(in: originalHosting)
         for style in [NSScroller.Style.legacy, .overlay] {
-            for root in [hosting, originalHosting] {
-                for probe in descendants(root, of: NativeScrollPreferences.Probe.self) {
-                    probe.preferredStyle = { style }
-                    probe.applyPreferences()
-                }
-                try await nativeCommit(root, context: ["purpose": "production-shelf-style-change", "scrollerStyle": style.rawValue])
+            for probe in descendants(hosting, of: NativeScrollPreferences.Probe.self) {
+                probe.preferredStyle = { style }
+                probe.applyPreferences()
             }
-            for probe in originalHorizontal {
-                let scroll = try #require(probe.enclosingScrollView)
-                try await horizontalWheel(in: scroll, window: originalWindow,
-                                          scenario: "production-shelf-original-input-diagnostic",
-                                          sequence: .originalBeganEnded)
-            }
+            try await nativeCommit(hosting, context: ["purpose": "production-shelf-style-change", "scrollerStyle": style.rawValue])
             for probe in horizontal {
                 let scroll = try #require(probe.enclosingScrollView)
                 #expect(scroll.scrollerStyle == style)

@@ -102,3 +102,11 @@ CI #50 的编译及 16 项脚本自测实际通过。Journal 确认测试已经�
 CI #51 自动触发，独立进程组相关检查实际通过，但自测 18 项中仍有 1 项在命令退出边界失败：已认领 PID 1179 的 ps 身份改变。该次没有编译应用。正在补录公开进程状态及 expected/observed 身份，区分已经退出但尚未回收的进程与仍在运行的身份变化；后者及 PID 复用仍必须失败。不能把这次诊断脚本问题解释为生产滚动问题。
 
 退出边界修正只把经父链/启动身份核实、公开状态为 Z 的僵尸进程标记为不可采样、不可作为进度；若命令文本改为退出标记，仍要求 PID/启动时间/进程组一致。活进程命令变化、启动时间变化及外部僵尸 PID 继续失败。加入实际未回收子进程与身份反例后，21 项 Linux 诊断自测通过；CI #51 未保存原始 ps 状态，故不把僵尸文本变化说成已唯一证实的历史调用原因。新的失败会保存完整 expected/observed 记录。
+
+## CI #52：已取得原生线程证据，修正输入协议
+
+[CI #52](https://github.com/hoviksinn/kumone/actions/runs/39965270264) 的 21 项脚本自测、编译及 Metal 准备通过。滚动测试停在标准 NSScrollView、Legacy 样式的原始 began(-80) 第一次调用，30 秒后实际测试进程采样成功。全部 1453 个主线程采样均在 `NSScrollingBehaviorConcurrentVBL → trackGestureScrollWithEvent → NSScrollingConcurrentEventMonitor.startMonitoring → NSApplication.nextEvent → HIToolbox` 等待后续系统事件。测试本身却要等该同步调用返回后才产生 ended，证明“逐个直接调用带阶段事件”未建立合法原生交互生命周期。不是 GPU 负载、窗口尺寸或 `.never` 禁止滚动的证据，也不能把它说成生产 App 横向滚动已被验证失效。
+
+新输入采用真实传统水平鼠标滚轮协议：公开 CG `.line`、isContinuous=0、phase/momentumPhase=0；[Apple NSEvent.phase](https://developer.apple.com/documentation/appkit/nsevent/phase-swift.property) 明确说明传统滚轮没有手势阶段。每个真实原生/生产 Shelf/重建场景都必须实际向右移动 `x > start.x`，再以相反原生输入向左移动 `x < forward.x`；文档/clip/knob 坐标不被测试修改，样式及指示器策略检查保留。五项测试及四项原始场景都继续执行，仍需新的 Mac 结果证明该输入能观察实际生产滚动。
+
+事件仍直接交给实际原生 view，CG-created NSEvent 的 window=nil 及实际坐标均记录；不冒称已经验证 NSApplication/WindowServer 路由、物理触控板惯性或指示器淡出。CI #52 的原生源时钟/严格 PCM 18 项及 EOF 1 项继续通过，完整 UI、音频候选、完整回归和新 App 均尚未通过。
