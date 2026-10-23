@@ -12,13 +12,17 @@ struct OfflinePlaybackAlert: ViewModifier {
             if issue.kind == .missingTrack {
                 Button("播放下一首离线歌曲") { player.playNextAvailableOffline() }
             }
-            Button("查看已下载") { player.offlineIssue = nil; onDownloads() }
+            if SongDownloadUI.isAvailable {
+                Button("查看已下载") { player.offlineIssue = nil; onDownloads() }
+            }
             Button("取消", role: .cancel) { player.offlineIssue = nil }
         } message: { issue in
             if let name = issue.trackName {
                 Text("《\(name)》尚未下载。连接网络后可重试，或播放队列里已下载的歌曲。")
-            } else {
+            } else if SongDownloadUI.isAvailable {
                 Text("当前队列没有可离线播放的歌曲。连接网络后可继续，或前往已下载查看其他歌曲。")
+            } else {
+                Text("当前队列没有可离线播放的歌曲。连接网络后可继续。已有的离线歌曲和缓存仍然保留。")
             }
         }
     }

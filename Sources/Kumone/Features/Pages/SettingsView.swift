@@ -198,7 +198,7 @@ struct SettingsView: View {
             }
 
             Section("关于") {
-                LabeledContent("Kumone", value: appVersion)
+                LabeledContent("且听", value: appVersion)
                 Text("网易云音乐第三方客户端 · 数据来自网易云音乐")
                     .font(.caption)
                     .foregroundStyle(.secondary)

@@ -28,7 +28,7 @@ struct NowPlayingTrackDestinationLinks: View {
                             .contentShape(Rectangle())
                             .padding(.vertical, 3)
                     }
-                    .buttonStyle(.plain)
+                    .navigationTextLink(color: color)
                     .accessibilityLabel("打开歌手：\(artist.name)")
                 }
             }
@@ -44,7 +44,7 @@ struct NowPlayingTrackDestinationLinks: View {
                         .contentShape(Rectangle())
                         .padding(.vertical, 3)
                 }
-                .buttonStyle(.plain)
+                .navigationTextLink(color: color)
                 .accessibilityLabel("打开专辑：\(track.album.name)")
             }
         }

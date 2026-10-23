@@ -31,10 +31,12 @@ struct MeteredDownloadAlert: ViewModifier {
     @ObservedObject var center = MeteredDownloadCenter.shared
     var enabled = true
 
+    private var canPresent: Bool { enabled && SongDownloadUI.isAvailable }
+
     func body(content: Content) -> some View {
-        content.alert(title, isPresented: Binding(get: { enabled && center.prompt != nil }, set: {
-            if enabled && !$0 { center.prompt = nil }
-        }), presenting: enabled ? center.prompt : nil) { prompt in
+        content.alert(title, isPresented: Binding(get: { canPresent && center.prompt != nil }, set: {
+            if canPresent && !$0 { center.prompt = nil }
+        }), presenting: canPresent ? center.prompt : nil) { prompt in
             Button("继续下载") { center.prompt = nil; prompt.run(true) }
             Button("等待 Wi-Fi") { center.prompt = nil; prompt.run(false) }
             Button("取消", role: .cancel) { center.prompt = nil }

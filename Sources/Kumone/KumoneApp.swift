@@ -14,7 +14,7 @@ public struct KumoneApp: App {
     public init() {}
 
     public var body: some Scene {
-        Window("Kumone", id: "main") {
+        Window("且听", id: "main") {
             MainWindow()
                 .environmentObject(player)
                 .environmentObject(account)
@@ -22,15 +22,35 @@ public struct KumoneApp: App {
                 .environmentObject(toasts)
                 .tint(Theme.accent)
                 .preferredColorScheme(settings.appearance.colorScheme)
-                .frame(minWidth: player.showNowPlaying
-                           ? Theme.Layout.minWindowWidthSidebarCollapsed
-                           : Theme.Layout.minWindowWidth,
-                       minHeight: Theme.Layout.minWindowHeight)
+                .scrollIndicators(.automatic)
+                // MainWindow owns the phase-aware minimum for both pages
+                // and open inspectors. An outer fixed minimum masks it when
+                // the hosting view measures the scene's minimum size.
         }
         .defaultSize(width: Theme.Layout.defaultWindowWidth,
                      height: Theme.Layout.defaultWindowHeight)
         .windowResizability(.contentMinSize)
         .commands {
+            CommandGroup(after: .toolbar) {
+                Button("显示或隐藏侧边栏") {
+                    MainWindowNativeToolbar.performSidebarToggle(in: NSApp.keyWindow ?? AppDelegate.shared?.mainWindow)
+                }
+                .keyboardShortcut("s", modifiers: [.command, .option])
+                Button("返回") {
+                    MainWindowNativeToolbar.performBack(in: NSApp.keyWindow ?? AppDelegate.shared?.mainWindow)
+                }
+                .keyboardShortcut("[", modifiers: .command)
+            }
+            CommandGroup(replacing: .appInfo) {
+                Button("关于且听") {
+                    NSApp.orderFrontStandardAboutPanel(options: [
+                        .applicationName: "且听",
+                        .credits: NSAttributedString(
+                            string: "Based on Kumone · © 2026 missuo\nLGPL-3.0-only\nhttps://github.com/missuo/kumone"
+                        ),
+                    ])
+                }
+            }
             CommandGroup(after: .appInfo) {
                 CheckForUpdatesButton()
             }
@@ -100,6 +120,7 @@ public struct KumoneApp: App {
         Window(AutoMixDebugPanel.windowTitle, id: AutoMixDebugPanel.windowID) {
             AutoMixDebugPanel()
                 .preferredColorScheme(settings.appearance.colorScheme)
+                .scrollIndicators(.automatic)
         }
         .defaultSize(width: 460, height: 620)
         .windowResizability(.contentMinSize)
@@ -108,7 +129,7 @@ public struct KumoneApp: App {
         Settings {
             SettingsView()
                 .environment(\.openDestination, { destination in
-                    guard destination == .downloaded else { return }
+                    guard SongDownloadUI.isAvailable, destination == .downloaded else { return }
                     NotificationCenter.default.post(name: .showDownloadedMusic, object: nil)
                     _ = AppDelegate.shared?.applicationShouldHandleReopen(NSApp, hasVisibleWindows: true)
                 })
@@ -116,6 +137,7 @@ public struct KumoneApp: App {
                 .environmentObject(settings)
                 .tint(Theme.accent)
                 .preferredColorScheme(settings.appearance.colorScheme)
+                .scrollIndicators(.automatic)
         }
     }
 }

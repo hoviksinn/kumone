@@ -24,38 +24,14 @@ extension EnvironmentValues {
     }
 }
 
-struct PlayerChromeModifier: ViewModifier {
-    @EnvironmentObject private var player: PlayerService
-    let detailWidth: CGFloat
+private struct PlayerChromeClearanceKey: EnvironmentKey {
+    static let defaultValue: CGFloat = Theme.Layout.playerChromeClearance
+}
 
-    func body(content: Content) -> some View {
-        content
-            .overlay(alignment: .bottomTrailing) {
-                PlayerBar()
-                    .frame(width: detailWidth)
-            }
-            .overlay(alignment: .trailing) {
-                rightPanel
-            }
-            .animation(AppAnimation.standard, value: player.activePanel)
-    }
-
-    @ViewBuilder
-    private var rightPanel: some View {
-        if let panel = player.activePanel {
-            Group {
-                switch panel {
-                case .lyrics:
-                    LyricsPanel()
-                case .queue:
-                    QueuePanel()
-                }
-            }
-            .padding(.top, 12)
-            .padding(.bottom, Theme.Layout.playerChromeClearance + 10)
-            .padding(.trailing, 16)
-            .transition(.move(edge: .trailing).combined(with: .opacity))
-        }
+extension EnvironmentValues {
+    var playerChromeClearance: CGFloat {
+        get { self[PlayerChromeClearanceKey.self] }
+        set { self[PlayerChromeClearanceKey.self] = newValue }
     }
 }
 
@@ -94,47 +70,34 @@ extension Array where Element == Destination {
     }
 }
 
-/// Registers all shared navigation destinations on a stack.
-struct DestinationsModifier: ViewModifier {
-    func body(content: Content) -> some View {
-        content.navigationDestination(for: Destination.self) { destination in
-            Group {
-                switch destination {
-                case .downloaded:
-                    DownloadedMusicView()
-                case .downloadTasks:
-                    DownloadTasksView()
-                case .playlist(let id):
-                    PlaylistDetailView(playlistID: id)
-                case .radarPlaylist(let id):
-                    PlaylistDetailView(playlistID: id, recommendationContext: .radar)
-                case .album(let id):
-                    AlbumDetailView(albumID: id)
-                case .artist(let id):
-                    ArtistDetailView(artistID: id)
-                case .daily:
-                    DailySongsView()
-                case .toplists:
-                    ToplistsView()
-                case .recents:
-                    RecentsView()
-                case .collections:
-                    CollectionsView()
-                case .cloud:
-                    CloudView()
-                case .search(let query):
-                    SearchView(query: query)
-                }
-            }
+/// Shared destination leaf; window-level controls are never created here.
+struct DestinationContent: View {
+    let destination: Destination
+    @ViewBuilder var body: some View {
+        switch destination {
+        case .downloaded: DownloadedMusicView()
+        case .downloadTasks: DownloadTasksView()
+        case .playlist(let id): PlaylistDetailView(playlistID: id)
+        case .radarPlaylist(let id): PlaylistDetailView(playlistID: id, recommendationContext: .radar)
+        case .album(let id): AlbumDetailView(albumID: id)
+        case .artist(let id): ArtistDetailView(artistID: id)
+        case .daily: DailySongsView()
+        case .toplists: ToplistsView()
+        case .recents: RecentsView()
+        case .collections: CollectionsView()
+        case .cloud: CloudView()
+        case .search(let query): SearchView(query: query)
         }
     }
 }
 
-extension View {
-    func playerChrome(detailWidth: CGFloat) -> some View {
-        modifier(PlayerChromeModifier(detailWidth: detailWidth))
+struct DestinationsModifier: ViewModifier {
+    func body(content: Content) -> some View {
+        content.navigationDestination(for: Destination.self) { DestinationContent(destination: $0) }
     }
+}
 
+extension View {
     func appDestinations() -> some View {
         modifier(DestinationsModifier())
     }
@@ -143,9 +106,11 @@ extension View {
 /// Trailing spacer for scrollable pages so the last row clears the
 /// floating player bar.
 struct PlayerClearanceSpacer: View {
+    @Environment(\.playerChromeClearance) private var clearance
+
     var body: some View {
         Color.clear.frame(
-            height: Theme.Layout.playerChromeClearance + Theme.Layout.scrollBreathingMargin
+            height: clearance + Theme.Layout.scrollBreathingMargin
         )
     }
 }

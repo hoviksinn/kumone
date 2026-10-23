@@ -349,9 +349,13 @@ private final class EventLog: @unchecked Sendable {
         // them queue for the cooperative pool (about 30 s of backlog on CI).
         // At .high the consumer goes to the front of that queue, so an event
         // is not late just because other suites are busy.
-        task = Task(priority: .high) {
-            for await event in engine.events {
-                self.append(event)
+        // Keep the stream, not its owner. Capturing engine and self here
+        // would retain both until the stream finishes in engine.deinit,
+        // preventing that deinit (and this task's cancellation) forever.
+        let stream = engine.events
+        task = Task(priority: .high) { [weak self] in
+            for await event in stream {
+                self?.append(event)
             }
         }
     }
@@ -454,6 +458,26 @@ private func pollPosition(_ engine: PlaybackEngine, deck: Deck, past target: Tim
 @Suite("PlaybackEngineSmoke", .serialized)
 struct PlaybackEngineSmokeTests {
 
+    @Test func eventCollectorReleasesItselfAndItsEngine() async throws {
+        var engine: PlaybackEngine? = PlaybackEngine()
+        var collector: EventLog? = EventLog(try #require(engine))
+        weak var observedEngine = engine
+        weak var observedCollector = collector
+        // Exercise the consumer while it waits for a real engine stream;
+        // no file, audio output device, or playback probe is required.
+        for _ in 0..<4 { await Task.yield() }
+        collector = nil
+        engine = nil
+        // An already executing callback or configuration notification may
+        // briefly own the objects. The old task cycle never releases them.
+        for _ in 0..<100 {
+            if observedCollector == nil && observedEngine == nil { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(observedCollector == nil, "the event task must not retain its collector across await")
+        #expect(observedEngine == nil, "the event task must not retain an engine waiting for its own deinit")
+    }
+
     // (a) Local file deck: position advances, deckFinished on natural end.
     @Test func filePlaybackAdvancesAndFinishes() async throws {
         guard await audioOutputAvailable.value else { return } // skipped: no audio device
@@ -518,6 +542,70 @@ struct PlaybackEngineSmokeTests {
                 "position must freeze while paused (\(o.pausedA) → \(o.pausedB))")
         #expect(o.resumed > o.pausedB + 0.5,
                 "position must advance after resume (\(o.pausedB) → \(o.resumed))")
+    }
+
+    /// Complements the no-device PCM suite: real-time host-clock compensation
+    /// must freeze through several pauses and advance only by sounding time.
+    /// This is explicitly conditional on a real advancing output clock.
+    @Test(arguments: [false, true])
+    func repeatedPauseResumeHasNoPositionJump(stereo: Bool) async throws {
+        guard await audioOutputAvailable.value else {
+            print("Transport real-time clock regression NOT RUN: no advancing output device")
+            return
+        }
+        struct Cycle {
+            var paused: TimeInterval
+            var held: TimeInterval
+            var resumed: TimeInterval
+            var after: TimeInterval
+            var pauseCallDuration: TimeInterval
+            var resumeStartDuration: TimeInterval
+            var pauseSkew: TimeInterval
+            var soundingHostDuration: TimeInterval
+        }
+        let result = await withWatchdog("pauseContinuity-\(stereo)", timeout: 25) { () -> [Cycle] in
+            let engine = PlaybackEngine()
+            defer { engine.stopAll() }
+            let url = stereo ? Fixtures.eightSecondStereoCAF : Fixtures.eightSecondCAF
+            guard (try? engine.loadFile(at: url, on: .a)) != nil else { return [] }
+            engine.outputVolume = 0
+            engine.play(deck: .a, from: 0)
+            _ = pollPosition(engine, deck: .a, past: 0.4, timeout: 4)
+            var cycles: [Cycle] = []
+            for _ in 0..<3 {
+                engine.pause()
+                let paused = engine.position(of: .a) // serial-queue barrier
+                Thread.sleep(forTimeInterval: 0.25)
+                let held = engine.position(of: .a)
+                engine.resume()
+                let resumed = engine.position(of: .a)
+                let resumedReadAt = ProcessInfo.processInfo.systemUptime
+                let transport = engine.transportSnapshotForTesting(.a)
+                Thread.sleep(forTimeInterval: 0.3)
+                let after = engine.position(of: .a)
+                let soundingHostDuration = ProcessInfo.processInfo.systemUptime - resumedReadAt
+                cycles.append(Cycle(paused: paused, held: held, resumed: resumed, after: after,
+                                    pauseCallDuration: transport.pauseCallDuration,
+                                    resumeStartDuration: transport.resumeStartDuration,
+                                    pauseSkew: transport.pauseSkew,
+                                    soundingHostDuration: soundingHostDuration))
+            }
+            return cycles
+        }
+        guard let cycles = result else { return }
+        #expect(cycles.count == 3, "fixture must load and complete all pause cycles")
+        for (index, cycle) in cycles.enumerated() {
+            print("TRANSPORT_REALTIME stereo=\(stereo) cycle=\(index) "
+                + "paused=\(cycle.paused) held=\(cycle.held) resumed=\(cycle.resumed) after=\(cycle.after) "
+                + "pauseCallSeconds=\(cycle.pauseCallDuration) startSeconds=\(cycle.resumeStartDuration) skewSeconds=\(cycle.pauseSkew) "
+                + "actualSoundingHostSeconds=\(cycle.soundingHostDuration)")
+            #expect(abs(cycle.held - cycle.paused) < 0.01, "pause \(index) must hold the media position")
+            #expect(abs(cycle.resumed - cycle.paused) < 0.08,
+                    "resume \(index) must not skip forward or repeat a paused interval")
+            let sounding = cycle.after - cycle.paused
+            #expect(abs(sounding - cycle.soundingHostDuration) < 0.15,
+                    "resume \(index): media advancement \(sounding) must match measured sounding host time \(cycle.soundingHostDuration) ±0.15 s")
+        }
     }
 
     // (c) Progressive streaming from a local HTTP server: position advances,
@@ -1133,16 +1221,18 @@ struct PlaybackEngineSmokeTests {
                 "…but the seam itself must still be journalled (\(flat))")
     }
 
-    /// Pause, seek and a re-issued play all settle a running release to its
-    /// target instead of leaving it drifting under a track the listener has
-    /// just re-aimed. Every one of those moments is silent or muted, so the
-    /// jump is inaudible — see `PlaybackEngine.settleRideLocked`.
-    @Test func pauseAndSeekSettleTheRideImmediately() async throws {
+    /// Native source pause leaves an audible DSP tail, so its gain must freeze
+    /// without a step. Explicit seek/play still settle inside their existing
+    /// mute/flush window. Resume must continue the interrupted gain release.
+    @Test func pauseFreezesTheRideWhileSeekAndReplaySettleIt() async throws {
         guard await audioOutputAvailable.value else { return }
-        func runRide(interrupt: @escaping (PlaybackEngine) -> Void)
-            async -> PlaybackEngine.DeckEffectSnapshot? {
+        typealias Observation = (immediate: PlaybackEngine.DeckEffectSnapshot,
+                                 held: PlaybackEngine.DeckEffectSnapshot,
+                                 resumed: PlaybackEngine.DeckEffectSnapshot?)
+        func runRide(resumes: Bool, interrupt: @escaping (PlaybackEngine) -> Void)
+            async -> Observation? {
             await withWatchdog("rideSettle", timeout: 45) {
-                () -> PlaybackEngine.DeckEffectSnapshot? in
+                () -> Observation? in
                 let engine = PlaybackEngine()
                 let log = EventLog(engine)
                 defer { engine.stopAll() }
@@ -1166,8 +1256,16 @@ struct PlaybackEngineSmokeTests {
                 }
                 Thread.sleep(forTimeInterval: 0.4)
                 interrupt(engine)
+                let immediate = engine.effectSnapshot(of: .b)
                 Thread.sleep(forTimeInterval: 0.5)
-                return engine.effectSnapshot(of: .b)
+                let held = engine.effectSnapshot(of: .b)
+                var resumed: PlaybackEngine.DeckEffectSnapshot?
+                if resumes {
+                    engine.resume()
+                    Thread.sleep(forTimeInterval: 0.5)
+                    resumed = engine.effectSnapshot(of: .b)
+                }
+                return (immediate, held, resumed)
             } ?? nil
         }
 
@@ -1176,10 +1274,22 @@ struct PlaybackEngineSmokeTests {
             ("seek", { (e: PlaybackEngine) in e.seek(deck: .b, to: 1.0) }),
             ("play", { (e: PlaybackEngine) in e.play(deck: .b, from: 1.0) }),
         ] {
-            guard let s = await runRide(interrupt: interrupt) else { continue }
-            #expect(s.rideDB == 0,
-                    "\(label) must settle the release to its target at once (\(s))")
-            #expect(s.rideTargetDB == 0)
+            let observation = try #require(await runRide(resumes: label == "pause", interrupt: interrupt),
+                                           "the real transition must produce an observation")
+            if label == "pause" {
+                #expect(observation.immediate.rideDB < 0, "exercise a release that is still active")
+                #expect(observation.held.rideDB == observation.immediate.rideDB,
+                        "paused gain must neither jump nor drift while the DSP tail renders")
+                let resumed = try #require(observation.resumed)
+                #expect(resumed.rideDB > observation.held.rideDB,
+                        "resume must continue releasing toward unity")
+                #expect(resumed.rideTargetDB == 0)
+            } else {
+                #expect(observation.immediate.rideDB == 0,
+                        "\(label) must settle the release inside its flush window")
+                #expect(observation.held.rideDB == 0)
+            }
+            #expect(observation.held.rideTargetDB == 0)
         }
     }
 
@@ -1426,6 +1536,7 @@ struct PlaybackEngineSmokeTests {
                 }
                 o.aPosAfterQuiet = engine.position(of: .a)
                 o.bPosAfterQuiet = engine.position(of: .b)
+                print("SEEK_FALLBACK case=\(testCase.name) deckA=\(engine.transportSnapshotForTesting(.a)) deckB=\(engine.transportSnapshotForTesting(.b))")
                 // The fallback still has to hand over at the end of the track.
                 o.completed = log.wait(timeout: 8) {
                     if case .transitionCompleted(from: .a, to: .b) = $0 { return true }
@@ -1559,12 +1670,14 @@ struct PlaybackEngineSmokeTests {
                 engine.outputVolume = 0
                 engine.play(deck: .a, from: 0)
                 let before = pollPosition(engine, deck: .a, past: 1.0, timeout: 5)
+                print("CONFIG_REBUILD before source=\(name) transport=\(engine.transportSnapshotForTesting(.a))")
 
                 engine.simulateConfigurationChange()
                 Thread.sleep(forTimeInterval: 0.3)
                 // Playback has to *advance* from where it was, not restart and
                 // not stall: the resume is from the cached position.
                 let after = pollPosition(engine, deck: .a, past: before + 0.8, timeout: 5)
+                print("CONFIG_REBUILD after source=\(name) transport=\(engine.transportSnapshotForTesting(.a))")
                 let volume = engine.effectSnapshot(of: .a).volume
                 // And the track still ends by itself, which is the assertion
                 // that the rebuilt schedule is a whole schedule.

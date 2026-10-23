@@ -13,6 +13,9 @@ concurrency:
 
 env:
   MACOSX_DEPLOYMENT_TARGET: "26.0"
+  # UI and audio changes are independently verified before the final combined
+  # run. Scoped stages never package an App or claim complete regression.
+  QIETING_VALIDATION_STAGE: ui
 
 jobs:
   build-and-test:
@@ -28,11 +31,21 @@ jobs:
           sw_vers
           xcodebuild -version
           swift --version
+          mkdir -p .build
+          python3 Scripts/test-native-scroll-diagnostics.py > .build/native-scroll-harness-tests.log 2>&1 || { cat .build/native-scroll-harness-tests.log; exit 1; }
+          cat .build/native-scroll-harness-tests.log
+          case "$QIETING_VALIDATION_STAGE" in ui|audio|complete) ;; *) exit 1 ;; esac
+          echo "Validation stage: $QIETING_VALIDATION_STAGE" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$QIETING_VALIDATION_STAGE" != complete ]; then
+            echo 'Scoped validation only. No Preview or final App is generated.' >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Build
+        id: compile
         run: swift build --build-tests --triple arm64-apple-macosx26.0
 
       - name: Prepare verified MLX Metal kernels for GPU test
+        id: metal
         run: |
           BIN_PATH="$(swift build --triple arm64-apple-macosx26.0 --show-bin-path)"
           Scripts/fetch-mlx-metallib.sh "$BIN_PATH"
@@ -42,25 +55,133 @@ jobs:
             cp "$BIN_PATH/mlx.metallib" "$test_bin/mlx.metallib"
           done < <(find "$BIN_PATH" -type d -path '*.xctest/Contents/MacOS' -print0)
 
-      - name: Test
-        run: swift test --skip-build --triple arm64-apple-macosx26.0
+      # CI #47 reached all earlier UI gates; exercise its actual scrollbar
+      # failure first, then repeat the complete hosted UI regression.
+      - name: Native scrollbar regression
+        shell: bash
+        run: |
+          python3 Scripts/run-native-scroll-diagnostics.py -- swift test --skip-build --triple arm64-apple-macosx26.0 --disable-xctest --filter NativeScrollPreferencesTests
+          python3 Scripts/verify-test-log.py .build/native-scroll-regression.log --minimum-tests 5 --report .build/native-scroll-test-summary.json
+          test -s .build/native-scroll-validation.json
+          test -s .build/native-scroll-journal.jsonl
+
+      # First exercise the three concrete failures from CI #45 attempt 2.
+      # Real mouse/field input and the original 0.5pt geometry checks remain.
+      - name: Native toolbar repair regression
+        shell: bash
+        run: |
+          swift test --skip-build --triple arm64-apple-macosx26.0 --disable-swift-testing --filter 'testNativeSidebarClicksPreserveNavigationSearchAndTheUniquePlayer|testTransparentNativeToolbarLeavesNoSecondHeaderInTheRealDetailViewport|testGlassSearchUsesNativeFieldInputAndGlobalSubmitInsideTheMainColumn' 2>&1 | tee .build/native-toolbar-regression.log
+          python3 Scripts/verify-test-log.py .build/native-toolbar-regression.log --framework xctest --minimum-tests 3 --report .build/native-toolbar-test-summary.json
+          cp .build/window-navigation-validation.json .build/native-toolbar-validation.json
+
+      # Run every hosted window case in its own process. Synchronous GPU/audio
+      # work in other suites must not consume its native UI observation deadline.
+      # The following step runs all remaining suites; no coverage is omitted.
+      - name: Hosted window navigation regression
+        shell: bash
+        run: |
+          swift test --skip-build --triple arm64-apple-macosx26.0 --disable-swift-testing --filter WindowNavigationChromeTests 2>&1 | tee .build/window-regression.log
+          python3 Scripts/verify-test-log.py .build/window-regression.log --framework xctest --minimum-tests 19 --report .build/window-test-summary.json
+          test -s .build/window-navigation-validation.json
+
+      # This real lyric viewport owns NSApplication; keep its event loop out
+      # of both the window fixture process and the parallel Swift Testing run.
+      - name: Hosted lyrics seek regression
+        shell: bash
+        run: |
+          swift test --skip-build --triple arm64-apple-macosx26.0 --disable-swift-testing --filter LyricsSeekViewportTests 2>&1 | tee .build/lyrics-seek-regression.log
+          python3 Scripts/verify-test-log.py .build/lyrics-seek-regression.log --framework xctest --minimum-tests 3 --report .build/lyrics-seek-test-summary.json
+          test -s .build/lyrics-seek-viewport-validation.json
+
+      - name: Media clock and strict PCM regression
+        # Audio validation is independent of native UI fixture readiness. Run
+        # it after a valid build even if a hosted UI gate failed; packaging
+        # below still requires every earlier gate to succeed.
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' && steps.metal.outcome == 'success' }}
+        shell: bash
+        run: |
+          swift test --skip-build --triple arm64-apple-macosx26.0 --disable-xctest --filter 'PlayerServiceClockTests|PlaybackTransportContinuityTests' 2>&1 | tee .build/seek-clock-regression.log
+          python3 Scripts/verify-test-log.py .build/seek-clock-regression.log --minimum-tests 18 --report .build/seek-clock-test-summary.json
+          test -s .build/service-clock-validation.json
+          test -s .build/transport-validation.json
+
+      # Fail fast on the recently added native EOF/paused-head probe before
+      # repeating the complete audio suite. Test below still runs every case.
+      - name: Segment EOF regression
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' && steps.metal.outcome == 'success' }}
+        shell: bash
+        run: |
+          swift test --skip-build --triple arm64-apple-macosx26.0 --disable-xctest --filter anObservedOutgoingEOFDuringPausedSegmentHeadPreservesTheSegment 2>&1 | tee .build/segment-eof-regression.log
+          python3 Scripts/verify-test-log.py .build/segment-eof-regression.log --minimum-tests 1 --report .build/segment-eof-test-summary.json
+          test -s .build/transition-segment-validation.json
 
       # Ad-hoc signature only. No certificate, notarization, or release secrets.
       - name: Build app (macOS 26, arm64)
+        if: ${{ success() && env.QIETING_VALIDATION_STAGE == 'complete' }}
         run: FETCH_MLX_METALLIB=1 Scripts/build-app.sh release
 
       - name: Verify packaged architecture, deployment target and isolation
+        if: ${{ success() && env.QIETING_VALIDATION_STAGE == 'complete' }}
         run: |
-          python3 Scripts/verify-app.py .build/app/Kumone.app \
+          python3 Scripts/verify-app.py ".build/app/且听.app" \
             --report .build/app-verification.json
 
-      - name: Zip test app (preserve bundle metadata)
+      # A Preview is uploaded only after the real hosted UI/seek/PCM/EOF
+      # gates and verified arm64 app packaging. The complete suite still runs
+      # below; its result is never inferred from the earlier Preview upload.
+      - name: Package clearly marked Preview
+        if: ${{ success() && env.QIETING_VALIDATION_STAGE == 'complete' }}
+        env:
+          QIETING_SOURCE_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           ditto -c -k --sequesterRsrc --keepParent \
-            .build/app/Kumone.app .build/Kumone-Test-macOS26-arm64.zip
-          stat -f 'App ZIP bytes: %z' .build/Kumone-Test-macOS26-arm64.zip
+            ".build/app/且听.app" .build/QieTing-Preview-macOS26-arm64.zip
+          python3 Scripts/write-preview-status.py --output .build
+          cat .build/PREVIEW.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload UI Preview before complete regression
+        if: ${{ success() && env.QIETING_VALIDATION_STAGE == 'complete' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: QieTing-Preview-macOS26-arm64-${{ github.run_number }}-${{ github.run_attempt }}
+          path: |
+            .build/QieTing-Preview-macOS26-arm64.zip
+            .build/PREVIEW.md
+            .build/preview-status.json
+            .build/app-verification.json
+            .build/native-toolbar-test-summary.json
+            .build/native-scroll-test-summary.json
+            .build/native-scroll-validation.json
+            .build/window-test-summary.json
+            .build/lyrics-seek-test-summary.json
+            .build/seek-clock-test-summary.json
+            .build/segment-eof-test-summary.json
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+      - name: Test
+        if: ${{ success() && env.QIETING_VALIDATION_STAGE == 'complete' }}
+        shell: bash
+        run: |
+          swift test --skip-build --triple arm64-apple-macosx26.0 --disable-xctest 2>&1 | tee .build/test.log
+          python3 Scripts/verify-test-log.py .build/test.log --minimum-tests 999 --report .build/test-summary.json
+          test -s .build/transport-validation.json
+          test -s .build/media-clock-diagnostic.json
+          test -s .build/service-clock-validation.json
+          test -s .build/transition-segment-validation.json
+          test -s .build/window-navigation-validation.json
+          test -s .build/playback-boundary-diagnostic.json
+
+      - name: Zip test app (preserve bundle metadata)
+        if: ${{ success() && env.QIETING_VALIDATION_STAGE == 'complete' }}
+        run: |
+          # The final package is exactly the app already checked for Preview;
+          # no source or build changes occur between targeted and full tests.
+          cp .build/QieTing-Preview-macOS26-arm64.zip .build/QieTing-Test-macOS26-arm64.zip
+          stat -f 'App ZIP bytes: %z' .build/QieTing-Test-macOS26-arm64.zip
           {
-            echo '### Kumone Test — macOS 26 / arm64'
+            echo '### 且听 QieTing Test — macOS 26 / arm64'
             echo 'Build, tests, architecture/deployment checks and packaging passed.'
             echo 'Download the artifact below, then extract the outer ZIP and App ZIP.'
             echo 'See app-verification.json inside the artifact for measured bundle metadata.'
@@ -68,12 +189,72 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload macOS test app
+        if: ${{ success() && env.QIETING_VALIDATION_STAGE == 'complete' }}
         uses: actions/upload-artifact@v4
         with:
-          name: Kumone-Test-macOS26-arm64-${{ github.run_number }}-${{ github.run_attempt }}
+          name: QieTing-Test-macOS26-arm64-${{ github.run_number }}-${{ github.run_attempt }}
           path: |
-            .build/Kumone-Test-macOS26-arm64.zip
+            .build/QieTing-Test-macOS26-arm64.zip
             .build/app-verification.json
+            .build/native-toolbar-test-summary.json
+            .build/native-scroll-test-summary.json
+            .build/native-scroll-validation.json
+            .build/window-test-summary.json
+            .build/lyrics-seek-test-summary.json
+            .build/seek-clock-test-summary.json
+            .build/segment-eof-test-summary.json
+            .build/test-summary.json
+            .build/transport-validation.json
+            .build/media-clock-diagnostic.json
+            .build/service-clock-validation.json
+            .build/transition-segment-validation.json
+            .build/window-navigation-validation.json
+            .build/lyrics-seek-viewport-validation.json
+            .build/playback-boundary-diagnostic.json
           if-no-files-found: error
           retention-days: 14
           compression-level: 0
+
+      - name: Upload validation diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: QieTing-Validation-Evidence-${{ github.run_number }}-${{ github.run_attempt }}
+          path: |
+            .build/app-verification.json
+            .build/preview-status.json
+            .build/PREVIEW.md
+            .build/native-toolbar-test-summary.json
+            .build/native-scroll-test-summary.json
+            .build/native-scroll-validation.json
+            .build/window-test-summary.json
+            .build/lyrics-seek-test-summary.json
+            .build/seek-clock-test-summary.json
+            .build/segment-eof-test-summary.json
+            .build/test-summary.json
+            .build/native-toolbar-regression.log
+            .build/native-toolbar-validation.json
+            .build/native-scroll-regression.log
+            .build/native-scroll-journal.jsonl
+            .build/native-scroll-watchdog.json
+            .build/native-scroll-harness-tests.log
+            .build/native-scroll-stall-sample*.txt
+            .build/native-scroll-sample-command*.log
+            .build/window-regression.log
+            .build/lyrics-seek-regression.log
+            .build/lyrics-viewport-*.png
+            .build/seek-clock-regression.log
+            .build/segment-eof-regression.log
+            .build/test.log
+            .build/transport-validation.json
+            .build/media-clock-diagnostic.json
+            .build/service-clock-validation.json
+            .build/transition-segment-validation.json
+            .build/window-navigation-validation.json
+            .build/lyrics-seek-viewport-validation.json
+            .build/playback-boundary-diagnostic.json
+          if-no-files-found: warn
+          # The PNG glob makes .build the search root; allow these explicit
+          # synthetic-test receipts in that hidden directory, not its contents.
+          include-hidden-files: true
+          retention-days: 14

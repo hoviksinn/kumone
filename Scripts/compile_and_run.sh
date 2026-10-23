@@ -6,7 +6,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 CONF="${1:-debug}"
-APP_BUNDLE="$ROOT/.build/app/Kumone.app"
+APP_BUNDLE="$ROOT/.build/app/且听.app"
 
 # Kill running instances
 for _ in $(seq 1 25); do
@@ -24,9 +24,9 @@ open "$APP_BUNDLE"
 for _ in $(seq 1 20); do
   sleep 0.2
   if pgrep -x Kumone >/dev/null 2>&1; then
-    echo "Kumone is running."
+    echo "且听 is running."
     exit 0
   fi
 done
-echo "ERROR: Kumone did not stay running — check Console.app for crash logs." >&2
+echo "ERROR: 且听 did not stay running — check Console.app for crash logs." >&2
 exit 1

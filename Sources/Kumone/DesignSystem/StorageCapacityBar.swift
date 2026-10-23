@@ -23,7 +23,7 @@ struct StorageCapacityBar: View {
 
     @ViewBuilder
     private var legend: some View {
-        item("Kumone", color: .red)
+        item("且听", color: .red)
         item("其他已用", color: .gray.opacity(0.55))
         item("可用", color: .primary.opacity(0.12))
     }

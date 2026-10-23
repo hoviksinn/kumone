@@ -48,6 +48,7 @@ struct CollectionsView: View {
                                         )
                                     }
                                     .buttonStyle(.interactiveCard)
+                                    .navigationCardLink()
                                 }
                             }
                             .padding(.horizontal, Theme.Layout.contentInset)
@@ -73,6 +74,7 @@ struct CollectionsView: View {
                                         .contentShape(Rectangle())
                                     }
                                     .buttonStyle(.interactiveCard)
+                                    .navigationCardLink()
                                 }
                             }
                             .padding(.horizontal, Theme.Layout.contentInset)

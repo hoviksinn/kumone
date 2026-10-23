@@ -1,4 +1,4 @@
-/* Kumone — English localization. Keys are the Simplified Chinese source strings. */
+/* 且听 (QieTing) — English localization. Keys are the Simplified Chinese source strings. */
 
 /* Sidebar & navigation */
 "推荐" = "Home";
@@ -423,13 +423,13 @@
 "可用" = "Available";
 "正在计算存储空间…" = "Calculating storage…";
 "暂时无法读取设备容量" = "Device capacity is unavailable";
-"Kumone 占用" = "Kumone Storage";
-"已统计的 Kumone 占用" = "Measured Kumone Storage";
+"且听占用" = "且听 Storage";
+"已统计的且听占用" = "Measured 且听 Storage";
 "部分存储信息暂时无法读取，请刷新重试" = "Some storage information is unavailable. Refresh to try again.";
 "下载的音乐" = "Downloaded Music";
 "包含其他账号的 %@ 下载。管理页显示当前账号的歌曲。" = "Includes %@ downloaded by other accounts. Management shows the current account’s songs.";
 "应用与其他数据" = "App and Other Data";
-"包括应用本体、歌词、离线封面、账号资料与运行所需数据。" = "Includes the app, lyrics, offline artwork, account details, and data needed to run Kumone.";
+"包括应用本体、歌词、离线封面、账号资料与运行所需数据。" = "Includes the app, lyrics, offline artwork, account details, and data needed to run 且听.";
 "刷新存储空间" = "Refresh Storage";
 "已跳过 %lld 首未下载歌曲" = "Skipped %lld songs that aren’t downloaded";
 "播放下一首离线歌曲" = "Play Next Offline Song";
@@ -463,3 +463,5 @@
 "无法加载歌单，请重试" = "Unable to load the playlist. Please try again.";
 "无法读取下载记录，请重试" = "Unable to read download records. Please try again.";
 "其他歌单中的相同歌曲也会移除下载。" = "Downloads of the same songs in other playlists will also be removed.";
+
+"关于且听" = "About 且听";

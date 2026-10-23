@@ -26,12 +26,30 @@ def main():
     app = args.app.resolve()
     with (app / "Contents/Info.plist").open("rb") as handle:
         info = plistlib.load(handle)
+    require(app.name == "且听.app", "the downloadable app must be named 且听.app")
+    require(info["CFBundleName"] == "且听" and info["CFBundleDisplayName"] == "且听",
+            "Finder, Dock and app-menu names must be 且听")
+    require(info["CFBundleExecutable"] == "Kumone", "preserve the internal executable name")
     require(info["LSMinimumSystemVersion"] == "26.0", "Info.plist deployment target must be 26.0")
     require(info["CFBundleIdentifier"] == "com.hoviksinn.kumone.test", "test Bundle ID required")
     require(info.get("KumoneDisableUpdates") is True, "updater must be disabled")
     require(info.get("SUEnableAutomaticChecks") is False, "automatic checks must be disabled")
     require(info.get("SUAllowsAutomaticUpdates") is False, "automatic installs must be disabled")
     require("SUFeedURL" not in info and "SUPublicEDKey" not in info, "upstream update metadata found")
+    require(info.get("CFBundleIconName") == "AppIcon", "the compiled app icon must be configured")
+    icon_resources = app / "Contents/Resources"
+    require((icon_resources / "Assets.car").is_file()
+            and (icon_resources / "Assets.car").stat().st_size > 0,
+            "actool did not compile the QieTing app icon")
+    icon_source = icon_resources / "AppIcon.icon"
+    with (icon_source / "icon.json").open() as handle:
+        icon_manifest = json.load(handle)
+    icon_layers = [layer["image-name"] for group in icon_manifest["groups"]
+                   for layer in group["layers"]]
+    require(icon_layers and all(name.endswith(".svg")
+                               and (icon_source / "Assets" / name).is_file()
+                               for name in icon_layers),
+            "the app icon must use the editable QieTing vector artwork")
 
     executable = app / "Contents/MacOS" / info["CFBundleExecutable"]
     load_commands = command("otool", "-l", str(executable))
@@ -53,6 +71,11 @@ def main():
     kernels = app / "Contents/MacOS/mlx.metallib"
     require(kernels.is_file() and kernels.stat().st_size > 0, "MLX Metal kernels are missing")
     report = {
+        "app_name": info["CFBundleDisplayName"],
+        "app_bundle": app.name,
+        "executable_name": info["CFBundleExecutable"],
+        "icon_layers": icon_layers,
+        "icon_assets_bytes": (icon_resources / "Assets.car").stat().st_size,
         "bundle_id": info["CFBundleIdentifier"],
         "minimum_system_version": info["LSMinimumSystemVersion"],
         "executable_minos": version[1],
