@@ -31,7 +31,9 @@ jobs:
           sw_vers
           xcodebuild -version
           swift --version
-          python3 Scripts/test-native-scroll-diagnostics.py
+          mkdir -p .build
+          python3 Scripts/test-native-scroll-diagnostics.py > .build/native-scroll-harness-tests.log 2>&1 || { cat .build/native-scroll-harness-tests.log; exit 1; }
+          cat .build/native-scroll-harness-tests.log
           case "$QIETING_VALIDATION_STAGE" in ui|audio|complete) ;; *) exit 1 ;; esac
           echo "Validation stage: $QIETING_VALIDATION_STAGE" >> "$GITHUB_STEP_SUMMARY"
           if [ "$QIETING_VALIDATION_STAGE" != complete ]; then
@@ -235,6 +237,7 @@ jobs:
             .build/native-scroll-regression.log
             .build/native-scroll-journal.jsonl
             .build/native-scroll-watchdog.json
+            .build/native-scroll-harness-tests.log
             .build/native-scroll-stall-sample*.txt
             .build/native-scroll-sample-command*.log
             .build/window-regression.log

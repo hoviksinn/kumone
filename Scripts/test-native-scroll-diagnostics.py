@@ -40,10 +40,27 @@ class WatchdogTests(unittest.TestCase):
         path.write_text(textwrap.dedent(body))
         return [sys.executable, str(path), str(self.journal)]
 
-    def run_case(self, body, *, budget=0.15, sample_command=None):
+    def run_case(self, body, *, budget=0.15, sample_command=None, deny_zero_probe=False):
         command = self.command(body)
+        launch = [sys.executable, str(WRAPPER)]
+        if deny_zero_probe:
+            # Exercise Darwin's observed cleanup error path on Linux too,
+            # without modifying the tested signal sends or their ownership.
+            bootstrap = self.root / 'deny-zero-probe.py'
+            bootstrap.write_text(
+                "import errno, os, runpy, sys\n"
+                "original = os.killpg\n"
+                "def killpg(group, action):\n"
+                "    if action == 0:\n"
+                "        raise PermissionError(errno.EPERM, 'simulated Darwin group probe denial')\n"
+                "    return original(group, action)\n"
+                "os.killpg = killpg\n"
+                "sys.argv = sys.argv[1:]\n"
+                "runpy.run_path(sys.argv[0], run_name='__main__')\n"
+            )
+            launch = [sys.executable, str(bootstrap), str(WRAPPER)]
         result = subprocess.run([
-            sys.executable, str(WRAPPER), "--journal", str(self.journal),
+            *launch, "--journal", str(self.journal),
             "--log", str(self.log), "--report", str(self.report),
             "--sample-output", str(self.sample), "--sample-log", str(self.sample_log),
             "--sample-command", str(sample_command or self.sample_command),
@@ -72,6 +89,35 @@ class WatchdogTests(unittest.TestCase):
         """)
         self.assertEqual(result.returncode, 23)
         self.assertEqual(report["commandReturnCode"], 23)
+
+    def test_denied_zero_probe_preserves_stall_failure_and_stack_evidence(self):
+        result, report = self.run_case("""
+            import json, os, pathlib, sys, time
+            pathlib.Path(sys.argv[1]).write_text(json.dumps({'testProcessID': os.getpid(), 'stage': 'native-call-enter'}) + '\\n')
+            time.sleep(60)
+        """, deny_zero_probe=True)
+        self.assertEqual(result.returncode, 124, result.stdout + result.stderr)
+        self.assertEqual(report["outcome"], "diagnostic-stall-failure")
+        self.assertEqual(report["sample"]["returnCode"], 0)
+        self.assertTrue(self.sample.is_file())
+        self.assertTrue(any('signal-zero probe denied' in message for message in report["termination"]))
+        self.assertFalse(any('group absence is confirmed' in message for message in report["termination"]))
+        self.assertIsNotNone(report["commandReturnCodeAfterTermination"])
+
+    def test_denied_zero_probe_preserves_foreign_journal_failure(self):
+        foreign_pid = os.getpid()
+        result, report = self.run_case(f"""
+            import json, pathlib, sys, time
+            pathlib.Path(sys.argv[1]).write_text(json.dumps({{'testProcessID': {foreign_pid}, 'stage': 'foreign-pid'}}) + '\\n')
+            time.sleep(60)
+        """, deny_zero_probe=True)
+        self.assertEqual(result.returncode, 125, result.stdout + result.stderr)
+        self.assertEqual(report["outcome"], "diagnostic-journal-invalid")
+        self.assertIn('expected own group', report["reason"])
+        self.assertTrue(any('signal-zero probe denied' in message for message in report["termination"]))
+        self.assertNotIn('sample', report)
+        self.assertFalse(self.sample.exists())
+        os.kill(foreign_pid, 0)
 
     def test_stall_samples_actual_test_child_pid_not_driver_pid(self):
         child_source = (
@@ -211,6 +257,10 @@ class WatchdogTests(unittest.TestCase):
         self.assertEqual(result.returncode, 125)
         self.assertEqual(report["outcome"], "diagnostic-harness-error")
         self.assertIn("IsADirectoryError", report["reason"])
+        self.assertIn("Traceback (most recent call last)", report["exceptionTraceback"])
+        self.assertIn("IsADirectoryError", report["exceptionTraceback"])
+        self.assertIn("reader.read()", report["exceptionTraceback"])
+        self.assertIn("NATIVE_SCROLL_DIAGNOSTIC_TRACEBACK", self.log.read_text())
         self.assertTrue(report["termination"])
 
     def test_nonfinite_budgets_are_rejected_before_launch(self):

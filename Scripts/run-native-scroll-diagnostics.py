@@ -19,6 +19,7 @@ import signal
 import subprocess
 import sys
 import time
+import traceback
 from typing import Any
 
 
@@ -177,12 +178,22 @@ def terminate_own_group(process: subprocess.Popen[bytes], group: int) -> list[st
             messages.append(f"failed to send {action.name} to own group {group}: {error}")
             break
         expires = time.monotonic() + grace
+        denied_probe_recorded = False
         while time.monotonic() < expires:
             process.poll()
             try:
                 os.killpg(group, 0)
             except ProcessLookupError:
                 return messages
+            except PermissionError as error:
+                # Darwin can deny a signal-zero group probe during teardown.
+                # EPERM does not mean that the group has disappeared. Keep the
+                # bounded grace and next owned-group signal, and preserve the
+                # failure that caused cleanup instead of replacing its report.
+                if not denied_probe_recorded:
+                    messages.append(f"own process group {group} signal-zero probe denied: {error}; "
+                                    "group absence is unconfirmed, continuing bounded cleanup")
+                    denied_probe_recorded = True
             time.sleep(0.05)
     try:
         process.wait(timeout=1)
@@ -349,8 +360,11 @@ def main() -> int:
                     unavailable_pid_records.append({"record": record, "reason": reason})
             return None
 
-        def diagnostic_failure(reason: str, *, outcome: str = "diagnostic-journal-invalid") -> int:
+        def diagnostic_failure(reason: str, *, outcome: str = "diagnostic-journal-invalid",
+                               exception_traceback: str | None = None) -> int:
             emit("NATIVE_SCROLL_DIAGNOSTIC_FAILURE " + reason, log)
+            if exception_traceback:
+                emit("NATIVE_SCROLL_DIAGNOSTIC_TRACEBACK\n" + exception_traceback, log)
             termination = terminate_own_group(process, group)
             drain_output()
             write_json(args.report, {
@@ -359,6 +373,7 @@ def main() -> int:
                 "journalRecords": len(records_seen), "lastRecord": last_record,
                 "journalParseErrors": reader.errors, "unavailablePIDRecords": unavailable_pid_records,
                 "termination": termination, "commandReturnCodeAfterTermination": process.poll(),
+                "exceptionTraceback": exception_traceback,
                 "elapsedSeconds": time.monotonic() - started,
             })
             return 125
@@ -420,7 +435,8 @@ def main() -> int:
                                      "termination": termination, "lastRecord": last_record})
             return 130
         except Exception as error:
-            return diagnostic_failure(f"{type(error).__name__}: {error}", outcome="diagnostic-harness-error")
+            return diagnostic_failure(f"{type(error).__name__}: {error}", outcome="diagnostic-harness-error",
+                                      exception_traceback=traceback.format_exc())
         finally:
             selector.close()
             process.stdout.close()
