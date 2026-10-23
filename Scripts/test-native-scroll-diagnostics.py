@@ -2,16 +2,22 @@
 """Exercise the diagnostic harness with disposable processes on Linux/macOS."""
 
 import json
+import importlib.util
 import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 import unittest
 
 
 WRAPPER = Path(__file__).with_name("run-native-scroll-diagnostics.py")
+SPEC = importlib.util.spec_from_file_location("native_scroll_diagnostics_under_test", WRAPPER)
+assert SPEC is not None and SPEC.loader is not None
+DIAGNOSTICS = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(DIAGNOSTICS)
 
 
 class WatchdogTests(unittest.TestCase):
@@ -89,6 +95,78 @@ class WatchdogTests(unittest.TestCase):
         """)
         self.assertEqual(result.returncode, 23)
         self.assertEqual(report["commandReturnCode"], 23)
+
+    def wait_for_unreaped_zombie(self, process, owner):
+        # Inspect the real dead child without Popen.poll()/wait(), which would
+        # reap it and erase precisely the process-table state under test.
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            table = owner.table()
+            entry = table.get(process.pid)
+            if entry and entry["state"].startswith('Z'):
+                return table
+            time.sleep(0.01)
+        self.fail('The terminated child did not become an observable unreaped zombie')
+
+    def test_real_zombie_is_unavailable_without_replacing_live_identity(self):
+        child = subprocess.Popen(['/bin/sleep', '60'], start_new_session=True)
+        owner = DIAGNOSTICS.OwnedCommand(child.pid)
+        try:
+            valid, _, gone = owner.verify(child.pid)
+            self.assertTrue(valid)
+            self.assertFalse(gone)
+            admitted = dict(owner.admitted[child.pid])
+            child.terminate()
+            table = self.wait_for_unreaped_zombie(child, owner)
+            valid, reason, gone = owner.verify(child.pid, table)
+            self.assertFalse(valid)
+            self.assertTrue(gone, reason)
+            self.assertIn('unavailable zombie', reason)
+            self.assertIn('"expected"', reason)
+            self.assertIn('"observed"', reason)
+            self.assertEqual(owner.admitted[child.pid], admitted)
+            self.assertFalse(any(entry['pid'] == child.pid for entry in owner.current()))
+        finally:
+            child.terminate()
+            child.wait(timeout=3)
+
+    def test_live_command_change_and_zombie_birth_change_are_rejected(self):
+        child = subprocess.Popen(['/bin/sleep', '60'], start_new_session=True)
+        owner = DIAGNOSTICS.OwnedCommand(child.pid)
+        try:
+            self.assertTrue(owner.verify(child.pid)[0])
+            original = owner.table()
+            for changes in [{'command': 'different-live-command'},
+                            {'state': 'Z', 'command': '<defunct>', 'startedAt': 'different-birth'}]:
+                table = dict(original)
+                table[child.pid] = dict(original[child.pid], **changes)
+                valid, reason, gone = owner.verify(child.pid, table)
+                self.assertFalse(valid)
+                self.assertFalse(gone)
+                self.assertIn('no longer matches its admitted process identity', reason)
+                self.assertIn('"expected"', reason)
+                self.assertIn('"observed"', reason)
+        finally:
+            child.terminate()
+            child.wait(timeout=3)
+
+    def test_foreign_zombie_does_not_bypass_parent_chain_validation(self):
+        driver = subprocess.Popen(['/bin/sleep', '60'], start_new_session=True)
+        foreign = subprocess.Popen(['/bin/sleep', '60'], start_new_session=True)
+        owner = DIAGNOSTICS.OwnedCommand(driver.pid)
+        try:
+            self.assertTrue(owner.verify(driver.pid)[0])
+            foreign.terminate()
+            table = self.wait_for_unreaped_zombie(foreign, owner)
+            valid, reason, gone = owner.verify(foreign.pid, table)
+            self.assertFalse(valid)
+            self.assertFalse(gone)
+            self.assertIn('no parent chain to own driver', reason)
+            self.assertNotIn(foreign.pid, owner.admitted)
+        finally:
+            for process in [foreign, driver]:
+                process.terminate()
+                process.wait(timeout=3)
 
     def test_denied_zero_probe_preserves_stall_failure_and_stack_evidence(self):
         result, report = self.run_case("""

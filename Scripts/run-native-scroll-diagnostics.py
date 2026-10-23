@@ -101,22 +101,23 @@ class OwnedCommand:
         self.admitted: dict[int, dict[str, Any]] = {}
 
     def table(self) -> dict[int, dict[str, Any]]:
-        listing = subprocess.run(["/bin/ps", "-axo", "pid=,ppid=,pgid=,lstart=,comm="],
+        listing = subprocess.run(["/bin/ps", "-axo", "pid=,ppid=,pgid=,stat=,lstart=,comm="],
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                  text=True, timeout=5, check=False)
         if listing.returncode:
             raise RuntimeError(f"ps exited {listing.returncode}: {listing.stderr.strip()}")
         table: dict[int, dict[str, Any]] = {}
         for line in listing.stdout.splitlines():
-            fields = line.split(maxsplit=8)
-            if len(fields) != 9:
+            fields = line.split(maxsplit=9)
+            if len(fields) != 10:
                 continue
             try:
                 pid, parent, group = map(int, fields[:3])
             except ValueError:
                 continue
             table[pid] = {"pid": pid, "parentPID": parent, "processGroup": group,
-                          "startedAt": " ".join(fields[3:8]), "command": fields[8]}
+                          "state": fields[3], "startedAt": " ".join(fields[4:9]),
+                          "command": fields[9]}
         return table
 
     def ancestry(self, pid: int, table: dict[int, dict[str, Any]]) -> list[int] | None:
@@ -139,14 +140,25 @@ class OwnedCommand:
         if entry is None:
             return False, f"PID {pid} no longer appears in the public process snapshot", True
         admitted = self.admitted.get(pid)
+        evidence = json.dumps({"expected": admitted, "observed": entry}, sort_keys=True)
+        zombie = entry["state"].startswith("Z")
         if admitted is not None and self.identity(entry) != self.identity(admitted):
-            return False, f"PID {pid} no longer matches its admitted process identity", False
+            # ps may replace a dead process's command with a zombie marker
+            # before its parent reaps it. This never authorizes sampling or a
+            # signal, and must not accept a changed birth time/group as exit.
+            same_birth_and_group = all(entry[key] == admitted[key]
+                                       for key in ("pid", "startedAt", "processGroup"))
+            if zombie and same_birth_and_group:
+                return False, f"admitted PID {pid} is an unavailable zombie: {evidence}", True
+            return False, f"PID {pid} no longer matches its admitted process identity: {evidence}", False
         chain = self.ancestry(pid, table)
         if chain is None and admitted is None:
             return False, f"PID {pid} has no parent chain to own driver {self.driver}", False
         driver = table.get(self.driver)
         if chain is not None and (driver is None or driver["processGroup"] != self.driver):
             return False, f"own driver {self.driver} no longer has its isolated process group", False
+        if zombie:
+            return False, f"owned PID {pid} is an unavailable zombie: {evidence}", True
         try:
             actual_group = os.getpgid(pid)
         except OSError as error:
