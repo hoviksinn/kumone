@@ -19,13 +19,13 @@
 
 纵向仍读 `NSScroller.preferredScrollerStyle`，仅差值更新，保留系统原生绘制、拖动、淡出和 Legacy/Overlay 选择。`autohidesScrollers` 表示内容无需滚动时可隐藏，并不是强制让溢出的 Legacy 滚动条停止滚动后消失。系统“始终显示”产生的常驻灰色纵向条是预期行为。
 
-原 2 项 NativeScrollPreferences 测试保留，新增 2 项覆盖生产 Shelf、父 `.automatic` 环境、Legacy/Overlay、实际水平输入、纵向 Legacy 常驻及原生视图重建，当前专项共 4 项。自动淡出时序和实际 Sidebar 材质仍需真实 Mac 检查。
+原 2 项 NativeScrollPreferences 测试保留，新增 2 项覆盖生产 Shelf、父 `.automatic` 环境、Legacy/Overlay、实际水平输入、纵向 Legacy 常驻及原生视图重建，另新增一项标准原生滚动视图输入对照，当前专项共 5 项。自动淡出时序和实际 Sidebar 材质仍需真实 Mac 检查。
 
 ## C. 音频与打包门槛
 
 音频生产实现尚未包含在 UI 提交中，D002 仍开放。`work/` 中参数扫描只是独立实验，不是处理了真实设备输出的证据。不能将 Tap 副本或静态数学实验当作 App 已修复。
 
-CI 通过 `QIETING_VALIDATION_STAGE` 明示 `ui` / `audio` / `complete`。前两种阶段保留编译、窗口、歌词、滚动、媒体时钟/严格 PCM 和 EOF 专项，但不打包 App，也不宣称完整回归通过。最后 `complete` 必须执行原完整 Swift Testing（基线 996 项 + 新增 2 项滚动测试，最低 998）、MLX GPU、原生专项及全部原有架构/测试身份/签名/资源检查。未通过前不上传最终 App。
+CI 通过 `QIETING_VALIDATION_STAGE` 明示 `ui` / `audio` / `complete`。前两种阶段保留编译、窗口、歌词、滚动、媒体时钟/严格 PCM 和 EOF 专项，但不打包 App，也不宣称完整回归通过。最后 `complete` 必须执行原完整 Swift Testing（基线 996 项 + 新增 3 项滚动测试，最低 999；音频候选另 11 项尚未应用）、MLX GPU、原生专项及全部原有架构/测试身份/签名/资源检查。未通过前不上传最终 App。
 
 ## 公开 API 依据
 
@@ -65,3 +65,22 @@ CI 通过 `QIETING_VALIDATION_STAGE` 明示 `ui` / `audio` / `complete`。前两
 测试改为检查真实 item/control 的目标、canonical action、enabled、autovalidates，随后仍投递原真实鼠标 down/up 并要求展开/收起和所有身份、导航、窗口、搜索几何断言。移除的只是 CI #46 新增且未成立的激活/Key/delegate 先决条件，不删除行为测试、不延长四秒预算、不放宽阈值。
 
 公开依据：[target 与 nil-target 路由](https://developer.apple.com/documentation/appkit/nstoolbaritem/target)、[autovalidates](https://developer.apple.com/documentation/appkit/nstoolbaritem/autovalidates)、[默认验证会禁用非活动窗口项](https://developer.apple.com/documentation/appkit/nstoolbaritem/validate%28%29)。最新绑定仍需新的专项实际点击结果，不能以静态检查替代。
+
+
+## CI #47：已通过项与滚动输入专项
+
+[CI #47](https://github.com/hoviksinn/kumone/actions/runs/39916684356) 是用户手动 workflow_dispatch，HEAD `71d6f76`。编译、原生工具栏 3、完整窗口/导航 19、歌词视口 3、时钟/严格 PCM 18、EOF 1 均实际通过。滚动 4 项有 2 项失败，共 6 条断言，全部为实际横向偏移仍为 0；其他样式/指示器/文档尺寸断言没有失败。完整回归、MLX GPU 实算与新 App 尚未执行，不能把先前通过记录替代本轮完成。
+
+当前输入只有 began(-80)、ended(0)，没有 changed。新的候选采用 Apple/WebKit 测试 helper 的公开事件序列 began(-1) → changed(-79) → ended(0)，为各阶段记录 native delta、phase、uptime、坐标、实际窗口归属以及文档/clip 尺寸和移动。标准 NSScrollView 与生产 Shelf 各有旧/新序列对照，重建及 Legacy/Overlay 继续覆盖；保留新完整输入后 `x > start.x`，没有直接改动文档坐标或放宽断言。
+
+CG-created NSEvent 不保证绑定 NSWindow，测试据实记录，不使用私有 KVC，也不宣称经过 NSApplication/WindowServer 路由或物理触控板。是否仅为测试手势问题，必须由新的实际对照和原生偏移结果确认，现阶段不改生产横轴或 `.never`。五项专项移至其他 UI 之前，并上传 native-scroll-validation.json。
+
+依据：[Apple/WebKit 公开 wheel helper](https://chromium.googlesource.com/external/github.com/WebKit/webkit/+/968a3d30b9eb13dccbbf4b52ad217e00095891db/Tools/TestWebKitAPI/Helpers/cocoa/WebPage%2BExtras.swift#199)。参考的是公开阶段序列，没有引入它的 WebKit 私有 API。
+
+## 自动构建触发调查
+
+#46 的 event 为 pull_request，#47 为 workflow_dispatch，actor/triggering_actor 都为 hoviksinn。两者间 workflow 无改动，pull_request 默认已包含 synchronize；PR 为同仓 OWNER、open/Draft、mergeable/clean，提交无 skip 指令。并发控制只能取消已创建运行，不能解释自动运行完全不存在。
+
+现有 GitHub 读取权限无法查看历史 pusher/完整 webhook 投递或事发时的凭据类型。当前变量存在性、commit author 或 Actions actor 都不能证明历史 push 使用了 GITHUB_TOKEN，故不作此定性。现有规则不增加 push/pull_request 双重触发、pull_request_target、写权限、新密钥或空提交。下一次真实修复发布后检查对应 head 的自动运行，记录实际 event；如尝试既有 GitHub 连接发布，仅使用现有连接权限，不新增认证。
+
+[GitHub 官方触发说明](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow) 的当前规则还区分 GITHUB_TOKEN 的 PR 审批运行与其他事件抑制，不能简单套用旧的“此 Token 一律不创建 PR CI”结论。

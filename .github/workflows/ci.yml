@@ -52,6 +52,15 @@ jobs:
             cp "$BIN_PATH/mlx.metallib" "$test_bin/mlx.metallib"
           done < <(find "$BIN_PATH" -type d -path '*.xctest/Contents/MacOS' -print0)
 
+      # CI #47 reached all earlier UI gates; exercise its actual scrollbar
+      # failure first, then repeat the complete hosted UI regression.
+      - name: Native scrollbar regression
+        shell: bash
+        run: |
+          swift test --skip-build --triple arm64-apple-macosx26.0 --disable-xctest --filter NativeScrollPreferencesTests 2>&1 | tee .build/native-scroll-regression.log
+          python3 Scripts/verify-test-log.py .build/native-scroll-regression.log --minimum-tests 5 --report .build/native-scroll-test-summary.json
+          test -s .build/native-scroll-validation.json
+
       # First exercise the three concrete failures from CI #45 attempt 2.
       # Real mouse/field input and the original 0.5pt geometry checks remain.
       - name: Native toolbar repair regression
@@ -79,12 +88,6 @@ jobs:
           swift test --skip-build --triple arm64-apple-macosx26.0 --disable-swift-testing --filter LyricsSeekViewportTests 2>&1 | tee .build/lyrics-seek-regression.log
           python3 Scripts/verify-test-log.py .build/lyrics-seek-regression.log --framework xctest --minimum-tests 3 --report .build/lyrics-seek-test-summary.json
           test -s .build/lyrics-seek-viewport-validation.json
-
-      - name: Native scrollbar regression
-        shell: bash
-        run: |
-          swift test --skip-build --triple arm64-apple-macosx26.0 --disable-xctest --filter NativeScrollPreferencesTests 2>&1 | tee .build/native-scroll-regression.log
-          python3 Scripts/verify-test-log.py .build/native-scroll-regression.log --minimum-tests 4 --report .build/native-scroll-test-summary.json
 
       - name: Media clock and strict PCM regression
         # Audio validation is independent of native UI fixture readiness. Run
@@ -144,6 +147,7 @@ jobs:
             .build/app-verification.json
             .build/native-toolbar-test-summary.json
             .build/native-scroll-test-summary.json
+            .build/native-scroll-validation.json
             .build/window-test-summary.json
             .build/lyrics-seek-test-summary.json
             .build/seek-clock-test-summary.json
@@ -157,7 +161,7 @@ jobs:
         shell: bash
         run: |
           swift test --skip-build --triple arm64-apple-macosx26.0 --disable-xctest 2>&1 | tee .build/test.log
-          python3 Scripts/verify-test-log.py .build/test.log --minimum-tests 998 --report .build/test-summary.json
+          python3 Scripts/verify-test-log.py .build/test.log --minimum-tests 999 --report .build/test-summary.json
           test -s .build/transport-validation.json
           test -s .build/media-clock-diagnostic.json
           test -s .build/service-clock-validation.json
@@ -190,6 +194,7 @@ jobs:
             .build/app-verification.json
             .build/native-toolbar-test-summary.json
             .build/native-scroll-test-summary.json
+            .build/native-scroll-validation.json
             .build/window-test-summary.json
             .build/lyrics-seek-test-summary.json
             .build/seek-clock-test-summary.json
@@ -217,6 +222,7 @@ jobs:
             .build/PREVIEW.md
             .build/native-toolbar-test-summary.json
             .build/native-scroll-test-summary.json
+            .build/native-scroll-validation.json
             .build/window-test-summary.json
             .build/lyrics-seek-test-summary.json
             .build/seek-clock-test-summary.json
