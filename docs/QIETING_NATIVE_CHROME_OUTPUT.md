@@ -42,7 +42,7 @@ CI 通过 `QIETING_VALIDATION_STAGE` 明示 `ui` / `audio` / `complete`。前两
 
 ### 标准 Sidebar 动作
 
-标准 `.toggleSidebar` 按 Apple 约定向 First Responder 发送 `toggleSidebar:`。旧代码仅在不属于响应链的 Toolbar adapter 上实现动作，没有在已经安装的窗口 delegate 提供入口。现在窗口 delegate 接收并验证这一动作，再调用同一个带 owner/window 保护的 HSplitView 状态操作；保留系统创建的标准项，由 AppKit 管理其 target/action/view。
+标准 `.toggleSidebar` 按 Apple 约定向 First Responder 发送 `toggleSidebar:`。旧代码仅在不属于响应链的 Toolbar adapter 上实现动作，没有在已经安装的窗口 delegate 提供入口。8463fcc 曾尝试在窗口 delegate 接收并验证这一动作，保留系统创建的标准项。CI #46 进一步否定了“独立宿主能取得 Key Window 且默认动作一定解析到该 delegate”的前提，后续修正见下。
 
 旧测试要求 item.target 必须非 nil，不适用于合法的 First Responder 路由。改为检查真实窗口的可解析响应目标，并继续用真实鼠标点击断言展开/收起，保留 PlayerBar、导航和搜索身份检查。原证据没有分别记录 action/target，不能断言具体哪项被系统重设；新增诊断区分字段及原生控件可用性、窗口 delegate/Key/Main/响应链。测试宿主还用公开激活策略建立真实 Key Window，再验证默认动作路由，不能用直接 sendAction 模拟状态来代替点击。
 
@@ -53,3 +53,15 @@ CI 通过 `QIETING_VALIDATION_STAGE` 明示 `ui` / `audio` / `complete`。前两
 移除独立空白 Toolbar item，把留白合入同一个持久搜索容器；容器的明确 intrinsic 宽度为真实搜索宽度加实际右面板宽度，最小时仍是完整搜索宽度。真实 TextField/Glass 宿主保持同一实例；留白不绘制、不命中，不硬加/减 36pt。关闭、重开、队列/歌词切换、侧栏和复杂导航继续验证同一尾距。
 
 先独立运行原失败 3 项，再运行完整 19 项窗口、3 项歌词、4 项滚动及既有时钟/PCM/EOF。生产修正尚须新的 macOS 结果，不以静态检查宣称成功。
+
+## CI #46：搜索修复的证据与侧栏显式绑定
+
+本次编译成功。搜索在 1200pt 窗口下关闭、内展 341pt、Return 提交、队列切换、关闭重开后的真实尾距都为 **16pt**，容器分别测得 220/561pt，无 ambiguous layout。原 0.5pt 断言通过，不再重改此布局。
+
+三个专项随后均停在新增的 Key Window 准备条件，尚未执行对应 Sidebar 点击。公开激活请求返回 regular policy 成功，但独立 XCTest 的 applicationActive/applicationRunning/key/main 仍全为 false。新增诊断表明系统项和原生 NSButton 的 action 都是 `toggleSidebar:`、target 都为 nil，默认目标解析为 NSWindow；自动验证还会使非活动宿主按钮禁用。不能把这个错误测试前提说成新音频失败，也不能声称此前 delegate 尝试已经验证了真实点击。
+
+最新修正继续保留系统创建的 `.toggleSidebar` item、原生 NSButton、图标、布局及交互，仅通过公开 target/action 接到原 HSplitView 的 owner 适配器；`autovalidates=false` 后由真实侧栏可用状态管理 enabled，并差值同步公开 NSControl 属性。没有替换按钮、隐藏工具栏、模拟红黄绿或增加另一行 Header。
+
+测试改为检查真实 item/control 的目标、canonical action、enabled、autovalidates，随后仍投递原真实鼠标 down/up 并要求展开/收起和所有身份、导航、窗口、搜索几何断言。移除的只是 CI #46 新增且未成立的激活/Key/delegate 先决条件，不删除行为测试、不延长四秒预算、不放宽阈值。
+
+公开依据：[target 与 nil-target 路由](https://developer.apple.com/documentation/appkit/nstoolbaritem/target)、[autovalidates](https://developer.apple.com/documentation/appkit/nstoolbaritem/autovalidates)、[默认验证会禁用非活动窗口项](https://developer.apple.com/documentation/appkit/nstoolbaritem/validate%28%29)。最新绑定仍需新的专项实际点击结果，不能以静态检查替代。

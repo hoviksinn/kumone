@@ -187,6 +187,7 @@ final class MainWindowNativeToolbar: NSObject, NSToolbarDelegate, NSToolbarItemV
         }
     }
 
+    @objc private func toggleSidebar(_ sender: Any?) { _ = invokeToggle() }
     @objc private func goBack(_ sender: Any?) { _ = invokeBack() }
 
     private func invokeToggle() -> Bool {
@@ -250,11 +251,21 @@ final class MainWindowNativeToolbar: NSObject, NSToolbarDelegate, NSToolbarItemV
     }
 
     private func configureStandardItem(_ item: NSToolbarItem) {
-        // Standard Sidebar items send toggleSidebar: through the responder
-        // chain. The installed NSWindow delegate owns that public action;
-        // AppKit retains control of the standard item's target/action/view.
+        // Keep the AppKit-created item/control and its canonical action. Our
+        // HSplitView owns visibility, so generic First Responder validation
+        // (which can resolve to NSWindow or disable an inactive host) cannot
+        // determine availability. Bind that existing native control publicly.
+        if item.autovalidates { item.autovalidates = false }
+        let action = #selector(toggleSidebar(_:))
+        if item.target !== self { item.target = self }
+        if item.action != action { item.action = action }
         let enabled = window != nil && available && onToggleSidebar != nil
         if item.isEnabled != enabled { item.isEnabled = enabled }
+        if let control = item.view as? NSControl {
+            if control.target !== self { control.target = self }
+            if control.action != action { control.action = action }
+            if control.isEnabled != enabled { control.isEnabled = enabled }
+        }
         let tooltip = sidebarCollapsed
             ? String(localized: "显示侧边栏（⌥⌘S）")
             : String(localized: "隐藏侧边栏（⌥⌘S）")
