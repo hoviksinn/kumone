@@ -86,18 +86,92 @@ def write_json(path: Path, value: dict[str, Any]) -> None:
         os.fsync(destination.fileno())
 
 
-def in_process_group(pid: int, group: int) -> tuple[bool, str, bool]:
-    try:
-        actual = os.getpgid(pid)
-    except OSError as error:
-        return False, f"cannot inspect test PID {pid}: {error}", isinstance(error, ProcessLookupError)
-    if actual != group:
-        return False, f"test PID {pid} belongs to group {actual}, expected own group {group}", False
-    return True, f"test PID {pid} belongs to own group {group}", False
+class OwnedCommand:
+    """Validate descendants of this invocation, including SwiftPM child groups.
+
+    SwiftPM launches its native test helper in another process group. Group
+    equality therefore neither proves nor disproves parentage. Public ps
+    parent chains establish ownership; start time, command and group pin that
+    identity for later sampling/cleanup after its parent exits. No unrelated
+    process can be adopted just because its name resembles a test helper.
+    """
+
+    def __init__(self, driver: int) -> None:
+        self.driver = driver
+        self.admitted: dict[int, dict[str, Any]] = {}
+
+    def table(self) -> dict[int, dict[str, Any]]:
+        listing = subprocess.run(["/bin/ps", "-axo", "pid=,ppid=,pgid=,lstart=,comm="],
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                 text=True, timeout=5, check=False)
+        if listing.returncode:
+            raise RuntimeError(f"ps exited {listing.returncode}: {listing.stderr.strip()}")
+        table: dict[int, dict[str, Any]] = {}
+        for line in listing.stdout.splitlines():
+            fields = line.split(maxsplit=8)
+            if len(fields) != 9:
+                continue
+            try:
+                pid, parent, group = map(int, fields[:3])
+            except ValueError:
+                continue
+            table[pid] = {"pid": pid, "parentPID": parent, "processGroup": group,
+                          "startedAt": " ".join(fields[3:8]), "command": fields[8]}
+        return table
+
+    def ancestry(self, pid: int, table: dict[int, dict[str, Any]]) -> list[int] | None:
+        chain: list[int] = []
+        while pid in table and pid not in chain:
+            chain.append(pid)
+            if pid == self.driver:
+                return chain
+            pid = table[pid]["parentPID"]
+        return None
+
+    @staticmethod
+    def identity(entry: dict[str, Any]) -> tuple[Any, ...]:
+        return entry["pid"], entry["startedAt"], entry["command"], entry["processGroup"]
+
+    def verify(self, pid: int, table: dict[int, dict[str, Any]] | None = None
+               ) -> tuple[bool, str, bool]:
+        table = self.table() if table is None else table
+        entry = table.get(pid)
+        if entry is None:
+            return False, f"PID {pid} no longer appears in the public process snapshot", True
+        admitted = self.admitted.get(pid)
+        if admitted is not None and self.identity(entry) != self.identity(admitted):
+            return False, f"PID {pid} no longer matches its admitted process identity", False
+        chain = self.ancestry(pid, table)
+        if chain is None and admitted is None:
+            return False, f"PID {pid} has no parent chain to own driver {self.driver}", False
+        driver = table.get(self.driver)
+        if chain is not None and (driver is None or driver["processGroup"] != self.driver):
+            return False, f"own driver {self.driver} no longer has its isolated process group", False
+        try:
+            actual_group = os.getpgid(pid)
+        except OSError as error:
+            return False, f"cannot inspect owned PID {pid}: {error}", isinstance(error, ProcessLookupError)
+        if actual_group != entry["processGroup"]:
+            return False, f"PID {pid} changed process group during validation", False
+        if admitted is None:
+            self.admitted[pid] = dict(entry, verifiedParentChain=chain)
+        return True, (f"PID {pid} verified as this command's descendant; "
+                      f"group {actual_group}, driver {self.driver}, start {entry['startedAt']}"), False
+
+    def current(self) -> list[dict[str, Any]]:
+        table = self.table()
+        owned: list[dict[str, Any]] = []
+        for pid in table:
+            if self.ancestry(pid, table) is not None or pid in self.admitted:
+                valid, reason, _ = self.verify(pid, table)
+                if valid:
+                    owned.append(dict(table[pid], pidValidation=reason,
+                                      verifiedParentChain=self.admitted[pid]["verifiedParentChain"]))
+        return owned
 
 
-def owned_process_snapshot(group: int) -> dict[str, Any]:
-    """Read public ps metadata, retaining only the isolated command's members.
+def owned_process_snapshot(owner: OwnedCommand) -> dict[str, Any]:
+    """Read public ps metadata, retaining only verified command descendants.
 
     A missing journal may mean the native runner stalled before a test began,
     or merely that pipe-buffered Swift Testing output has not flushed. Preserve
@@ -106,52 +180,23 @@ def owned_process_snapshot(group: int) -> dict[str, Any]:
     """
     result: dict[str, Any] = {"processes": [], "selection": None}
     try:
-        listing = subprocess.run(["/bin/ps", "-axo", "pid=,ppid=,pgid=,comm="],
-                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                 text=True, timeout=5, check=False)
-        if listing.returncode:
-            result["error"] = f"ps exited {listing.returncode}: {listing.stderr.strip()}"
-            return result
-        for line in listing.stdout.splitlines():
-            fields = line.split(maxsplit=3)
-            if len(fields) != 4:
-                continue
-            try:
-                pid, parent, candidate_group = map(int, fields[:3])
-            except ValueError:
-                continue
-            if candidate_group != group:
-                continue
-            valid, validation, _ = in_process_group(pid, group)
-            if valid:
-                result["processes"].append({"pid": pid, "parentPID": parent,
-                                            "processGroup": candidate_group,
-                                            "command": fields[3], "pidValidation": validation})
+        result["processes"] = owner.current()
         by_pid = {entry["pid"]: entry for entry in result["processes"]}
-
-        def reaches_driver(entry: dict[str, Any]) -> bool:
-            seen: set[int] = set()
-            while entry["pid"] != group:
-                if entry["pid"] in seen or entry["parentPID"] not in by_pid:
-                    return False
-                seen.add(entry["pid"])
-                entry = by_pid[entry["parentPID"]]
-            return True
 
         candidates = []
         for entry in result["processes"]:
             basename = Path(entry["command"]).name
             known_runner = (basename == "swiftpm-testing" or basename.endswith(".xctest")
                             or basename.startswith("KumonePackageTests"))
-            if entry["pid"] != group and known_runner and reaches_driver(entry):
+            if entry["pid"] != owner.driver and known_runner:
                 candidates.append(entry)
         if len(candidates) == 1:
             result["selection"] = dict(candidates[0], role="owned-native-test-runner-candidate",
-                                       basis="known runner command, isolated group and driver ancestry; no journal yet")
+                                       basis="known runner command and verified driver ancestry/identity; no journal yet")
         elif len(candidates) > 1:
             result["error"] = "multiple owned native runner candidates; actual test PID remains ambiguous"
-        elif group in by_pid:
-            result["selection"] = dict(by_pid[group], role="owned-command-driver",
+        elif owner.driver in by_pid:
+            result["selection"] = dict(by_pid[owner.driver], role="owned-command-driver",
                                        basis="no verified native test runner; driver stack only, not test stack")
         else:
             result["error"] = "isolated driver has exited; no unique native runner verified"
@@ -160,50 +205,64 @@ def owned_process_snapshot(group: int) -> dict[str, Any]:
     return result
 
 
-def terminate_own_group(process: subprocess.Popen[bytes], group: int) -> list[str]:
-    """Signal only the isolated group created by this wrapper's own Popen."""
+def terminate_own_group(process: subprocess.Popen[bytes], owner: OwnedCommand) -> list[str]:
+    """Signal verified owned PIDs, deepest descendants first and driver last.
+
+    Never signal an entire child group: SwiftPM may have moved descendants to
+    new groups, and group membership alone is not a sufficient ownership test.
+    """
     messages: list[str] = []
-    if group != process.pid or group == os.getpgrp():
+    if owner.driver != process.pid or owner.driver == os.getpgrp():
         return ["refused termination: isolated child process-group invariant failed"]
+    targets = sorted(owner.current(), key=lambda entry: len(entry["verifiedParentChain"] or []), reverse=True)
     for action, grace in [(signal.SIGTERM, 3.0), (signal.SIGKILL, 1.0)]:
-        try:
-            # A child may exit while descendants remain. The dedicated group,
-            # rather than the SwiftPM parent PID, owns the complete command.
-            os.killpg(group, action)
-            messages.append(f"sent {action.name} to own process group {group}")
-        except ProcessLookupError:
-            messages.append(f"own process group {group} no longer exists")
-            break
-        except OSError as error:
-            messages.append(f"failed to send {action.name} to own group {group}: {error}")
-            break
+        for target in targets:
+            pid = target["pid"]
+            valid, reason, _ = owner.verify(pid)
+            if not valid:
+                messages.append(f"no {action.name} for PID {pid}: {reason}")
+                continue
+            try:
+                os.kill(pid, action)
+                messages.append(f"sent {action.name} to verified owned PID {pid}")
+            except ProcessLookupError:
+                messages.append(f"owned PID {pid} no longer exists")
+            except OSError as error:
+                messages.append(f"failed to send {action.name} to owned PID {pid}: {error}")
         expires = time.monotonic() + grace
-        denied_probe_recorded = False
+        denied_probes: set[int] = set()
         while time.monotonic() < expires:
             process.poll()
-            try:
-                os.killpg(group, 0)
-            except ProcessLookupError:
+            remaining = []
+            for target in targets:
+                pid = target["pid"]
+                valid, _, _ = owner.verify(pid)
+                if not valid:
+                    continue
+                try:
+                    os.kill(pid, 0)
+                    remaining.append(pid)
+                except ProcessLookupError:
+                    continue
+                except PermissionError as error:
+                    # A denied probe is not proof that the PID has gone.
+                    remaining.append(pid)
+                    if pid not in denied_probes:
+                        messages.append(f"owned PID {pid} signal-zero probe denied: {error}; "
+                                        "absence is unconfirmed, continuing bounded cleanup")
+                        denied_probes.add(pid)
+            if not remaining:
                 return messages
-            except PermissionError as error:
-                # Darwin can deny a signal-zero group probe during teardown.
-                # EPERM does not mean that the group has disappeared. Keep the
-                # bounded grace and next owned-group signal, and preserve the
-                # failure that caused cleanup instead of replacing its report.
-                if not denied_probe_recorded:
-                    messages.append(f"own process group {group} signal-zero probe denied: {error}; "
-                                    "group absence is unconfirmed, continuing bounded cleanup")
-                    denied_probe_recorded = True
             time.sleep(0.05)
     try:
         process.wait(timeout=1)
     except subprocess.TimeoutExpired:
-        messages.append("own command did not reap after process-group termination")
+        messages.append("own command did not reap after verified-PID termination")
     return messages
 
 
 def collect_sample(args: argparse.Namespace, record: dict[str, Any] | None,
-                   group: int, log: Any) -> dict[str, Any]:
+                   owner: OwnedCommand, log: Any) -> dict[str, Any]:
     sample_report: dict[str, Any] = {
         "command": None, "attempted": False, "returnCode": None,
         "samplePath": str(args.sample_output), "commandLog": str(args.sample_log),
@@ -211,7 +270,7 @@ def collect_sample(args: argparse.Namespace, record: dict[str, Any] | None,
     args.sample_log.parent.mkdir(parents=True, exist_ok=True)
     with args.sample_log.open("wb", buffering=0) as sample_log:
         if record is None:
-            snapshot = owned_process_snapshot(group)
+            snapshot = owned_process_snapshot(owner)
             sample_report["ownedProcessSnapshot"] = snapshot
             selection = snapshot["selection"]
             if selection is None:
@@ -229,13 +288,14 @@ def collect_sample(args: argparse.Namespace, record: dict[str, Any] | None,
             pid = record["testProcessID"]
             sample_report["testProcessID"] = pid
             sample_report["samplingRole"] = "journal-identified-test-process"
-        valid, reason, _ = in_process_group(pid, group)
+        valid, reason, _ = owner.verify(pid)
         sample_report["pidValidation"] = reason
         if not valid:
             sample_report["error"] = reason
             sample_log.write((reason + "\n").encode())
             emit("NATIVE_SCROLL_SAMPLE_UNAVAILABLE " + reason, log)
             return sample_report
+        sample_report["verifiedProcessIdentity"] = owner.admitted[pid]
         command = [args.sample_command, str(pid), "2", "-file", str(args.sample_output)]
         sample_report.update(command=command, attempted=True)
         emit("NATIVE_SCROLL_SAMPLE_START " + json.dumps(command), log)
@@ -313,6 +373,7 @@ def main() -> int:
                                      "command": args.command, "wrapperExitCode": 127})
             return 127
         group = process.pid
+        owner = OwnedCommand(group)
         emit("NATIVE_SCROLL_WATCHDOG_START " + json.dumps({
             "command": args.command, "ownProcessGroup": group,
             "inactivityBudgetSeconds": args.stall_seconds,
@@ -344,8 +405,9 @@ def main() -> int:
             nonlocal last_record, last_progress
             if reader.errors:
                 return "journal has malformed completed records: " + "; ".join(reader.errors)
+            table = owner.table() if records else None
             for record in records:
-                valid, reason, gone = in_process_group(record["testProcessID"], group)
+                valid, reason, gone = owner.verify(record["testProcessID"], table)
                 if not valid and not gone:
                     return reason
                 records_seen.append(record)
@@ -365,7 +427,7 @@ def main() -> int:
             emit("NATIVE_SCROLL_DIAGNOSTIC_FAILURE " + reason, log)
             if exception_traceback:
                 emit("NATIVE_SCROLL_DIAGNOSTIC_TRACEBACK\n" + exception_traceback, log)
-            termination = terminate_own_group(process, group)
+            termination = terminate_own_group(process, owner)
             drain_output()
             write_json(args.report, {
                 "outcome": outcome, "reason": reason, "wrapperExitCode": 125,
@@ -411,8 +473,8 @@ def main() -> int:
                         "idleSeconds": idle, "lastRecord": last_record,
                         "diagnosticBudgetSeconds": args.stall_seconds,
                     }, sort_keys=True), log)
-                    sample = collect_sample(args, last_record, group, log)
-                    termination = terminate_own_group(process, group)
+                    sample = collect_sample(args, last_record, owner, log)
+                    termination = terminate_own_group(process, owner)
                     for message in termination:
                         emit("NATIVE_SCROLL_TERMINATION " + message, log)
                     drain_output()
@@ -430,7 +492,7 @@ def main() -> int:
                     return 124
                 output_ready(min(0.1, args.stall_seconds - idle))
         except KeyboardInterrupt:
-            termination = terminate_own_group(process, group)
+            termination = terminate_own_group(process, owner)
             write_json(args.report, {"outcome": "interrupted", "wrapperExitCode": 130,
                                      "termination": termination, "lastRecord": last_record})
             return 130

@@ -49,12 +49,12 @@ class WatchdogTests(unittest.TestCase):
             bootstrap = self.root / 'deny-zero-probe.py'
             bootstrap.write_text(
                 "import errno, os, runpy, sys\n"
-                "original = os.killpg\n"
-                "def killpg(group, action):\n"
+                "original = os.kill\n"
+                "def kill(pid, action):\n"
                 "    if action == 0:\n"
-                "        raise PermissionError(errno.EPERM, 'simulated Darwin group probe denial')\n"
-                "    return original(group, action)\n"
-                "os.killpg = killpg\n"
+                "        raise PermissionError(errno.EPERM, 'simulated Darwin PID probe denial')\n"
+                "    return original(pid, action)\n"
+                "os.kill = kill\n"
                 "sys.argv = sys.argv[1:]\n"
                 "runpy.run_path(sys.argv[0], run_name='__main__')\n"
             )
@@ -92,7 +92,8 @@ class WatchdogTests(unittest.TestCase):
 
     def test_denied_zero_probe_preserves_stall_failure_and_stack_evidence(self):
         result, report = self.run_case("""
-            import json, os, pathlib, sys, time
+            import json, os, pathlib, signal, sys, time
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
             pathlib.Path(sys.argv[1]).write_text(json.dumps({'testProcessID': os.getpid(), 'stage': 'native-call-enter'}) + '\\n')
             time.sleep(60)
         """, deny_zero_probe=True)
@@ -107,13 +108,14 @@ class WatchdogTests(unittest.TestCase):
     def test_denied_zero_probe_preserves_foreign_journal_failure(self):
         foreign_pid = os.getpid()
         result, report = self.run_case(f"""
-            import json, pathlib, sys, time
+            import json, pathlib, signal, sys, time
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
             pathlib.Path(sys.argv[1]).write_text(json.dumps({{'testProcessID': {foreign_pid}, 'stage': 'foreign-pid'}}) + '\\n')
             time.sleep(60)
         """, deny_zero_probe=True)
         self.assertEqual(result.returncode, 125, result.stdout + result.stderr)
         self.assertEqual(report["outcome"], "diagnostic-journal-invalid")
-        self.assertIn('expected own group', report["reason"])
+        self.assertIn('no parent chain to own driver', report["reason"])
         self.assertTrue(any('signal-zero probe denied' in message for message in report["termination"]))
         self.assertNotIn('sample', report)
         self.assertFalse(self.sample.exists())
@@ -138,6 +140,49 @@ class WatchdogTests(unittest.TestCase):
         self.assertIn(str(actual), self.sample.read_text())
         self.assertEqual(report["sample"]["returnCode"], 0)
         self.assertTrue(report["termination"])
+
+    def test_detached_test_group_is_validated_by_parent_chain_and_cleaned_up(self):
+        child_source = (
+            "import json, os, pathlib, sys, time\n"
+            "pathlib.Path(sys.argv[1]).write_text(json.dumps({'testProcessID': os.getpid(), 'stage': 'detached-native-call'}) + '\\n')\n"
+            "time.sleep(60)\n"
+        )
+        result, report = self.run_case(
+            "import subprocess, sys\n"
+            f"child = subprocess.Popen([sys.executable, '-c', {child_source!r}, sys.argv[1]], start_new_session=True)\n"
+            "child.wait()\n", budget=0.3
+        )
+        self.assertEqual(result.returncode, 124, result.stdout + result.stderr)
+        self.assertEqual(report["outcome"], "diagnostic-stall-failure")
+        actual = report["lastRecord"]["testProcessID"]
+        identity = report["sample"]["verifiedProcessIdentity"]
+        self.assertEqual(identity["pid"], actual)
+        self.assertEqual(identity["processGroup"], actual)
+        self.assertNotEqual(actual, report["ownProcessGroup"])
+        self.assertEqual(identity["verifiedParentChain"][-1], report["ownProcessGroup"])
+        self.assertEqual(report["sample"]["testProcessID"], actual)
+        self.assertIn(f'verified owned PID {actual}', '\n'.join(report["termination"]))
+        with self.assertRaises(ProcessLookupError):
+            os.kill(actual, 0)
+
+    def test_no_journal_known_detached_runner_is_verified_by_ancestry(self):
+        runner_path = self.root / 'swiftpm-testing'
+        result, report = self.run_case(f"""
+            import pathlib, shutil, subprocess
+            runner = pathlib.Path({str(runner_path)!r})
+            shutil.copyfile('/bin/sleep', runner)
+            runner.chmod(0o755)
+            child = subprocess.Popen([str(runner), '60'], start_new_session=True)
+            child.wait()
+        """, budget=0.3)
+        self.assertEqual(result.returncode, 124, result.stdout + result.stderr)
+        self.assertEqual(report["sample"]["samplingRole"], "owned-native-test-runner-candidate")
+        identity = report["sample"]["verifiedProcessIdentity"]
+        self.assertEqual(identity["processGroup"], identity["pid"])
+        self.assertNotEqual(identity["pid"], report["ownProcessGroup"])
+        self.assertEqual(identity["verifiedParentChain"][-1], report["ownProcessGroup"])
+        with self.assertRaises(ProcessLookupError):
+            os.kill(identity["pid"], 0)
 
     def test_sample_failure_is_persisted_and_still_fails(self):
         self.sample_command.write_text("#!" + sys.executable + "\nimport sys\nprint('collector failed')\nsys.exit(17)\n")
@@ -225,7 +270,7 @@ class WatchdogTests(unittest.TestCase):
         self.assertEqual(result.returncode, 125)
         self.assertEqual(report["outcome"], "diagnostic-journal-invalid")
         self.assertNotIn("sample", report)
-        self.assertIn("expected own group", report["reason"])
+        self.assertIn("no parent chain to own driver", report["reason"])
         os.kill(foreign_pid, 0)
         self.assertFalse(self.sample.exists())
 
