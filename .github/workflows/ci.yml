@@ -31,6 +31,7 @@ jobs:
           sw_vers
           xcodebuild -version
           swift --version
+          python3 Scripts/test-native-scroll-diagnostics.py
           case "$QIETING_VALIDATION_STAGE" in ui|audio|complete) ;; *) exit 1 ;; esac
           echo "Validation stage: $QIETING_VALIDATION_STAGE" >> "$GITHUB_STEP_SUMMARY"
           if [ "$QIETING_VALIDATION_STAGE" != complete ]; then
@@ -57,9 +58,10 @@ jobs:
       - name: Native scrollbar regression
         shell: bash
         run: |
-          swift test --skip-build --triple arm64-apple-macosx26.0 --disable-xctest --filter NativeScrollPreferencesTests 2>&1 | tee .build/native-scroll-regression.log
+          python3 Scripts/run-native-scroll-diagnostics.py -- swift test --skip-build --triple arm64-apple-macosx26.0 --disable-xctest --filter NativeScrollPreferencesTests
           python3 Scripts/verify-test-log.py .build/native-scroll-regression.log --minimum-tests 5 --report .build/native-scroll-test-summary.json
           test -s .build/native-scroll-validation.json
+          test -s .build/native-scroll-journal.jsonl
 
       # First exercise the three concrete failures from CI #45 attempt 2.
       # Real mouse/field input and the original 0.5pt geometry checks remain.
@@ -231,6 +233,10 @@ jobs:
             .build/native-toolbar-regression.log
             .build/native-toolbar-validation.json
             .build/native-scroll-regression.log
+            .build/native-scroll-journal.jsonl
+            .build/native-scroll-watchdog.json
+            .build/native-scroll-stall-sample*.txt
+            .build/native-scroll-sample-command*.log
             .build/window-regression.log
             .build/lyrics-seek-regression.log
             .build/lyrics-viewport-*.png

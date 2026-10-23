@@ -25,7 +25,7 @@
 
 音频生产实现尚未包含在 UI 提交中，D002 仍开放。`work/` 中参数扫描只是独立实验，不是处理了真实设备输出的证据。不能将 Tap 副本或静态数学实验当作 App 已修复。
 
-CI 通过 `QIETING_VALIDATION_STAGE` 明示 `ui` / `audio` / `complete`。前两种阶段保留编译、窗口、歌词、滚动、媒体时钟/严格 PCM 和 EOF 专项，但不打包 App，也不宣称完整回归通过。最后 `complete` 必须执行原完整 Swift Testing（基线 996 项 + 新增 3 项滚动测试，最低 999；音频候选另 11 项尚未应用）、MLX GPU、原生专项及全部原有架构/测试身份/签名/资源检查。未通过前不上传最终 App。
+CI 通过 `QIETING_VALIDATION_STAGE` 明示 `ui` / `audio` / `complete`。前两种阶段保留编译、窗口、歌词、滚动、媒体时钟/严格 PCM 和 EOF 专项，但不打包 App，也不宣称完整回归通过。最后 `complete` 必须执行原完整 Swift Testing（基线 996 项 + 新增 3 项滚动测试，最低 999；音频候选另 12 项尚未应用）、MLX GPU、原生专项及全部原有架构/测试身份/签名/资源检查。未通过前不上传最终 App。
 
 ## 公开 API 依据
 
@@ -84,3 +84,11 @@ CG-created NSEvent 不保证绑定 NSWindow，测试据实记录，不使用私�
 现有 GitHub 读取权限无法查看历史 pusher/完整 webhook 投递或事发时的凭据类型。当前变量存在性、commit author 或 Actions actor 都不能证明历史 push 使用了 GITHUB_TOKEN，故不作此定性。现有规则不增加 push/pull_request 双重触发、pull_request_target、写权限、新密钥或空提交。下一次真实修复发布后检查对应 head 的自动运行，记录实际 event；如尝试既有 GitHub 连接发布，仅使用现有连接权限，不新增认证。
 
 [GitHub 官方触发说明](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow) 的当前规则还区分 GITHUB_TOKEN 的 PR 审批运行与其他事件抑制，不能简单套用旧的“此 Token 一律不创建 PR CI”结论。
+
+## CI #48：自动触发已证实，滚动执行停滞待定位
+
+真实修复提交 `7a9e3d2` 通过现有 GitHub 连接发布后，自动创建了 [CI #48](https://github.com/hoviksinn/kumone/actions/runs/39919222690)，event 为 `pull_request`，HEAD 与该提交一致。没有手动 dispatch、新增 Token、权限、触发规则或空提交。这证明当前发布路径可自动触发；不能反推出历史 `71d6f76` 的凭据类型或缺失事件的唯一原因。
+
+本次编译成功，滚动专项启动后仅出现 SwiftPM Planning build，直至整个 Job 的 45 分钟上限终止。诊断 Artifact 只有该启动日志，没有完成手势 JSON，因此不能把停滞定位到某个 AppKit 调用，也不能宣称完整输入已解决 CI #47。测试 stdout 经管道缓冲，缺少 Test started 本身不能证明测试函数未执行。
+
+下一提交只增加测试诊断：在真实测试进程同步写入逐阶段 JSONL，包围创建窗口、输入各阶段、原生布局/显示、主队列提交和销毁。外部独立进程在 30 秒没有新阶段时，采样自己启动的进程组内经核对的实际测试进程，再以失败退出并保留线程与阶段记录；缺少 journal 时另行标注宿主/驱动诊断，不能冒称实际测试 PID。该预算用于尽早产生有证据的失败，不延长成功条件、不改变输入、源坐标、五项测试或任何原有断言。仍需新的 macOS 结果确认真正停滞点后再修正。

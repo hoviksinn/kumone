@@ -5,6 +5,51 @@ import SwiftUI
 import Testing
 @testable import KumoneCore
 
+/// Only the test's main actor reads AppKit. The external watchdog reads these
+/// flushed plain JSON records and samples the recorded test-process PID.
+@MainActor
+private enum NativeScrollJournal {
+    private static var handle: FileHandle?
+    private static var sequence = 0
+    private static var activeTest: String?
+
+    static func record(_ stage: String, details: [String: Any] = [:]) throws {
+        if handle == nil {
+            let root = ProcessInfo.processInfo.environment["GITHUB_WORKSPACE"]
+                ?? FileManager.default.currentDirectoryPath
+            let destination = URL(fileURLWithPath: root)
+                .appendingPathComponent(".build/native-scroll-journal.jsonl")
+            try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(),
+                                                    withIntermediateDirectories: true)
+            guard FileManager.default.createFile(atPath: destination.path, contents: nil) else {
+                throw CocoaError(.fileWriteUnknown)
+            }
+            handle = try FileHandle(forWritingTo: destination)
+        }
+        sequence += 1
+        if stage == "test.begin", let name = details["test"] as? String { activeTest = name }
+        var value = details
+        if let activeTest { value["test"] = activeTest }
+        value["sequence"] = sequence
+        value["stage"] = stage
+        value["testProcessID"] = ProcessInfo.processInfo.processIdentifier
+        value["systemUptime"] = ProcessInfo.processInfo.systemUptime
+        value["isMainThread"] = Thread.isMainThread
+        var data = try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])
+        data.append(0x0a)
+        let destination = try #require(handle)
+        try destination.write(contentsOf: data)
+        try destination.synchronize()
+        FileHandle.standardError.write(Data("NATIVE_SCROLL_JOURNAL ".utf8) + data)
+    }
+
+    // Defers cannot throw. A journal I/O failure must still fail the test.
+    static func scopeExit(_ name: String) {
+        do { try record("test.scope.exit", details: ["test": name]) }
+        catch { Issue.record("Could not persist native-scroll scope exit: \(error)") }
+    }
+}
+
 @MainActor
 private enum NativeScrollEvidence {
     static var gestures: [[String: Any]] = []
@@ -35,39 +80,81 @@ struct NativeScrollPreferencesTests {
         ((root as? T).map { [$0] } ?? []) + root.subviews.flatMap { descendants($0, of: type) }
     }
 
-    private func host<V: View>(_ content: V) -> (NSWindow, NSHostingView<V>) {
+    private func host<V: View>(_ content: V) throws -> (NSWindow, NSHostingView<V>) {
+        try NativeScrollJournal.record("swiftui-fixture.create.enter")
         _ = NSApplication.shared
+        try NativeScrollJournal.record("swiftui-fixture.application.ready")
         let window = NSWindow(contentRect: NSRect(x: 40, y: 40, width: 420, height: 300),
                               styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        let context: [String: Any] = ["hostWindowNumber": window.windowNumber]
+        try NativeScrollJournal.record("swiftui-fixture.window.created", details: context)
         window.isReleasedWhenClosed = false
         let hosting = NSHostingView(rootView: content)
+        try NativeScrollJournal.record("swiftui-fixture.content.enter", details: context)
         window.contentView = hosting
+        try NativeScrollJournal.record("swiftui-fixture.content.return", details: context)
+        try NativeScrollJournal.record("window.orderFront.enter", details: context)
         window.orderFront(nil)
+        try NativeScrollJournal.record("window.orderFront.return", details: context)
+        try NativeScrollJournal.record("swiftui-fixture.layout.enter", details: context)
         hosting.layoutSubtreeIfNeeded()
+        try NativeScrollJournal.record("swiftui-fixture.layout.return", details: context)
         return (window, hosting)
+    }
+
+    private func close(_ window: NSWindow) {
+        let context: [String: Any] = ["hostWindowNumber": window.windowNumber]
+        do {
+            try NativeScrollJournal.record("window.close.enter", details: context)
+        } catch {
+            Issue.record("Could not persist native-scroll window close entry: \(error)")
+        }
+        window.close()
+        do {
+            try NativeScrollJournal.record("window.close.return", details: context)
+        } catch {
+            Issue.record("Could not persist native-scroll window close return: \(error)")
+        }
     }
 
     private func probe(in root: NSView) async throws -> NativeScrollPreferences.Probe {
         for _ in 0..<50 {
+            try NativeScrollJournal.record("probe.layout.enter")
             root.layoutSubtreeIfNeeded()
+            try NativeScrollJournal.record("probe.layout.return")
+            try NativeScrollJournal.record("probe.query.enter")
             if let probe = descendants(root, of: NativeScrollPreferences.Probe.self).first,
                probe.enclosingScrollView != nil {
+                try NativeScrollJournal.record("probe.query.ready")
                 return probe
             }
+            try NativeScrollJournal.record("probe.query.pending")
             try await Task.sleep(for: .milliseconds(20))
         }
         Issue.record("SwiftUI did not attach the native preference probe to its NSScrollView")
         throw CocoaError(.coderReadCorrupt)
     }
 
-    private func nativeCommit(_ root: NSView) async {
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            DispatchQueue.main.async {
-                root.layoutSubtreeIfNeeded()
-                root.displayIfNeeded()
-                continuation.resume()
+    private func nativeCommit(_ root: NSView, context: [String: Any] = [:]) async throws {
+        try NativeScrollJournal.record("commit.enqueue", details: context)
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+            DispatchQueue.main.async { @MainActor in
+                do {
+                    try NativeScrollJournal.record("commit.main-block.enter", details: context)
+                    try NativeScrollJournal.record("commit.layout.enter", details: context)
+                    root.layoutSubtreeIfNeeded()
+                    try NativeScrollJournal.record("commit.layout.return", details: context)
+                    try NativeScrollJournal.record("commit.display.enter", details: context)
+                    root.displayIfNeeded()
+                    try NativeScrollJournal.record("commit.display.return", details: context)
+                    try NativeScrollJournal.record("commit.continuation.resume", details: context)
+                    continuation.resume()
+                } catch {
+                    continuation.resume(throwing: error)
+                }
             }
         }
+        try NativeScrollJournal.record("commit.await.return", details: context)
     }
 
     /// The production shelf, including its indicator modifier, is inside the
@@ -99,11 +186,13 @@ struct NativeScrollPreferencesTests {
     private func horizontalProbes(in root: NSView,
                                   excluding old: NSScrollView? = nil) async throws -> [NativeScrollPreferences.Probe] {
         for _ in 0..<50 {
-            await nativeCommit(root)
+            try await nativeCommit(root, context: ["purpose": "horizontal-probe-readiness"])
+            try NativeScrollJournal.record("horizontal-probe.query.enter")
             let matches = descendants(root, of: NativeScrollPreferences.Probe.self).filter { probe in
                 guard let scroll = probe.enclosingScrollView, scroll !== old else { return false }
                 return (scroll.documentView?.frame.width ?? 0) > scroll.contentSize.width + 100
             }
+            try NativeScrollJournal.record("horizontal-probe.query.return", details: ["matches": matches.count])
             if matches.count == 2 { return matches }
             try await Task.sleep(for: .milliseconds(20))
         }
@@ -116,8 +205,9 @@ struct NativeScrollPreferencesTests {
         case completeGesture
     }
 
-    private func scrollSnapshot(_ scroll: NSScrollView) -> [String: Any] {
-        ["scrollClass": String(describing: type(of: scroll)),
+    private func scrollSnapshot(_ scroll: NSScrollView, context: [String: Any]) throws -> [String: Any] {
+        try NativeScrollJournal.record("snapshot.enter", details: context)
+        let value: [String: Any] = ["scrollClass": String(describing: type(of: scroll)),
          "scrollBounds": NSStringFromRect(scroll.bounds),
          "scrollVisibleRect": NSStringFromRect(scroll.visibleRect),
          "clipBounds": NSStringFromRect(scroll.contentView.bounds),
@@ -133,12 +223,18 @@ struct NativeScrollPreferencesTests {
          "hasHorizontalScroller": scroll.hasHorizontalScroller,
          "hasVerticalScroller": scroll.hasVerticalScroller,
          "autohidesScrollers": scroll.autohidesScrollers]
+        try NativeScrollJournal.record("snapshot.return", details: context.merging(["snapshot": value]) { _, new in new })
+        return value
     }
 
     private func horizontalWheel(in scroll: NSScrollView, window: NSWindow,
                                  scenario: String, sequence: WheelSequence = .completeGesture) async throws {
+        let context: [String: Any] = ["scenario": scenario, "wheelSequence": sequence.rawValue,
+                                     "hostWindowNumber": window.windowNumber,
+                                     "scrollerStyle": scroll.scrollerStyle.rawValue]
+        try NativeScrollJournal.record("gesture.geometry.enter", details: context)
         let start = scroll.documentVisibleRect
-        let initial = scrollSnapshot(scroll)
+        let initial = try scrollSnapshot(scroll, context: context.merging(["snapshotPurpose": "gesture-initial"]) { _, new in new })
         #expect(scroll.window === window)
         #expect((scroll.documentView?.frame.width ?? 0) > scroll.contentSize.width + 100)
         let visible = scroll.contentView.visibleRect
@@ -149,6 +245,7 @@ struct NativeScrollPreferencesTests {
         let hit = root.hitTest(root.convert(point, from: nil))
         #expect(hit?.enclosingScrollView === scroll,
                 "The wheel point must fall inside the actual visible target scroll view")
+        try NativeScrollJournal.record("gesture.geometry.return", details: context)
         // Match the public WebKit test helper's complete wheel sequence:
         // began carries one pixel, changed carries the remainder, ended zero.
         // Keep the old two-event setup on separate diagnostic fixtures so CI
@@ -158,6 +255,8 @@ struct NativeScrollPreferencesTests {
             : [(.began, .began, -80), (.ended, .ended, 0)]
         var receipts: [[String: Any]] = []
         for (cgPhase, phase, deltaX) in phases {
+            let phaseContext = context.merging(["cgPhase": cgPhase.rawValue, "signedInputDeltaX": deltaX]) { _, new in new }
+            try NativeScrollJournal.record("phase.create.enter", details: phaseContext)
             let input = try #require(CGEvent(scrollWheelEvent2Source: nil, units: .pixel,
                                             wheelCount: 2, wheel1: 0, wheel2: deltaX, wheel3: 0))
             input.timestamp = UInt64(ProcessInfo.processInfo.systemUptime * 1_000_000_000)
@@ -172,9 +271,21 @@ struct NativeScrollPreferencesTests {
             #expect(event.phase == phase && event.momentumPhase.isEmpty)
             #expect(event.hasPreciseScrollingDeltas)
             #expect(event.scrollingDeltaX == CGFloat(deltaX) && event.scrollingDeltaY == 0)
-            let before = scrollSnapshot(scroll)
+            try NativeScrollJournal.record("phase.ready", details: phaseContext.merging([
+                "eventType": event.type.rawValue, "eventTimestamp": event.timestamp,
+                "eventWindowNumber": event.windowNumber, "eventHasHostWindow": event.window === window,
+                "eventHasAnyWindow": event.window != nil, "phase": event.phase.rawValue,
+                "momentumPhase": event.momentumPhase.rawValue,
+                "scrollingDeltaX": event.scrollingDeltaX, "scrollingDeltaY": event.scrollingDeltaY,
+                "locationInWindow": NSStringFromPoint(event.locationInWindow),
+                "intendedWindowPoint": NSStringFromPoint(point), "screenPoint": NSStringFromPoint(screen),
+            ]) { _, new in new })
+            let before = try scrollSnapshot(scroll, context: phaseContext.merging(["snapshotPurpose": "phase-before"]) { _, new in new })
+            try NativeScrollJournal.record("scrollWheel.enter", details: phaseContext)
             scroll.scrollWheel(with: event)
-            await nativeCommit(scroll)
+            try NativeScrollJournal.record("scrollWheel.return", details: phaseContext)
+            try await nativeCommit(scroll, context: phaseContext)
+            let after = try scrollSnapshot(scroll, context: phaseContext.merging(["snapshotPurpose": "phase-after"]) { _, new in new })
             receipts.append([
                 "eventType": event.type.rawValue, "eventTimestamp": event.timestamp,
                 "modifierFlags": event.modifierFlags.rawValue,
@@ -190,39 +301,54 @@ struct NativeScrollPreferencesTests {
                 "deltaX": event.deltaX, "deltaY": event.deltaY,
                 "cgPointDeltaX": input.getIntegerValueField(.scrollWheelEventPointDeltaAxis2),
                 "cgFixedDeltaX": input.getDoubleValueField(.scrollWheelEventFixedPtDeltaAxis2),
-                "before": before, "afterNativeCommit": scrollSnapshot(scroll),
+                "before": before, "afterNativeCommit": after,
             ])
         }
+        let final = try scrollSnapshot(scroll, context: context.merging(["snapshotPurpose": "gesture-final"]) { _, new in new })
+        try NativeScrollJournal.record("gesture.evidence.enter", details: context)
         try NativeScrollEvidence.record([
             "scenario": scenario, "sequence": sequence.rawValue,
             "delivery": "direct NSScrollView.scrollWheel(with:) using public CG/NSEvent APIs",
             "hostWindowNumber": window.windowNumber, "hostWindowFrame": NSStringFromRect(window.frame),
-            "before": initial, "after": scrollSnapshot(scroll), "events": receipts,
+            "before": initial, "after": final, "events": receipts,
             "actualHorizontalMotion": scroll.documentVisibleRect.origin.x > start.origin.x,
         ])
+        try NativeScrollJournal.record("gesture.evidence.return", details: context)
         if sequence == .completeGesture {
             #expect(scroll.documentVisibleRect.origin.x > start.origin.x,
                     "The complete native horizontal wheel gesture must move the actual document")
         }
+        try NativeScrollJournal.record("gesture.return", details: context)
     }
 
     @Test func completeHorizontalWheelGestureMovesNativeControl() async throws {
+        try NativeScrollJournal.record("test.begin", details: ["test": "completeHorizontalWheelGestureMovesNativeControl"])
+        defer { NativeScrollJournal.scopeExit("completeHorizontalWheelGestureMovesNativeControl") }
         for style in [NSScroller.Style.legacy, .overlay] {
             for sequence in [WheelSequence.originalBeganEnded, .completeGesture] {
+                let context: [String: Any] = ["scrollerStyle": style.rawValue, "wheelSequence": sequence.rawValue,
+                                             "scenario": "ordinary-native-control"]
+                try NativeScrollJournal.record("native-control.create.enter", details: context)
                 _ = NSApplication.shared
+                try NativeScrollJournal.record("native-control.application.ready", details: context)
                 let window = NSWindow(contentRect: NSRect(x: 40, y: 40, width: 420, height: 300),
                                       styleMask: [.titled, .closable], backing: .buffered, defer: false)
+                try NativeScrollJournal.record("native-control.window.created", details: context.merging(["hostWindowNumber": window.windowNumber]) { _, new in new })
                 window.isReleasedWhenClosed = false
-                defer { window.close() }
+                defer { close(window) }
                 let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 420, height: 300))
                 scroll.documentView = NSView(frame: NSRect(x: 0, y: 0, width: 3600, height: 260))
                 scroll.hasHorizontalScroller = true
                 scroll.hasVerticalScroller = false
                 scroll.scrollerStyle = style
                 scroll.autohidesScrollers = true
+                try NativeScrollJournal.record("native-control.content.enter", details: context)
                 window.contentView = scroll
+                try NativeScrollJournal.record("native-control.content.return", details: context)
+                try NativeScrollJournal.record("window.orderFront.enter", details: context)
                 window.orderFront(nil)
-                await nativeCommit(scroll)
+                try NativeScrollJournal.record("window.orderFront.return", details: context)
+                try await nativeCommit(scroll, context: context.merging(["purpose": "native-control-initial"]) { _, new in new })
                 try await horizontalWheel(in: scroll, window: window,
                                           scenario: "ordinary-native-control", sequence: sequence)
             }
@@ -230,7 +356,9 @@ struct NativeScrollPreferencesTests {
     }
 
     @Test func verticalScrollViewAdoptsNativePreferenceAndRemainsScrollable() async throws {
-        let (window, hosting) = host(
+        try NativeScrollJournal.record("test.begin", details: ["test": "verticalScrollViewAdoptsNativePreferenceAndRemainsScrollable"])
+        defer { NativeScrollJournal.scopeExit("verticalScrollViewAdoptsNativePreferenceAndRemainsScrollable") }
+        let (window, hosting) = try host(
             ScrollView {
                 VStack(spacing: 0) {
                     ForEach(0..<60) { index in
@@ -241,7 +369,7 @@ struct NativeScrollPreferencesTests {
             }
             .scrollIndicators(.automatic)
         )
-        defer { window.close() }
+        defer { close(window) }
         let probe = try await probe(in: hosting)
         let scroll = try #require(probe.enclosingScrollView)
         probe.applyPreferences()
@@ -258,7 +386,9 @@ struct NativeScrollPreferencesTests {
     }
 
     @Test func liveSystemPreferenceChangesPreserveTheScrollAxes() async throws {
-        let (window, hosting) = host(
+        try NativeScrollJournal.record("test.begin", details: ["test": "liveSystemPreferenceChangesPreserveTheScrollAxes"])
+        defer { NativeScrollJournal.scopeExit("liveSystemPreferenceChangesPreserveTheScrollAxes") }
+        let (window, hosting) = try host(
             ScrollView(.horizontal) {
                 HStack(spacing: 0) {
                     ForEach(0..<20) { index in
@@ -269,7 +399,7 @@ struct NativeScrollPreferencesTests {
             }
             .scrollIndicators(.automatic)
         )
-        defer { window.close() }
+        defer { close(window) }
         let probe = try await probe(in: hosting)
         let scroll = try #require(probe.enclosingScrollView)
         #expect(scroll.hasHorizontalScroller)
@@ -290,10 +420,12 @@ struct NativeScrollPreferencesTests {
     }
 
     @Test func productionShelvesNeverShowHorizontalIndicatorsUnderNativeStyles() async throws {
-        let (window, hosting) = host(shelves(identity: 0))
-        defer { window.close() }
-        let (originalWindow, originalHosting) = host(shelves(identity: 0))
-        defer { originalWindow.close() }
+        try NativeScrollJournal.record("test.begin", details: ["test": "productionShelvesNeverShowHorizontalIndicatorsUnderNativeStyles"])
+        defer { NativeScrollJournal.scopeExit("productionShelvesNeverShowHorizontalIndicatorsUnderNativeStyles") }
+        let (window, hosting) = try host(shelves(identity: 0))
+        defer { close(window) }
+        let (originalWindow, originalHosting) = try host(shelves(identity: 0))
+        defer { close(originalWindow) }
         let horizontal = try await horizontalProbes(in: hosting)
         let originalHorizontal = try await horizontalProbes(in: originalHosting)
         for style in [NSScroller.Style.legacy, .overlay] {
@@ -302,7 +434,7 @@ struct NativeScrollPreferencesTests {
                     probe.preferredStyle = { style }
                     probe.applyPreferences()
                 }
-                await nativeCommit(root)
+                try await nativeCommit(root, context: ["purpose": "production-shelf-style-change", "scrollerStyle": style.rawValue])
             }
             for probe in originalHorizontal {
                 let scroll = try #require(probe.enclosingScrollView)
@@ -331,8 +463,10 @@ struct NativeScrollPreferencesTests {
     }
 
     @Test func horizontalNeverPolicySurvivesNativeViewRecreation() async throws {
-        let (window, hosting) = host(shelves(identity: 0))
-        defer { window.close() }
+        try NativeScrollJournal.record("test.begin", details: ["test": "horizontalNeverPolicySurvivesNativeViewRecreation"])
+        defer { NativeScrollJournal.scopeExit("horizontalNeverPolicySurvivesNativeViewRecreation") }
+        let (window, hosting) = try host(shelves(identity: 0))
+        defer { close(window) }
         let original = try await horizontalProbes(in: hosting)
         let old = try #require(original.first?.enclosingScrollView)
         hosting.rootView = shelves(identity: 1)
@@ -342,7 +476,7 @@ struct NativeScrollPreferencesTests {
             let scroll = try #require(probe.enclosingScrollView)
             probe.preferredStyle = { .legacy }
             probe.applyPreferences()
-            await nativeCommit(hosting)
+            try await nativeCommit(hosting, context: ["purpose": "recreated-shelf-style-change"])
             #expect(scroll.scrollerStyle == .legacy)
             #expect(!scroll.hasHorizontalScroller && !scroll.hasVerticalScroller)
             try await horizontalWheel(in: scroll, window: window, scenario: "production-shelf-recreated-native-view")
