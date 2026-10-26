@@ -150,3 +150,9 @@ QIETING_VALIDATION_STAGE 先为 audio：实际 AU 桥接 1 项、输出/原边�
 修正将启动预算与已验证阶段后的停滞预算分开，真实 CI 两者仍为 30 秒。自测的解释器/子进程建立使用明确的 2 秒夹具启动预算，故障后的阶段预算仍为 150–300ms；刻意无日志的驱动停滞反例仍使用短启动期限。正向夹具冷启动、阶段超限和外部 PID 注入分别验证，不将准备耗时当输入响应。已核实父链的不可读路径仅标为不可用，不认领、不增加进度、不采样或发送信号；外部父链和改变的已认领身份仍失败。原 23 项保留，加 4 项后 27/27 Linux 自测通过，不能代替 Mac 结果。UI 的 250ms 和全部 PCM/音频阈值未改。
 
 诊断自测现位于其原生滚动消费者之前，独立音频编译/输出探针可先执行；所有自测、UI、时钟、音频、GPU 和打包门槛仍保留，成功路径没有省略测试，App 仍要求全部前置检查通过。此调整避免辅助工具的准备问题遮住独立音频验证。
+
+## CI #58：实际 SDK 桥接编译修正
+
+[CI #58](https://github.com/hoviksinn/kumone/actions/runs/40315719793) 已进入新音频源码编译，发现六条错误，均来自两处桥接名称问题：ObjC 的 [AUAudioUnit 属性](https://developer.apple.com/documentation/avfaudio/avaudiounit/auaudiounit) 实际为大写 `AUAudioUnit`，Swift 导入后的小写名称不能直接写在 ObjC++ 中；局部 `ComponentDescription()` 又与 Carbon 同名类型冲突，产生派生转换错误。
+
+只修正 ObjC getter，并为辅助函数加产品前缀。RenderState、内部 render block、平滑 Kernel 和媒体时钟均未改，前两者逐字节比较一致。该次尚未运行原生 AU/最终输出测试；下一次先继续实际 SDK 编译与桥接专项，不将静态检查代替通过。

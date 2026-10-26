@@ -509,7 +509,7 @@ struct RenderState {
 @end
 
 namespace {
-static AudioComponentDescription ComponentDescription() {
+static AudioComponentDescription QieTingBoundaryComponentDescription() {
     const auto fourCC = [](char a, char b, char c, char d) -> OSType {
         return (uint32_t(uint8_t(a)) << 24) | (uint32_t(uint8_t(b)) << 16)
             | (uint32_t(uint8_t(c)) << 8) | uint32_t(uint8_t(d));
@@ -522,7 +522,7 @@ static AudioComponentDescription ComponentDescription() {
 }
 
 static QieTingControlBoundaryAudioUnit *BoundaryUnit(AVAudioUnitEffect *effect) {
-    AUAudioUnit *unit = effect.auAudioUnit;
+    AUAudioUnit *unit = effect.AUAudioUnit;
     return [unit isKindOfClass:QieTingControlBoundaryAudioUnit.class]
         ? static_cast<QieTingControlBoundaryAudioUnit *>(unit) : nil;
 }
@@ -532,10 +532,10 @@ AVAudioUnitEffect *KumoneCreateControlBoundaryEffect(NSError **error) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         [AUAudioUnit registerSubclass:QieTingControlBoundaryAudioUnit.class
-              asComponentDescription:ComponentDescription()
+              asComponentDescription:QieTingBoundaryComponentDescription()
                                 name:@"QieTing: Control Boundary" version:1];
     });
-    const auto description = ComponentDescription();
+    const auto description = QieTingBoundaryComponentDescription();
     AudioComponent component = AudioComponentFindNext(nullptr, &description);
     AudioComponentDescription actual{};
     if (!component || AudioComponentGetDescription(component, &actual) != noErr) {
