@@ -71,6 +71,107 @@ private enum NativeScrollEvidence {
     }
 }
 
+/// Observe completion of one real native input, rather than assuming that one
+/// main-queue turn commits SwiftUI's asynchronous scroll response (CI #54).
+/// This probe never lays out, displays or writes a scroll position in a bounds
+/// notification. Its only timer is a strict failure deadline for the test.
+@MainActor
+private final class NativeWheelMotionObservation {
+    struct Receipt {
+        let status: String
+        let elapsedSeconds: TimeInterval
+        let nativeOffset: CGFloat?
+        let notificationCount: Int
+
+        var respondedWithinDeadline: Bool {
+            status == "bounds-notification" && elapsedSeconds <= 0.250
+        }
+
+        var json: [String: Any] {
+            var value: [String: Any] = ["status": status, "elapsedSeconds": elapsedSeconds,
+                                       "responseDeadlineSeconds": 0.250,
+                                       "notificationCount": notificationCount]
+            if let nativeOffset { value["matchedNativeBoundsOriginX"] = nativeOffset }
+            return value
+        }
+    }
+
+    private let clip: NSClipView
+    private let originalPostsNotifications: Bool
+    private let baseline: CGFloat
+    private let increasing: Bool
+    private var observer: NSObjectProtocol?
+    private var timeout: Task<Void, Never>?
+    private var startedAt: TimeInterval?
+    private var notificationCount = 0
+    private var receipt: Receipt?
+    private var continuation: CheckedContinuation<Receipt, Never>?
+
+    init(clip: NSClipView, increasing: Bool) {
+        self.clip = clip
+        self.increasing = increasing
+        baseline = clip.bounds.origin.x
+        originalPostsNotifications = clip.postsBoundsChangedNotifications
+        observer = NotificationCenter.default.addObserver(
+            forName: NSView.boundsDidChangeNotification, object: clip, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.boundsChanged() }
+        }
+        // Enabling this may itself post; the probe ignores notifications until
+        // arm(), immediately before the actual native input call.
+        clip.postsBoundsChangedNotifications = true
+    }
+
+    func arm() {
+        startedAt = ProcessInfo.processInfo.systemUptime
+        let deadline = ContinuousClock.now.advanced(by: .milliseconds(250))
+        timeout = Task { @MainActor [weak self] in
+            do { try await Task.sleep(until: deadline, clock: .continuous) }
+            catch { return }
+            self?.finish(status: "response-deadline-exceeded", nativeOffset: nil)
+        }
+    }
+
+    private func boundsChanged() {
+        guard startedAt != nil else { return }
+        notificationCount += 1
+        let offset = clip.bounds.origin.x
+        guard increasing ? offset > baseline : offset < baseline else { return }
+        finish(status: "bounds-notification", nativeOffset: offset)
+    }
+
+    private func finish(status: String, nativeOffset: CGFloat?) {
+        guard case nil = receipt else { return }
+        let elapsed = startedAt.map { ProcessInfo.processInfo.systemUptime - $0 } ?? 0
+        let value = Receipt(status: status, elapsedSeconds: elapsed,
+                            nativeOffset: nativeOffset, notificationCount: notificationCount)
+        receipt = value
+        timeout?.cancel()
+        timeout = nil
+        let waiting = continuation
+        continuation = nil
+        waiting?.resume(returning: value)
+    }
+
+    func wait() async -> Receipt {
+        await withTaskCancellationHandler {
+            if let receipt { return receipt }
+            return await withCheckedContinuation { continuation = $0 }
+        } onCancel: {
+            Task { @MainActor in self.finish(status: "cancelled", nativeOffset: nil) }
+        }
+    }
+
+    func close() {
+        if let observer { NotificationCenter.default.removeObserver(observer) }
+        observer = nil
+        clip.postsBoundsChangedNotifications = originalPostsNotifications
+        finish(status: "closed", nativeOffset: nil)
+        timeout?.cancel()
+        timeout = nil
+    }
+}
+
 /// These are hosted native scroll views, not a reimplementation of scrollbar
 /// layout. Physical trackpad fading and dragging still need a real Mac check.
 @Suite("Native scrollbar preferences", .serialized)
@@ -248,7 +349,12 @@ struct NativeScrollPreferencesTests {
         let point = scroll.contentView.convert(NSPoint(x: visible.midX, y: visible.midY), to: nil)
         let screen = window.convertPoint(toScreen: point)
         let root = try #require(window.contentView)
-        let hit = root.hitTest(root.convert(point, from: nil))
+        // AppKit hitTest takes SUPERview coordinates. Passing the flipped
+        // NSHostingView's own coordinates selected the other shelf (CI #54).
+        // https://developer.apple.com/documentation/appkit/nsview/hittest(_:)
+        let hitSpace = try #require(root.superview)
+        let hitPoint = hitSpace.convert(point, from: nil)
+        let hit = root.hitTest(hitPoint)
         #expect(hit?.enclosingScrollView === scroll,
                 "The wheel target must be inside the actual visible native scroll view")
         try NativeScrollJournal.record("wheel.geometry.return", details: context.merging([
@@ -256,6 +362,8 @@ struct NativeScrollPreferencesTests {
             "targetClipVisibleRect": NSStringFromRect(scroll.contentView.visibleRect),
             "actualTargetViewport": NSStringFromRect(visible),
             "intendedWindowPoint": NSStringFromPoint(point),
+            "hitTestPointInSuperview": NSStringFromPoint(hitPoint),
+            "hitTestCoordinateSpace": String(describing: type(of: hitSpace)),
             "hitViewEnclosingScrollIsTarget": hit?.enclosingScrollView === scroll,
             "commitRootClass": String(describing: type(of: root)),
         ]) { _, new in new })
@@ -314,7 +422,11 @@ struct NativeScrollPreferencesTests {
             try NativeScrollJournal.record("wheel.ready", details: eventContext.merging(format) { _, new in new })
             let before = try scrollSnapshot(scroll, context: eventContext.merging(["snapshotPurpose": "wheel-before"]) { _, new in new })
             let beforeOffset = scroll.documentVisibleRect.origin.x
+            let motion = NativeWheelMotionObservation(clip: scroll.contentView,
+                                                      increasing: direction == "forward")
+            defer { motion.close() }
             try NativeScrollJournal.record("scrollWheel.enter", details: eventContext)
+            motion.arm()
             scroll.scrollWheel(with: event)
             let immediatelyAfterInput = scroll.documentVisibleRect.origin.x
             try NativeScrollJournal.record("scrollWheel.return", details: eventContext.merging([
@@ -330,6 +442,12 @@ struct NativeScrollPreferencesTests {
                 "commitRootClass": String(describing: type(of: root)),
                 "commitRootIsNativeScrollTarget": root === scroll,
             ]) { _, new in new })
+            let response = await motion.wait()
+            try NativeScrollJournal.record("wheel.native-motion-complete", details: eventContext.merging([
+                "nativeMotionResponse": response.json,
+            ]) { _, new in new })
+            #expect(response.respondedWithinDeadline,
+                    "The real native bounds notification must confirm this input within 250ms")
             let after = try scrollSnapshot(scroll, context: eventContext.merging(["snapshotPurpose": "wheel-after"]) { _, new in new })
             let afterOffset = scroll.documentVisibleRect.origin.x
             if direction == "forward" {
@@ -345,6 +463,7 @@ struct NativeScrollPreferencesTests {
                 "before": before, "afterNativeCommit": after,
                 "actualOffsetBefore": beforeOffset, "actualOffsetAfter": afterOffset,
                 "offsetImmediatelyAfterNativeInput": immediatelyAfterInput,
+                "nativeMotionResponse": response.json,
                 "commitScope": "window-content-root",
                 "commitRootClass": String(describing: type(of: root)),
                 "actualTargetViewport": NSStringFromRect(visible),
