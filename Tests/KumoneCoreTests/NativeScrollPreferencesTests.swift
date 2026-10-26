@@ -5,27 +5,77 @@ import SwiftUI
 import Testing
 @testable import KumoneCore
 
-/// Only the test's main actor reads AppKit. The external watchdog reads these
-/// flushed plain JSON records and samples the recorded test-process PID.
+/// The serial queue exclusively owns the handle. The small error lock is never
+/// held while creating, writing, synchronizing or printing diagnostic files.
+/// In CI #55 a synchronous journal write stalled the main thread for 672ms and
+/// delayed the native bounds response under measurement.
+private final class NativeScrollJournalWriter: @unchecked Sendable {
+    private let destination: URL
+    private let queue = DispatchQueue(label: "QieTing.Tests.NativeScrollJournal", qos: .utility)
+    private let errorLock = NSLock()
+    private var firstError: (any Error)?
+    private var handle: FileHandle?
+
+    init(destination: URL) {
+        self.destination = destination
+    }
+
+    func enqueue(_ data: Data) {
+        queue.async { [self] in
+            do {
+                if handle == nil {
+                    try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(),
+                                                            withIntermediateDirectories: true)
+                    guard FileManager.default.createFile(atPath: destination.path, contents: nil) else {
+                        throw CocoaError(.fileWriteUnknown)
+                    }
+                    handle = try FileHandle(forWritingTo: destination)
+                }
+                guard let handle else { throw CocoaError(.fileWriteUnknown) }
+                try handle.write(contentsOf: data)
+                try handle.synchronize()
+                try FileHandle.standardError.write(contentsOf: Data("NATIVE_SCROLL_JOURNAL ".utf8) + data)
+            } catch {
+                errorLock.lock()
+                if firstError == nil { firstError = error }
+                errorLock.unlock()
+            }
+        }
+    }
+
+    func currentError() -> (any Error)? {
+        errorLock.lock()
+        defer { errorLock.unlock() }
+        return firstError
+    }
+
+    /// Called only by scopeExit, after this test's native input measurements.
+    /// A failed diagnostic write remains a test failure, never a silent pass.
+    func drain() throws {
+        queue.sync {}
+        if let error = currentError() { throw error }
+    }
+}
+
+/// Only the test's main actor reads AppKit and captures stage data/timestamps.
+/// File I/O runs on the independent writer while AppKit processes the input.
+/// The external watchdog reads flushed JSON and samples the recorded test PID.
 @MainActor
 private enum NativeScrollJournal {
-    private static var handle: FileHandle?
+    private static var writer: NativeScrollJournalWriter?
     private static var sequence = 0
     private static var activeTest: String?
 
     static func record(_ stage: String, details: [String: Any] = [:]) throws {
-        if handle == nil {
+        if writer == nil {
             let root = ProcessInfo.processInfo.environment["GITHUB_WORKSPACE"]
                 ?? FileManager.default.currentDirectoryPath
             let destination = URL(fileURLWithPath: root)
                 .appendingPathComponent(".build/native-scroll-journal.jsonl")
-            try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(),
-                                                    withIntermediateDirectories: true)
-            guard FileManager.default.createFile(atPath: destination.path, contents: nil) else {
-                throw CocoaError(.fileWriteUnknown)
-            }
-            handle = try FileHandle(forWritingTo: destination)
+            writer = NativeScrollJournalWriter(destination: destination)
         }
+        let destination = try #require(writer)
+        if let error = destination.currentError() { throw error }
         sequence += 1
         if stage == "test.begin", let name = details["test"] as? String { activeTest = name }
         var value = details
@@ -35,18 +85,18 @@ private enum NativeScrollJournal {
         value["testProcessID"] = ProcessInfo.processInfo.processIdentifier
         value["systemUptime"] = ProcessInfo.processInfo.systemUptime
         value["isMainThread"] = Thread.isMainThread
+        value["journalDelivery"] = "serial-background-io"
         var data = try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])
         data.append(0x0a)
-        let destination = try #require(handle)
-        try destination.write(contentsOf: data)
-        try destination.synchronize()
-        FileHandle.standardError.write(Data("NATIVE_SCROLL_JOURNAL ".utf8) + data)
+        destination.enqueue(data)
     }
 
     // Defers cannot throw. A journal I/O failure must still fail the test.
     static func scopeExit(_ name: String) {
         do { try record("test.scope.exit", details: ["test": name]) }
         catch { Issue.record("Could not persist native-scroll scope exit: \(error)") }
+        do { try writer?.drain() }
+        catch { Issue.record("Could not drain native-scroll journal: \(error)") }
     }
 }
 
