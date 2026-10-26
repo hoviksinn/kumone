@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Run one native-scroll test command and diagnose a stalled journal stage.
 
-The 30-second default is a diagnostic inactivity budget, not a successful-test
-deadline. A stall always fails, including when sampling fails or the command
-finishes while its stack is being sampled. The Swift test's input and acceptance
+The independent startup and stage-inactivity budgets default to 30 seconds;
+neither is a successful-test deadline. A stall always fails, including when
+sampling fails or the command finishes while its stack is being sampled. The Swift test's input and acceptance
 checks remain responsible for proving scrolling.
 """
 
@@ -172,7 +172,11 @@ class OwnedCommand:
         if zombie:
             return False, f"owned PID {pid} is an unavailable zombie: {evidence}", True
         if admitted is None and entry["command"].startswith("(") and entry["command"].endswith(")"):
-            return False, f"PID {pid} has no readable executable identity to admit: {evidence}", False
+            # The parent chain has been verified above. A fast owned child
+            # can lose its readable path before the first snapshot, while it
+            # is exiting. Preserve its final journal without admitting it as
+            # live or authorizing progress, sampling or signals.
+            return False, f"owned PID {pid} executable identity is unavailable before admission: {evidence}", True
         try:
             actual_group = os.getpgid(pid)
         except OSError as error:
@@ -355,7 +359,10 @@ def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--journal", type=Path, default=Path(".build/native-scroll-journal.jsonl"))
     parser.add_argument("--log", type=Path, default=Path(".build/native-scroll-regression.log"))
-    parser.add_argument("--stall-seconds", type=float, default=30.0)
+    parser.add_argument("--stall-seconds", type=float, default=30.0,
+                        help="Maximum inactivity after a verified native stage")
+    parser.add_argument("--startup-seconds", type=float, default=30.0,
+                        help="Maximum startup time before the first verified native stage")
     parser.add_argument("--sample-command", default="/usr/bin/sample")
     parser.add_argument("--sample-output", type=Path, default=Path(".build/native-scroll-stall-sample.txt"))
     parser.add_argument("--sample-log", type=Path, default=Path(".build/native-scroll-sample-command.log"))
@@ -366,8 +373,10 @@ def parse_arguments() -> argparse.Namespace:
         args.command.pop(0)
     if not args.command:
         parser.error("a test command is required after --")
-    if not math.isfinite(args.stall_seconds) or args.stall_seconds <= 0:
-        parser.error("--stall-seconds must be finite and positive")
+    for name in ("stall_seconds", "startup_seconds"):
+        value = getattr(args, name)
+        if not math.isfinite(value) or value <= 0:
+            parser.error("--" + name.replace("_", "-") + " must be finite and positive")
     paths = [args.journal, args.log, args.sample_output, args.sample_log, args.report]
     if len({path.resolve() for path in paths}) != len(paths):
         parser.error("journal, log, sample output, sample log and report must be distinct files")
@@ -403,6 +412,7 @@ def main() -> int:
         emit("NATIVE_SCROLL_WATCHDOG_START " + json.dumps({
             "command": args.command, "ownProcessGroup": group,
             "inactivityBudgetSeconds": args.stall_seconds,
+            "startupBudgetSeconds": args.startup_seconds,
             "budgetScope": "diagnostic failure only; no successful-test timing relaxation",
         }, sort_keys=True), log)
         assert process.stdout is not None
@@ -493,11 +503,16 @@ def main() -> int:
                         "elapsedSeconds": time.monotonic() - started,
                     })
                     return result
-                idle = time.monotonic() - last_progress
-                if idle >= args.stall_seconds:
+                # Interpreter/SwiftPM startup is not a completed native stage.
+                # Keep it independently bounded instead of charging cold-start
+                # scheduling against the short stage budgets used in selftests.
+                phase = "startup" if last_record is None else "stage-inactivity"
+                budget = args.startup_seconds if last_record is None else args.stall_seconds
+                idle = time.monotonic() - (started if last_record is None else last_progress)
+                if idle >= budget:
                     emit("NATIVE_SCROLL_STALL " + json.dumps({
                         "idleSeconds": idle, "lastRecord": last_record,
-                        "diagnosticBudgetSeconds": args.stall_seconds,
+                        "diagnosticBudgetSeconds": budget, "diagnosticPhase": phase,
                     }, sort_keys=True), log)
                     sample = collect_sample(args, last_record, owner, log)
                     termination = terminate_own_group(process, owner)
@@ -510,13 +525,15 @@ def main() -> int:
                         "journalRecords": len(records_seen), "lastRecord": last_record,
                         "journalParseErrors": reader.errors,
                         "unavailablePIDRecords": unavailable_pid_records,
-                        "idleSeconds": idle, "diagnosticBudgetSeconds": args.stall_seconds,
+                        "idleSeconds": idle, "diagnosticBudgetSeconds": budget,
+                        "diagnosticPhase": phase, "startupBudgetSeconds": args.startup_seconds,
+                        "inactivityBudgetSeconds": args.stall_seconds,
                         "sample": sample, "termination": termination,
                         "commandReturnCodeAfterTermination": process.poll(),
                         "elapsedSeconds": time.monotonic() - started,
                     })
                     return 124
-                output_ready(min(0.1, args.stall_seconds - idle))
+                output_ready(min(0.1, budget - idle))
         except KeyboardInterrupt:
             termination = terminate_own_group(process, owner)
             write_json(args.report, {"outcome": "interrupted", "wrapperExitCode": 130,

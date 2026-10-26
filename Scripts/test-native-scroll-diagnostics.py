@@ -49,7 +49,7 @@ class WatchdogTests(unittest.TestCase):
         path.write_text(textwrap.dedent(body))
         return [sys.executable, str(path), str(self.journal)]
 
-    def run_case(self, body, *, budget=0.15, sample_command=None, deny_zero_probe=False):
+    def run_case(self, body, *, budget=0.15, startup_budget=2.0, sample_command=None, deny_zero_probe=False):
         command = self.command(body)
         launch = [sys.executable, str(WRAPPER)]
         if deny_zero_probe:
@@ -73,7 +73,7 @@ class WatchdogTests(unittest.TestCase):
             "--log", str(self.log), "--report", str(self.report),
             "--sample-output", str(self.sample), "--sample-log", str(self.sample_log),
             "--sample-command", str(sample_command or self.sample_command),
-            "--stall-seconds", str(budget), "--", *command,
+            "--stall-seconds", str(budget), "--startup-seconds", str(startup_budget), "--", *command,
         ], capture_output=True, text=True, timeout=15)
         return result, json.loads(self.report.read_text())
 
@@ -89,6 +89,69 @@ class WatchdogTests(unittest.TestCase):
         self.assertEqual(report["lastRecord"]["stage"], "test-complete")
         self.assertIn("native checks passed", self.log.read_text())
         self.assertFalse(self.sample.exists())
+
+    def test_cold_start_is_not_charged_to_stage_inactivity(self):
+        result, report = self.run_case("""
+            import json, os, pathlib, sys, time
+            time.sleep(0.30)  # Deliberate bootstrap, before any native stage.
+            pathlib.Path(sys.argv[1]).write_text(json.dumps({'testProcessID': os.getpid(), 'stage': 'first-stage'}) + '\\n')
+        """, budget=0.10, startup_budget=2.0)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(report["journalRecords"], 1)
+        self.assertEqual(report["lastRecord"]["stage"], "first-stage")
+        self.assertGreater(report["elapsedSeconds"], 0.30)
+        self.assertFalse(self.sample.exists())
+
+    def test_stage_inactivity_budget_starts_at_the_verified_stage(self):
+        result, report = self.run_case("""
+            import json, os, pathlib, sys, time
+            time.sleep(0.30)  # Bootstrap is longer than the stage budget.
+            pathlib.Path(sys.argv[1]).write_text(json.dumps({'testProcessID': os.getpid(), 'stage': 'native-stalled'}) + '\\n')
+            time.sleep(60)
+        """, budget=0.10, startup_budget=2.0)
+        self.assertEqual(result.returncode, 124, result.stdout + result.stderr)
+        self.assertEqual(report["diagnosticPhase"], "stage-inactivity")
+        self.assertEqual(report["diagnosticBudgetSeconds"], 0.10)
+        self.assertEqual(report["startupBudgetSeconds"], 2.0)
+        self.assertEqual(report["lastRecord"]["stage"], "native-stalled")
+        self.assertTrue(report["sample"]["attempted"])
+        self.assertEqual(report["sample"]["returnCode"], 0)
+
+    def test_foreign_fault_after_cold_start_is_rejected_not_misreported_as_stall(self):
+        foreign_pid = os.getpid()
+        result, report = self.run_case(f"""
+            import json, pathlib, sys, time
+            time.sleep(0.30)
+            pathlib.Path(sys.argv[1]).write_text(json.dumps({{'testProcessID': {foreign_pid}, 'stage': 'foreign-after-bootstrap'}}) + '\\n')
+            time.sleep(60)
+        """, budget=0.10, startup_budget=2.0)
+        self.assertEqual(result.returncode, 125, result.stdout + result.stderr)
+        self.assertEqual(report["outcome"], "diagnostic-journal-invalid")
+        self.assertIn("no parent chain to own driver", report["reason"])
+        self.assertNotIn("sample", report)
+        self.assertFalse(self.sample.exists())
+        os.kill(foreign_pid, 0)
+
+    def test_unadmitted_foreign_ps_fallback_cannot_bypass_ownership(self):
+        driver = subprocess.Popen(['/bin/sleep', '60'], start_new_session=True)
+        foreign = subprocess.Popen(['/bin/sleep', '60'], start_new_session=True)
+        owner = DIAGNOSTICS.OwnedCommand(driver.pid)
+        try:
+            self.assertTrue(owner.verify(driver.pid)[0])
+            table = owner.table()
+            table[foreign.pid] = dict(table[foreign.pid], state='R<', command='(sleep)')
+            valid, reason, unavailable = owner.verify(foreign.pid, table)
+            self.assertFalse(valid)
+            self.assertFalse(unavailable)
+            self.assertIn('no parent chain to own driver', reason)
+            self.assertNotIn(foreign.pid, owner.admitted)
+            with mock.patch.object(owner, 'table', return_value=table):
+                self.assertFalse(any(entry['pid'] == foreign.pid for entry in owner.current()))
+            self.assertIsNone(foreign.poll())
+        finally:
+            for child in [foreign, driver]:
+                child.terminate()
+                child.wait(timeout=3)
 
     def test_command_failure_code_is_preserved(self):
         result, report = self.run_case("""
@@ -182,9 +245,14 @@ class WatchdogTests(unittest.TestCase):
             fresh_owner = DIAGNOSTICS.OwnedCommand(child.pid)
             valid, reason, gone = fresh_owner.verify(child.pid, table)
             self.assertFalse(valid)
-            self.assertFalse(gone)
-            self.assertIn('no readable executable identity to admit', reason)
+            self.assertTrue(gone)
+            self.assertIn('executable identity is unavailable before admission', reason)
             self.assertEqual(fresh_owner.admitted, {})
+            with mock.patch.object(fresh_owner, 'table', return_value=table):
+                self.assertEqual(fresh_owner.current(), [])
+                result = DIAGNOSTICS.collect_sample(args, {'testProcessID': child.pid}, fresh_owner, io.BytesIO())
+            self.assertFalse(result['attempted'])
+            self.assertFalse(self.sample.exists())
         finally:
             child.terminate()
             child.wait(timeout=3)
@@ -299,8 +367,10 @@ class WatchdogTests(unittest.TestCase):
             runner.chmod(0o755)
             child = subprocess.Popen([str(runner), '60'], start_new_session=True)
             child.wait()
-        """, budget=0.3)
+        """, budget=0.3, startup_budget=2.0)
         self.assertEqual(result.returncode, 124, result.stdout + result.stderr)
+        self.assertEqual(report["diagnosticPhase"], "startup")
+        self.assertEqual(report["diagnosticBudgetSeconds"], 2.0)
         self.assertEqual(report["sample"]["samplingRole"], "owned-native-test-runner-candidate")
         identity = report["sample"]["verifiedProcessIdentity"]
         self.assertEqual(identity["processGroup"], identity["pid"])
@@ -335,8 +405,9 @@ class WatchdogTests(unittest.TestCase):
         result, report = self.run_case("""
             import time
             time.sleep(60)
-        """)
+        """, startup_budget=0.15)
         self.assertEqual(result.returncode, 124)
+        self.assertEqual(report["diagnosticPhase"], "startup")
         self.assertTrue(report["sample"]["attempted"])
         self.assertNotIn("testProcessID", report["sample"])
         self.assertEqual(report["sample"]["sampledProcessID"], report["ownProcessGroup"])
@@ -354,8 +425,10 @@ class WatchdogTests(unittest.TestCase):
             child = subprocess.Popen([str(runner), '60'])
             pathlib.Path({str(actual_pid_file)!r}).write_text(str(child.pid))
             child.wait()
-        """, budget=0.3)
+        """, budget=0.3, startup_budget=2.0)
         self.assertEqual(result.returncode, 124, result.stdout + result.stderr)
+        self.assertEqual(report["diagnosticPhase"], "startup")
+        self.assertEqual(report["diagnosticBudgetSeconds"], 2.0)
         self.assertTrue(report["sample"]["attempted"])
         self.assertNotIn("testProcessID", report["sample"])
         actual = int(actual_pid_file.read_text())
@@ -374,8 +447,9 @@ class WatchdogTests(unittest.TestCase):
             result, report = self.run_case("""
                 import time
                 time.sleep(60)
-            """)
+            """, startup_budget=0.15)
             self.assertEqual(result.returncode, 124)
+            self.assertEqual(report["diagnosticPhase"], "startup")
             self.assertEqual(report["sample"]["samplingRole"], "owned-command-driver")
             self.assertNotEqual(report["sample"]["sampledProcessID"], foreign.pid)
             self.assertTrue(all(entry["pid"] != foreign.pid for entry in
@@ -434,13 +508,18 @@ class WatchdogTests(unittest.TestCase):
         self.assertTrue(report["termination"])
 
     def test_nonfinite_budgets_are_rejected_before_launch(self):
-        for budget in ["nan", "inf", "-inf"]:
-            result = subprocess.run([
-                sys.executable, str(WRAPPER), "--stall-seconds=" + budget,
-                "--", sys.executable, "-c", "raise RuntimeError('must not launch')",
-            ], capture_output=True, text=True, timeout=5)
-            self.assertEqual(result.returncode, 2)
-            self.assertIn("finite and positive", result.stderr)
+        with mock.patch.object(sys, "argv", [str(WRAPPER), "--", sys.executable, "-c", "pass"]):
+            defaults = DIAGNOSTICS.parse_arguments()
+        self.assertEqual(defaults.startup_seconds, 30.0)
+        self.assertEqual(defaults.stall_seconds, 30.0)
+        for option in ["--stall-seconds", "--startup-seconds"]:
+            for budget in ["nan", "inf", "-inf"]:
+                result = subprocess.run([
+                    sys.executable, str(WRAPPER), option + "=" + budget,
+                    "--", sys.executable, "-c", "raise RuntimeError('must not launch')",
+                ], capture_output=True, text=True, timeout=5)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("finite and positive", result.stderr)
 
     def test_budget_tracks_stage_progress_not_total_runtime(self):
         result, report = self.run_case("""
