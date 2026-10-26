@@ -1,34 +1,40 @@
 {
-  "fill" : "automatic",
-  "groups" : [
+  "fill": {
+    "linear-gradient": [
+      "srgb:0.38039,0.30980,0.72941,1.00000",
+      "srgb:0.09020,0.13333,0.29804,1.00000"
+    ]
+  },
+  "fill-specializations": [
     {
-      "layers" : [
-        {
-          "image-name" : "ChatGPT Image Aug 16, 2026, 03_05_19 AM.png",
-          "name" : "ChatGPT Image Aug 16, 2026, 03_05_19 AM",
-          "position" : {
-            "scale" : 1.4,
-            "translation-in-points" : [
-              0,
-              34.15625
-            ]
-          }
-        }
-      ],
-      "shadow" : {
-        "kind" : "neutral",
-        "opacity" : 0.5
-      },
-      "translucency" : {
-        "enabled" : true,
-        "value" : 0.5
+      "appearance": "dark",
+      "value": {
+        "linear-gradient": [
+          "srgb:0.20000,0.17255,0.43529,1.00000",
+          "srgb:0.04706,0.07059,0.16471,1.00000"
+        ]
       }
     }
   ],
-  "supported-platforms" : {
-    "circles" : [
-      "watchOS"
-    ],
-    "squares" : "shared"
+  "groups": [
+    {
+      "layers": [
+        {
+          "image-name": "ListeningWave.svg",
+          "name": "QieTing Listening Wave"
+        }
+      ],
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0.25
+      },
+      "translucency": {
+        "enabled": true,
+        "value": 0.15
+      }
+    }
+  ],
+  "supported-platforms": {
+    "squares": "shared"
   }
 }

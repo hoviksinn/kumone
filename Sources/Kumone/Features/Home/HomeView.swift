@@ -130,7 +130,7 @@ struct HomeView: View {
 
     private var loadingBody: some View {
         VStack(alignment: .leading, spacing: 32) {
-            ScrollView(.horizontal, showsIndicators: false) {
+            ScrollView(.horizontal) {
                 HStack(spacing: 16) {
                     ForEach(0..<3, id: \.self) { _ in
                         SkeletonView(cornerRadius: Theme.Radius.large)
@@ -138,6 +138,7 @@ struct HomeView: View {
                     }
                 }
             }
+            .scrollIndicators(.never, axes: .horizontal)
             SkeletonShelf()
             SkeletonShelf()
         }
@@ -176,6 +177,7 @@ struct HomeView: View {
                             }
                         }
                         .buttonStyle(.plain)
+                        .navigationCardLink()
                     }
                 }
             }
@@ -187,6 +189,7 @@ struct HomeView: View {
                             toplistCard(toplist)
                         }
                         .buttonStyle(.plain)
+                        .navigationCardLink()
                     }
                 }
             }
@@ -197,7 +200,7 @@ struct HomeView: View {
                         .padding(.horizontal, Theme.Layout.contentInset)
                     GeometryReader { geometry in
                         let size = Theme.Layout.fittedShelfCardSize(availableWidth: geometry.size.width, leadingInset: Theme.Layout.contentInset)
-                        ScrollView(.horizontal, showsIndicators: false) {
+                        ScrollView(.horizontal) {
                             LazyHStack(alignment: .top, spacing: 16) {
                                 ForEach(model.newAlbums) { album in
                                     albumCard(album, size: size)
@@ -206,6 +209,7 @@ struct HomeView: View {
                             .padding(.horizontal, Theme.Layout.contentInset)
                             .frame(height: Theme.Layout.coverShelfHeight)
                         }
+                        .scrollIndicators(.never, axes: .horizontal)
                     }
                     .frame(height: Theme.Layout.coverShelfHeight)
                 }
@@ -228,7 +232,7 @@ struct HomeView: View {
     // MARK: - Feature cards
 
     private var featureCards: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
+        ScrollView(.horizontal) {
             HStack(spacing: 16) {
                 Color.clear.frame(width: max(0, Theme.Layout.contentInset - 16), height: 1)
                 if account.isLoggedIn {
@@ -242,6 +246,7 @@ struct HomeView: View {
                         )
                     }
                     .buttonStyle(.plain)
+                    .navigationCardLink()
 
                     Button {
                         player.startFM()
@@ -255,6 +260,7 @@ struct HomeView: View {
                         )
                     }
                     .buttonStyle(.interactiveCard)
+                    .navigationCardLink()
 
                     Button {
                         startHeartbeatMode()
@@ -268,11 +274,13 @@ struct HomeView: View {
                         )
                     }
                     .buttonStyle(.interactiveCard)
+                    .navigationCardLink()
                 }
                 Color.clear.frame(width: max(0, Theme.Layout.contentInset - 16), height: 1)
             }
             .padding(.vertical, 6)
         }
+        .scrollIndicators(.never, axes: .horizontal)
         .compatScrollClipDisabled()
     }
 
@@ -312,6 +320,7 @@ struct HomeView: View {
             }
         }
         .buttonStyle(.plain)
+        .navigationCardLink()
     }
 
     private func albumCard(_ album: AlbumSummary, size: CGFloat) -> some View {
@@ -331,6 +340,7 @@ struct HomeView: View {
             }
         }
         .buttonStyle(.plain)
+        .navigationCardLink()
     }
 
     private func artistCard(_ artist: ArtistSummary) -> some View {
@@ -348,6 +358,7 @@ struct HomeView: View {
             .frame(width: 140)
         }
         .buttonStyle(.plain)
+        .navigationCardLink()
     }
 
     private func toplistCard(_ toplist: ToplistItem) -> some View {

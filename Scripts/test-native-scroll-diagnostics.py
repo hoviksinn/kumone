@@ -1,0 +1,540 @@
+#!/usr/bin/env python3
+"""Exercise the diagnostic harness with disposable processes on Linux/macOS."""
+
+import json
+import importlib.util
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import textwrap
+import time
+import unittest
+from unittest import mock
+from types import SimpleNamespace
+import io
+
+
+WRAPPER = Path(__file__).with_name("run-native-scroll-diagnostics.py")
+SPEC = importlib.util.spec_from_file_location("native_scroll_diagnostics_under_test", WRAPPER)
+assert SPEC is not None and SPEC.loader is not None
+DIAGNOSTICS = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(DIAGNOSTICS)
+
+
+class WatchdogTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="native-scroll-watchdog-")
+        self.root = Path(self.temporary.name)
+        self.journal = self.root / "journal.jsonl"
+        self.log = self.root / "command.log"
+        self.report = self.root / "report.json"
+        self.sample = self.root / "sample.txt"
+        self.sample_log = self.root / "sample-command.log"
+        self.sample_command = self.root / "fake-sample.py"
+        self.sample_command.write_text(
+            "#!" + sys.executable + "\n"
+            "import pathlib, sys\n"
+            "pathlib.Path(sys.argv[sys.argv.index('-file') + 1]).write_text('sampled actual PID ' + sys.argv[1])\n"
+            "print('sample collector ran')\n"
+        )
+        self.sample_command.chmod(0o755)
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def command(self, body):
+        path = self.root / "fixture.py"
+        path.write_text(textwrap.dedent(body))
+        return [sys.executable, str(path), str(self.journal)]
+
+    def run_case(self, body, *, budget=0.15, startup_budget=2.0, sample_command=None, deny_zero_probe=False):
+        command = self.command(body)
+        launch = [sys.executable, str(WRAPPER)]
+        if deny_zero_probe:
+            # Exercise Darwin's observed cleanup error path on Linux too,
+            # without modifying the tested signal sends or their ownership.
+            bootstrap = self.root / 'deny-zero-probe.py'
+            bootstrap.write_text(
+                "import errno, os, runpy, sys\n"
+                "original = os.kill\n"
+                "def kill(pid, action):\n"
+                "    if action == 0:\n"
+                "        raise PermissionError(errno.EPERM, 'simulated Darwin PID probe denial')\n"
+                "    return original(pid, action)\n"
+                "os.kill = kill\n"
+                "sys.argv = sys.argv[1:]\n"
+                "runpy.run_path(sys.argv[0], run_name='__main__')\n"
+            )
+            launch = [sys.executable, str(bootstrap), str(WRAPPER)]
+        result = subprocess.run([
+            *launch, "--journal", str(self.journal),
+            "--log", str(self.log), "--report", str(self.report),
+            "--sample-output", str(self.sample), "--sample-log", str(self.sample_log),
+            "--sample-command", str(sample_command or self.sample_command),
+            "--stall-seconds", str(budget), "--startup-seconds", str(startup_budget), "--", *command,
+        ], capture_output=True, text=True, timeout=15)
+        return result, json.loads(self.report.read_text())
+
+    def test_success_keeps_partial_final_line_out_of_records(self):
+        result, report = self.run_case("""
+            import json, os, pathlib, sys
+            path = pathlib.Path(sys.argv[1])
+            path.write_text(json.dumps({'testProcessID': os.getpid(), 'stage': 'test-complete'}) + '\\n' + '{"stage":')
+            print('native checks passed')
+        """)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(report["journalRecords"], 1)
+        self.assertEqual(report["lastRecord"]["stage"], "test-complete")
+        self.assertIn("native checks passed", self.log.read_text())
+        self.assertFalse(self.sample.exists())
+
+    def test_cold_start_is_not_charged_to_stage_inactivity(self):
+        result, report = self.run_case("""
+            import json, os, pathlib, sys, time
+            time.sleep(0.30)  # Deliberate bootstrap, before any native stage.
+            pathlib.Path(sys.argv[1]).write_text(json.dumps({'testProcessID': os.getpid(), 'stage': 'first-stage'}) + '\\n')
+        """, budget=0.10, startup_budget=2.0)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(report["journalRecords"], 1)
+        self.assertEqual(report["lastRecord"]["stage"], "first-stage")
+        self.assertGreater(report["elapsedSeconds"], 0.30)
+        self.assertFalse(self.sample.exists())
+
+    def test_stage_inactivity_budget_starts_at_the_verified_stage(self):
+        result, report = self.run_case("""
+            import json, os, pathlib, sys, time
+            time.sleep(0.30)  # Bootstrap is longer than the stage budget.
+            pathlib.Path(sys.argv[1]).write_text(json.dumps({'testProcessID': os.getpid(), 'stage': 'native-stalled'}) + '\\n')
+            time.sleep(60)
+        """, budget=0.10, startup_budget=2.0)
+        self.assertEqual(result.returncode, 124, result.stdout + result.stderr)
+        self.assertEqual(report["diagnosticPhase"], "stage-inactivity")
+        self.assertEqual(report["diagnosticBudgetSeconds"], 0.10)
+        self.assertEqual(report["startupBudgetSeconds"], 2.0)
+        self.assertEqual(report["lastRecord"]["stage"], "native-stalled")
+        self.assertTrue(report["sample"]["attempted"])
+        self.assertEqual(report["sample"]["returnCode"], 0)
+
+    def test_foreign_fault_after_cold_start_is_rejected_not_misreported_as_stall(self):
+        foreign_pid = os.getpid()
+        result, report = self.run_case(f"""
+            import json, pathlib, sys, time
+            time.sleep(0.30)
+            pathlib.Path(sys.argv[1]).write_text(json.dumps({{'testProcessID': {foreign_pid}, 'stage': 'foreign-after-bootstrap'}}) + '\\n')
+            time.sleep(60)
+        """, budget=0.10, startup_budget=2.0)
+        self.assertEqual(result.returncode, 125, result.stdout + result.stderr)
+        self.assertEqual(report["outcome"], "diagnostic-journal-invalid")
+        self.assertIn("no parent chain to own driver", report["reason"])
+        self.assertNotIn("sample", report)
+        self.assertFalse(self.sample.exists())
+        os.kill(foreign_pid, 0)
+
+    def test_unadmitted_foreign_ps_fallback_cannot_bypass_ownership(self):
+        driver = subprocess.Popen(['/bin/sleep', '60'], start_new_session=True)
+        foreign = subprocess.Popen(['/bin/sleep', '60'], start_new_session=True)
+        owner = DIAGNOSTICS.OwnedCommand(driver.pid)
+        try:
+            self.assertTrue(owner.verify(driver.pid)[0])
+            table = owner.table()
+            table[foreign.pid] = dict(table[foreign.pid], state='R<', command='(sleep)')
+            valid, reason, unavailable = owner.verify(foreign.pid, table)
+            self.assertFalse(valid)
+            self.assertFalse(unavailable)
+            self.assertIn('no parent chain to own driver', reason)
+            self.assertNotIn(foreign.pid, owner.admitted)
+            with mock.patch.object(owner, 'table', return_value=table):
+                self.assertFalse(any(entry['pid'] == foreign.pid for entry in owner.current()))
+            self.assertIsNone(foreign.poll())
+        finally:
+            for child in [foreign, driver]:
+                child.terminate()
+                child.wait(timeout=3)
+
+    def test_command_failure_code_is_preserved(self):
+        result, report = self.run_case("""
+            import sys
+            print('expected test failure')
+            sys.exit(23)
+        """)
+        self.assertEqual(result.returncode, 23)
+        self.assertEqual(report["commandReturnCode"], 23)
+
+    def wait_for_unreaped_zombie(self, process, owner):
+        # Inspect the real dead child without Popen.poll()/wait(), which would
+        # reap it and erase precisely the process-table state under test.
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            table = owner.table()
+            entry = table.get(process.pid)
+            if entry and entry["state"].startswith('Z'):
+                return table
+            time.sleep(0.01)
+        self.fail('The terminated child did not become an observable unreaped zombie')
+
+    def test_real_zombie_is_unavailable_without_replacing_live_identity(self):
+        child = subprocess.Popen(['/bin/sleep', '60'], start_new_session=True)
+        owner = DIAGNOSTICS.OwnedCommand(child.pid)
+        try:
+            valid, _, gone = owner.verify(child.pid)
+            self.assertTrue(valid)
+            self.assertFalse(gone)
+            admitted = dict(owner.admitted[child.pid])
+            child.terminate()
+            table = self.wait_for_unreaped_zombie(child, owner)
+            valid, reason, gone = owner.verify(child.pid, table)
+            self.assertFalse(valid)
+            self.assertTrue(gone, reason)
+            self.assertIn('unavailable zombie', reason)
+            self.assertIn('"expected"', reason)
+            self.assertIn('"observed"', reason)
+            self.assertEqual(owner.admitted[child.pid], admitted)
+            self.assertFalse(any(entry['pid'] == child.pid for entry in owner.current()))
+        finally:
+            child.terminate()
+            child.wait(timeout=3)
+
+    def test_live_command_change_and_zombie_birth_change_are_rejected(self):
+        child = subprocess.Popen(['/bin/sleep', '60'], start_new_session=True)
+        owner = DIAGNOSTICS.OwnedCommand(child.pid)
+        try:
+            self.assertTrue(owner.verify(child.pid)[0])
+            original = owner.table()
+            for changes in [{'command': 'different-live-command'},
+                            {'state': 'Z', 'command': '<defunct>', 'startedAt': 'different-birth'},
+                            {'state': 'R<', 'command': '(sleep)', 'startedAt': 'different-birth'},
+                            {'state': 'R<', 'command': '(sleep)', 'processGroup': child.pid + 1},
+                            {'state': 'R<', 'command': '/different/path/sleep'},
+                            {'state': 'R<', 'command': '(another-name)'}]:
+                table = dict(original)
+                table[child.pid] = dict(original[child.pid], **changes)
+                valid, reason, gone = owner.verify(child.pid, table)
+                self.assertFalse(valid)
+                self.assertFalse(gone)
+                self.assertIn('no longer matches its admitted process identity', reason)
+                self.assertIn('"expected"', reason)
+                self.assertIn('"observed"', reason)
+        finally:
+            child.terminate()
+            child.wait(timeout=3)
+
+    def test_exact_apple_ps_fallback_is_unavailable_never_live_or_sampled(self):
+        child = subprocess.Popen(['/bin/sleep', '60'], start_new_session=True)
+        owner = DIAGNOSTICS.OwnedCommand(child.pid)
+        try:
+            self.assertTrue(owner.verify(child.pid)[0])
+            admitted = dict(owner.admitted[child.pid])
+            original = owner.table()
+            for state in ['S<', 'R<']:
+                table = dict(original)
+                table[child.pid] = dict(original[child.pid], command='(sleep)', state=state)
+                valid, reason, gone = owner.verify(child.pid, table)
+                self.assertFalse(valid)
+                self.assertTrue(gone, reason)
+                self.assertIn('matching Darwin ps fallback', reason)
+                self.assertEqual(owner.admitted[child.pid], admitted)
+                args = SimpleNamespace(sample_output=self.sample, sample_log=self.sample_log,
+                                       sample_command=str(self.sample_command))
+                with mock.patch.object(owner, 'table', return_value=table):
+                    self.assertEqual(owner.current(), [])
+                    result = DIAGNOSTICS.collect_sample(args, {'testProcessID': child.pid}, owner, io.BytesIO())
+                self.assertFalse(result['attempted'])
+                self.assertFalse(self.sample.exists())
+            fresh_owner = DIAGNOSTICS.OwnedCommand(child.pid)
+            valid, reason, gone = fresh_owner.verify(child.pid, table)
+            self.assertFalse(valid)
+            self.assertTrue(gone)
+            self.assertIn('executable identity is unavailable before admission', reason)
+            self.assertEqual(fresh_owner.admitted, {})
+            with mock.patch.object(fresh_owner, 'table', return_value=table):
+                self.assertEqual(fresh_owner.current(), [])
+                result = DIAGNOSTICS.collect_sample(args, {'testProcessID': child.pid}, fresh_owner, io.BytesIO())
+            self.assertFalse(result['attempted'])
+            self.assertFalse(self.sample.exists())
+        finally:
+            child.terminate()
+            child.wait(timeout=3)
+
+    def test_apple_ps_fallback_requires_the_exact_admitted_kernel_short_name(self):
+        expected = '/Applications/Xcode.app/usr/libexec/swift/pm/swiftpm-testing-helper'
+        self.assertTrue(DIAGNOSTICS.OwnedCommand.unavailable_command_path(expected, '(swiftpm-testing-)'))
+        for observed in ['(swiftpm-testing)', '(swiftpm-testing-helper)', '(swiftpm-other---)',
+                         'swiftpm-testing-', '/other/path/swiftpm-testing-helper']:
+            self.assertFalse(DIAGNOSTICS.OwnedCommand.unavailable_command_path(expected, observed))
+        self.assertFalse(DIAGNOSTICS.OwnedCommand.unavailable_command_path('(swiftpm-testing-)', '(swiftpm-testing-)'))
+
+    def test_foreign_zombie_does_not_bypass_parent_chain_validation(self):
+        driver = subprocess.Popen(['/bin/sleep', '60'], start_new_session=True)
+        foreign = subprocess.Popen(['/bin/sleep', '60'], start_new_session=True)
+        owner = DIAGNOSTICS.OwnedCommand(driver.pid)
+        try:
+            self.assertTrue(owner.verify(driver.pid)[0])
+            foreign.terminate()
+            table = self.wait_for_unreaped_zombie(foreign, owner)
+            valid, reason, gone = owner.verify(foreign.pid, table)
+            self.assertFalse(valid)
+            self.assertFalse(gone)
+            self.assertIn('no parent chain to own driver', reason)
+            self.assertNotIn(foreign.pid, owner.admitted)
+        finally:
+            for process in [foreign, driver]:
+                process.terminate()
+                process.wait(timeout=3)
+
+    def test_denied_zero_probe_preserves_stall_failure_and_stack_evidence(self):
+        result, report = self.run_case("""
+            import json, os, pathlib, signal, sys, time
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
+            pathlib.Path(sys.argv[1]).write_text(json.dumps({'testProcessID': os.getpid(), 'stage': 'native-call-enter'}) + '\\n')
+            time.sleep(60)
+        """, deny_zero_probe=True)
+        self.assertEqual(result.returncode, 124, result.stdout + result.stderr)
+        self.assertEqual(report["outcome"], "diagnostic-stall-failure")
+        self.assertEqual(report["sample"]["returnCode"], 0)
+        self.assertTrue(self.sample.is_file())
+        self.assertTrue(any('signal-zero probe denied' in message for message in report["termination"]))
+        self.assertFalse(any('group absence is confirmed' in message for message in report["termination"]))
+        self.assertIsNotNone(report["commandReturnCodeAfterTermination"])
+
+    def test_denied_zero_probe_preserves_foreign_journal_failure(self):
+        foreign_pid = os.getpid()
+        result, report = self.run_case(f"""
+            import json, pathlib, signal, sys, time
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
+            pathlib.Path(sys.argv[1]).write_text(json.dumps({{'testProcessID': {foreign_pid}, 'stage': 'foreign-pid'}}) + '\\n')
+            time.sleep(60)
+        """, deny_zero_probe=True)
+        self.assertEqual(result.returncode, 125, result.stdout + result.stderr)
+        self.assertEqual(report["outcome"], "diagnostic-journal-invalid")
+        self.assertIn('no parent chain to own driver', report["reason"])
+        self.assertTrue(any('signal-zero probe denied' in message for message in report["termination"]))
+        self.assertNotIn('sample', report)
+        self.assertFalse(self.sample.exists())
+        os.kill(foreign_pid, 0)
+
+    def test_stall_samples_actual_test_child_pid_not_driver_pid(self):
+        child_source = (
+            "import json, os, pathlib, sys, time\n"
+            "pathlib.Path(sys.argv[1]).write_text(json.dumps({'testProcessID': os.getpid(), 'stage': 'scroll-enter'}) + '\\n')\n"
+            "time.sleep(60)\n"
+        )
+        result, report = self.run_case(
+            "import subprocess, sys\n"
+            f"child = subprocess.Popen([sys.executable, '-c', {child_source!r}, sys.argv[1]])\n"
+            "child.wait()\n"
+        )
+        self.assertEqual(result.returncode, 124, result.stdout + result.stderr)
+        self.assertEqual(report["outcome"], "diagnostic-stall-failure")
+        actual = report["lastRecord"]["testProcessID"]
+        self.assertNotEqual(actual, report["ownProcessGroup"])
+        self.assertEqual(report["sample"]["testProcessID"], actual)
+        self.assertIn(str(actual), self.sample.read_text())
+        self.assertEqual(report["sample"]["returnCode"], 0)
+        self.assertTrue(report["termination"])
+
+    def test_detached_test_group_is_validated_by_parent_chain_and_cleaned_up(self):
+        child_source = (
+            "import json, os, pathlib, sys, time\n"
+            "pathlib.Path(sys.argv[1]).write_text(json.dumps({'testProcessID': os.getpid(), 'stage': 'detached-native-call'}) + '\\n')\n"
+            "time.sleep(60)\n"
+        )
+        result, report = self.run_case(
+            "import subprocess, sys\n"
+            f"child = subprocess.Popen([sys.executable, '-c', {child_source!r}, sys.argv[1]], start_new_session=True)\n"
+            "child.wait()\n", budget=0.3
+        )
+        self.assertEqual(result.returncode, 124, result.stdout + result.stderr)
+        self.assertEqual(report["outcome"], "diagnostic-stall-failure")
+        actual = report["lastRecord"]["testProcessID"]
+        identity = report["sample"]["verifiedProcessIdentity"]
+        self.assertEqual(identity["pid"], actual)
+        self.assertEqual(identity["processGroup"], actual)
+        self.assertNotEqual(actual, report["ownProcessGroup"])
+        self.assertEqual(identity["verifiedParentChain"][-1], report["ownProcessGroup"])
+        self.assertEqual(report["sample"]["testProcessID"], actual)
+        self.assertIn(f'verified owned PID {actual}', '\n'.join(report["termination"]))
+        with self.assertRaises(ProcessLookupError):
+            os.kill(actual, 0)
+
+    def test_no_journal_known_detached_runner_is_verified_by_ancestry(self):
+        runner_path = self.root / 'swiftpm-testing'
+        result, report = self.run_case(f"""
+            import pathlib, shutil, subprocess
+            runner = pathlib.Path({str(runner_path)!r})
+            shutil.copyfile('/bin/sleep', runner)
+            runner.chmod(0o755)
+            child = subprocess.Popen([str(runner), '60'], start_new_session=True)
+            child.wait()
+        """, budget=0.3, startup_budget=2.0)
+        self.assertEqual(result.returncode, 124, result.stdout + result.stderr)
+        self.assertEqual(report["diagnosticPhase"], "startup")
+        self.assertEqual(report["diagnosticBudgetSeconds"], 2.0)
+        self.assertEqual(report["sample"]["samplingRole"], "owned-native-test-runner-candidate")
+        identity = report["sample"]["verifiedProcessIdentity"]
+        self.assertEqual(identity["processGroup"], identity["pid"])
+        self.assertNotEqual(identity["pid"], report["ownProcessGroup"])
+        self.assertEqual(identity["verifiedParentChain"][-1], report["ownProcessGroup"])
+        with self.assertRaises(ProcessLookupError):
+            os.kill(identity["pid"], 0)
+
+    def test_sample_failure_is_persisted_and_still_fails(self):
+        self.sample_command.write_text("#!" + sys.executable + "\nimport sys\nprint('collector failed')\nsys.exit(17)\n")
+        result, report = self.run_case("""
+            import json, os, pathlib, sys, time
+            pathlib.Path(sys.argv[1]).write_text(json.dumps({'testProcessID': os.getpid(), 'stage': 'display-enter'}) + '\\n')
+            time.sleep(60)
+        """)
+        self.assertEqual(result.returncode, 124)
+        self.assertEqual(report["sample"]["returnCode"], 17)
+        self.assertIn("collector failed", self.sample_log.read_text())
+        self.assertIn("status 17", report["sample"]["error"])
+
+    def test_missing_sample_executable_is_preserved_and_still_fails(self):
+        result, report = self.run_case("""
+            import json, os, pathlib, sys, time
+            pathlib.Path(sys.argv[1]).write_text(json.dumps({'testProcessID': os.getpid(), 'stage': 'layout-enter'}) + '\\n')
+            time.sleep(60)
+        """, sample_command=self.root / "no-sample-tool")
+        self.assertEqual(result.returncode, 124)
+        self.assertIn("cannot run sample", report["sample"]["error"])
+        self.assertIn("cannot run sample", self.sample_log.read_text())
+
+    def test_no_journal_labels_driver_sample_without_claiming_test_pid(self):
+        result, report = self.run_case("""
+            import time
+            time.sleep(60)
+        """, startup_budget=0.15)
+        self.assertEqual(result.returncode, 124)
+        self.assertEqual(report["diagnosticPhase"], "startup")
+        self.assertTrue(report["sample"]["attempted"])
+        self.assertNotIn("testProcessID", report["sample"])
+        self.assertEqual(report["sample"]["sampledProcessID"], report["ownProcessGroup"])
+        self.assertEqual(report["sample"]["samplingRole"], "owned-command-driver")
+        self.assertIn("not test stack", report["sample"]["samplingBasis"])
+
+    def test_no_journal_finds_known_owned_runner_and_preserves_driver_ancestry(self):
+        actual_pid_file = self.root / "actual-runner-pid"
+        runner_path = self.root / "swiftpm-testing"
+        result, report = self.run_case(f"""
+            import os, pathlib, shutil, subprocess
+            runner = pathlib.Path({str(runner_path)!r})
+            shutil.copyfile('/bin/sleep', runner)
+            runner.chmod(0o755)
+            child = subprocess.Popen([str(runner), '60'])
+            pathlib.Path({str(actual_pid_file)!r}).write_text(str(child.pid))
+            child.wait()
+        """, budget=0.3, startup_budget=2.0)
+        self.assertEqual(result.returncode, 124, result.stdout + result.stderr)
+        self.assertEqual(report["diagnosticPhase"], "startup")
+        self.assertEqual(report["diagnosticBudgetSeconds"], 2.0)
+        self.assertTrue(report["sample"]["attempted"])
+        self.assertNotIn("testProcessID", report["sample"])
+        actual = int(actual_pid_file.read_text())
+        self.assertEqual(report["sample"]["sampledProcessID"], actual)
+        self.assertNotEqual(actual, report["ownProcessGroup"])
+        self.assertEqual(report["sample"]["samplingRole"], "owned-native-test-runner-candidate")
+        self.assertIn(str(actual), self.sample.read_text())
+
+    def test_no_journal_does_not_select_foreign_known_runner(self):
+        runner = self.root / 'swiftpm-testing'
+        import shutil
+        shutil.copyfile('/bin/sleep', runner)
+        runner.chmod(0o755)
+        foreign = subprocess.Popen([str(runner), '60'], start_new_session=True)
+        try:
+            result, report = self.run_case("""
+                import time
+                time.sleep(60)
+            """, startup_budget=0.15)
+            self.assertEqual(result.returncode, 124)
+            self.assertEqual(report["diagnosticPhase"], "startup")
+            self.assertEqual(report["sample"]["samplingRole"], "owned-command-driver")
+            self.assertNotEqual(report["sample"]["sampledProcessID"], foreign.pid)
+            self.assertTrue(all(entry["pid"] != foreign.pid for entry in
+                                report["sample"]["ownedProcessSnapshot"]["processes"]))
+            self.assertIsNone(foreign.poll())
+        finally:
+            foreign.terminate()
+            foreign.wait(timeout=3)
+
+    def test_foreign_pid_is_neither_sampled_nor_signaled(self):
+        foreign_pid = os.getpid()
+        result, report = self.run_case(f"""
+            import json, pathlib, sys, time
+            pathlib.Path(sys.argv[1]).write_text(json.dumps({{'testProcessID': {foreign_pid}, 'stage': 'foreign-pid'}}) + '\\n')
+            time.sleep(60)
+        """)
+        self.assertEqual(result.returncode, 125)
+        self.assertEqual(report["outcome"], "diagnostic-journal-invalid")
+        self.assertNotIn("sample", report)
+        self.assertIn("no parent chain to own driver", report["reason"])
+        os.kill(foreign_pid, 0)
+        self.assertFalse(self.sample.exists())
+
+    def test_success_without_completed_journal_record_is_invalid(self):
+        result, report = self.run_case("""
+            print('driver zero is insufficient without the journal')
+        """)
+        self.assertEqual(result.returncode, 125)
+        self.assertEqual(report["outcome"], "diagnostic-journal-invalid")
+        self.assertIn("without a complete valid journal", report["reason"])
+
+    def test_completed_malformed_journal_is_invalid(self):
+        result, report = self.run_case("""
+            import pathlib, sys
+            pathlib.Path(sys.argv[1]).write_text('{broken}\\n')
+        """)
+        self.assertEqual(result.returncode, 125)
+        self.assertEqual(report["outcome"], "diagnostic-journal-invalid")
+        self.assertTrue(report["journalParseErrors"])
+
+    def test_unexpected_reader_error_terminates_own_group(self):
+        result, report = self.run_case("""
+            import pathlib, sys, time
+            journal = pathlib.Path(sys.argv[1])
+            journal.unlink()
+            journal.mkdir()
+            time.sleep(60)
+        """)
+        self.assertEqual(result.returncode, 125)
+        self.assertEqual(report["outcome"], "diagnostic-harness-error")
+        self.assertIn("IsADirectoryError", report["reason"])
+        self.assertIn("Traceback (most recent call last)", report["exceptionTraceback"])
+        self.assertIn("IsADirectoryError", report["exceptionTraceback"])
+        self.assertIn("reader.read()", report["exceptionTraceback"])
+        self.assertIn("NATIVE_SCROLL_DIAGNOSTIC_TRACEBACK", self.log.read_text())
+        self.assertTrue(report["termination"])
+
+    def test_nonfinite_budgets_are_rejected_before_launch(self):
+        with mock.patch.object(sys, "argv", [str(WRAPPER), "--", sys.executable, "-c", "pass"]):
+            defaults = DIAGNOSTICS.parse_arguments()
+        self.assertEqual(defaults.startup_seconds, 30.0)
+        self.assertEqual(defaults.stall_seconds, 30.0)
+        for option in ["--stall-seconds", "--startup-seconds"]:
+            for budget in ["nan", "inf", "-inf"]:
+                result = subprocess.run([
+                    sys.executable, str(WRAPPER), option + "=" + budget,
+                    "--", sys.executable, "-c", "raise RuntimeError('must not launch')",
+                ], capture_output=True, text=True, timeout=5)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("finite and positive", result.stderr)
+
+    def test_budget_tracks_stage_progress_not_total_runtime(self):
+        result, report = self.run_case("""
+            import json, os, pathlib, sys, time
+            with pathlib.Path(sys.argv[1]).open('a') as journal:
+                for index in range(7):
+                    journal.write(json.dumps({'testProcessID': os.getpid(), 'stage': 'phase-' + str(index)}) + '\\n')
+                    journal.flush()
+                    os.fsync(journal.fileno())
+                    time.sleep(0.06)
+        """, budget=0.2)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(report["journalRecords"], 7)
+        self.assertGreater(report["elapsedSeconds"], 0.2)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

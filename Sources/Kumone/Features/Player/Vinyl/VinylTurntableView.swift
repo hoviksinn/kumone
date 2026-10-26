@@ -11,10 +11,12 @@ public struct VinylTurntableView: View {
     public var onNextTrack: (() -> Void)? = nil
     public var onPreviousTrack: (() -> Void)? = nil
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var rotationState = RecordRotationState()
     @State private var dragOffset: CGFloat = 0
     @State private var isDragging = false
     @State private var isTransitioningTrack = false
+    @State private var trackChangeTask: Task<Void, Never>?
 
     public init(
         artworkImage: PlatformImage?,
@@ -42,7 +44,7 @@ public struct VinylTurntableView: View {
 
         return ZStack(alignment: .top) {
             // MARK: 1. Rotating Vinyl Disc (with horizontal drag & slide transitions)
-            TimelineView(.animation(paused: !isPlaying || isDragging || isTransitioningTrack)) { timeline in
+            TimelineView(.animation(paused: !isPlaying || reduceMotion || isDragging || isTransitioningTrack)) { timeline in
                 let currentAngle = rotationState.currentAngle(at: timeline.date)
 
                 VinylRecordView(artworkImage: artworkImage, size: discSize)
@@ -60,32 +62,41 @@ public struct VinylTurntableView: View {
             // MARK: 2. Tonearm (Placed at the top-center above the disc, reaching down)
             VinylTonearmView(
                 isPlaying: isPlaying && !isDragging && !isTransitioningTrack,
-                height: armHeight
+                height: armHeight,
+                reduceMotion: reduceMotion
             )
             .offset(x: discSize * 0.12, y: -armHeight * 0.08)
             .allowsHitTesting(false)
             .zIndex(2)
         }
         .frame(width: stageWidth, height: stageHeight, alignment: .top)
-        .onAppear {
-            if isPlaying {
-                rotationState.start(at: Date())
-            }
+        .onAppear { synchronizeRotation() }
+        .onChange(of: isPlaying) { _, _ in synchronizeRotation() }
+        .onChange(of: reduceMotion) { _, _ in synchronizeRotation() }
+        .onDisappear {
+            rotationState.stop(at: Date())
+            trackChangeTask?.cancel()
+            isTransitioningTrack = false
         }
-        .onChange(of: isPlaying) { playing in
-            if playing {
-                rotationState.start(at: Date())
-            } else {
-                rotationState.stop(at: Date())
-            }
-        }
-        .onChange(of: trackId) { _ in
-            // Temporarily lift tonearm on track change
+        .onChange(of: trackId) { _, _ in
+            trackChangeTask?.cancel()
+            guard !reduceMotion else { isTransitioningTrack = false; return }
             isTransitioningTrack = true
-            Task { @MainActor in
-                try? await Task.sleep(nanoseconds: 320_000_000)
+            trackChangeTask = Task { @MainActor in
+                do { try await Task.sleep(for: .milliseconds(320)) }
+                catch { return }
                 isTransitioningTrack = false
             }
+        }
+    }
+
+    private func synchronizeRotation() {
+        if isPlaying && !reduceMotion {
+            rotationState.start(at: Date())
+        } else {
+            // Freeze the current angle; resuming Reduce Motion must not
+            // accumulate an invisible wall-time rotation or reset the disc.
+            rotationState.stop(at: Date())
         }
     }
 
@@ -103,39 +114,49 @@ public struct VinylTurntableView: View {
                 }
             }
             .onEnded { value in
+                if reduceMotion {
+                    if value.translation.width < -45 || value.predictedEndTranslation.width < -100 {
+                        onNextTrack?()
+                    } else if value.translation.width > 45 || value.predictedEndTranslation.width > 100 {
+                        onPreviousTrack?()
+                    }
+                    dragOffset = 0
+                    isDragging = false
+                    return
+                }
                 let translation = value.translation.width
                 let velocity = value.predictedEndTranslation.width
                 let swipeThreshold: CGFloat = 45
 
                 if translation < -swipeThreshold || velocity < -100 {
                     // Swipe Left -> Next Track (下一首)
-                    withAnimation(.easeOut(duration: 0.20)) {
+                    withAnimation(reduceMotion ? nil : .easeOut(duration: 0.20)) {
                         dragOffset = -discSize * 1.25
                     }
                     onNextTrack?()
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) {
                         dragOffset = discSize * 1.25
-                        withAnimation(.spring(response: 0.38, dampingFraction: 0.80)) {
+                        withAnimation(reduceMotion ? nil : .spring(response: 0.38, dampingFraction: 0.80)) {
                             dragOffset = 0
                             isDragging = false
                         }
                     }
                 } else if translation > swipeThreshold || velocity > 100 {
                     // Swipe Right -> Previous Track (上一首)
-                    withAnimation(.easeOut(duration: 0.20)) {
+                    withAnimation(reduceMotion ? nil : .easeOut(duration: 0.20)) {
                         dragOffset = discSize * 1.25
                     }
                     onPreviousTrack?()
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) {
                         dragOffset = -discSize * 1.25
-                        withAnimation(.spring(response: 0.38, dampingFraction: 0.80)) {
+                        withAnimation(reduceMotion ? nil : .spring(response: 0.38, dampingFraction: 0.80)) {
                             dragOffset = 0
                             isDragging = false
                         }
                     }
                 } else {
                     // Reset back to center
-                    withAnimation(.spring(response: 0.32, dampingFraction: 0.76)) {
+                    withAnimation(reduceMotion ? nil : .spring(response: 0.32, dampingFraction: 0.76)) {
                         dragOffset = 0
                         isDragging = false
                     }

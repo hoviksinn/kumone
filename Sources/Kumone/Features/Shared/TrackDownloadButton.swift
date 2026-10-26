@@ -5,6 +5,19 @@ struct TrackDownloadButton: View {
     let track: Track
     var isVisible = true
 
+    var body: some View {
+        if SongDownloadUI.isAvailable {
+            AvailableTrackDownloadButton(track: track, isVisible: isVisible)
+        }
+    }
+}
+
+/// Keep the original implementation recoverable without constructing its
+/// download observers for controls that the product currently hides.
+private struct AvailableTrackDownloadButton: View {
+    let track: Track
+    var isVisible = true
+
     @ObservedObject private var state: TrackDownloadState
     @EnvironmentObject private var account: AccountStore
     @EnvironmentObject private var settings: SettingsManager

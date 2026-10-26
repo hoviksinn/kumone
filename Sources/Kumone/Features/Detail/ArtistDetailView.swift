@@ -40,7 +40,7 @@ struct ArtistDetailView: View {
                         SectionHeader(title: "专辑")
                             .padding(.horizontal, Theme.Layout.contentInset)
 
-                        ScrollView(.horizontal, showsIndicators: false) {
+                        ScrollView(.horizontal) {
                             HStack(spacing: 16) {
                                 Spacer().frame(width: (Theme.Layout.contentInset) - 16)
                                 ForEach(albums) { album in
@@ -49,13 +49,14 @@ struct ArtistDetailView: View {
                                 Spacer().frame(width: (Theme.Layout.contentInset) - 16)
                             }
                         }
+                        .scrollIndicators(.never, axes: .horizontal)
                     }
 
                     if !epsAndSingles.isEmpty {
                         SectionHeader(title: "EP 与单曲")
                             .padding(.horizontal, Theme.Layout.contentInset)
 
-                        ScrollView(.horizontal, showsIndicators: false) {
+                        ScrollView(.horizontal) {
                             HStack(spacing: 16) {
                                 Spacer().frame(width: (Theme.Layout.contentInset) - 16)
                                 ForEach(epsAndSingles) { album in
@@ -64,13 +65,14 @@ struct ArtistDetailView: View {
                                 Spacer().frame(width: (Theme.Layout.contentInset) - 16)
                             }
                         }
+                        .scrollIndicators(.never, axes: .horizontal)
                     }
 
                     if !similar.isEmpty {
                         SectionHeader(title: "相似歌手")
                             .padding(.horizontal, Theme.Layout.contentInset)
 
-                        ScrollView(.horizontal, showsIndicators: false) {
+                        ScrollView(.horizontal) {
                             HStack(spacing: 16) {
                                 Spacer().frame(width: (Theme.Layout.contentInset) - 16)
                                 ForEach(similar) { sim in
@@ -86,10 +88,12 @@ struct ArtistDetailView: View {
                                         .frame(width: 100)
                                     }
                                     .buttonStyle(.interactiveCard)
+                                    .navigationCardLink()
                                 }
                                 Spacer().frame(width: (Theme.Layout.contentInset) - 16)
                             }
                         }
+                        .scrollIndicators(.never, axes: .horizontal)
                     }
                 } else if isLoading {
                     loadingHeader
@@ -202,6 +206,7 @@ struct ArtistDetailView: View {
             )
         }
         .buttonStyle(.interactiveCard)
+        .navigationCardLink()
     }
 
     private func toggleFollow() {

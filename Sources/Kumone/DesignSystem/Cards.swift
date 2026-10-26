@@ -52,6 +52,7 @@ struct CoverCard: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.interactiveCard)
+        .navigationCardLink()
         .onHover { isHovering = $0 }
     }
 }
@@ -79,6 +80,7 @@ struct ArtistCard: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.interactiveCard)
+        .navigationCardLink()
     }
 }
 
@@ -108,10 +110,13 @@ struct Shelf<Content: View>: View {
         VStack(alignment: .leading, spacing: 14) {
             SectionHeader(title: title, action: seeAll)
                 .padding(.horizontal, Theme.Layout.contentInset)
-            ScrollView(.horizontal, showsIndicators: false) {
+            ScrollView(.horizontal) {
                 cards
                     .padding(.vertical, 6)
             }
+            // macOS may still show `.hidden` indicators for mouse/system
+            // policy. `.never` hides only the bar, keeping horizontal input.
+            .scrollIndicators(.never, axes: .horizontal)
             .compatScrollClipDisabled()
         }
     }

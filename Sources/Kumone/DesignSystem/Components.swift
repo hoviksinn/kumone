@@ -4,25 +4,32 @@ import SwiftUI
 
 struct SkeletonView: View {
     var cornerRadius: CGFloat = Theme.Radius.standard
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var shimmering = false
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1 / 30)) { context in
-            let phase = context.date.timeIntervalSinceReferenceDate
-                .truncatingRemainder(dividingBy: 1.5) / 1.5
-            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                .fill(.quaternary.opacity(0.5))
-                .overlay(
-                    GeometryReader { geo in
-                        LinearGradient(
-                            colors: [.clear, .primary.opacity(0.08), .clear],
-                            startPoint: .leading, endPoint: .trailing
-                        )
-                        .frame(width: geo.size.width * 0.6)
-                        .offset(x: (geo.size.width * 1.6) * phase - geo.size.width * 0.6)
-                    }
-                )
-                .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
-        }
+        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+            .fill(.quaternary.opacity(0.5))
+            .overlay(
+                GeometryReader { geo in
+                    LinearGradient(
+                        colors: [.clear, .primary.opacity(0.08), .clear],
+                        startPoint: .leading, endPoint: .trailing
+                    )
+                    .frame(width: geo.size.width * 0.6)
+                    // Interpolate just the gradient transform at native
+                    // cadence; no TimelineView rebuild of every skeleton.
+                    .offset(x: shimmering ? geo.size.width : -geo.size.width * 0.6)
+                    .opacity(reduceMotion ? 0 : 1)
+                    .animation(shimmering && !reduceMotion
+                        ? .linear(duration: 1.5).repeatForever(autoreverses: false) : nil,
+                               value: shimmering)
+                }
+            )
+            .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+            .onAppear { shimmering = !reduceMotion }
+            .onChange(of: reduceMotion) { _, reduced in shimmering = !reduced }
+            .onDisappear { shimmering = false }
     }
 }
 
@@ -44,13 +51,14 @@ struct SkeletonShelf: View {
             SkeletonView(cornerRadius: 4).frame(width: 120, height: 20)
             GeometryReader { geometry in
                 let cardSize = Theme.Layout.fittedShelfCardSize(availableWidth: geometry.size.width, leadingInset: 0)
-                ScrollView(.horizontal, showsIndicators: false) {
+                ScrollView(.horizontal) {
                     HStack(spacing: 16) {
                         ForEach(0..<6, id: \.self) { _ in
                             SkeletonCardView(size: cardSize)
                         }
                     }
                 }
+                .scrollIndicators(.never, axes: .horizontal)
             }
             .frame(height: Theme.Layout.coverShelfHeight)
         }

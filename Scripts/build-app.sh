@@ -1,5 +1,5 @@
 #!/bin/bash
-# Builds Kumone with SwiftPM and wraps the product into a .app bundle.
+# Builds the internal Kumone product and packages it as the 且听 test app.
 # Usage: Scripts/build-app.sh [debug|release]
 set -euo pipefail
 
@@ -8,9 +8,10 @@ ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$ROOT"
 
 CONF="${1:-debug}"
-APP_NAME="Kumone"
+APP_NAME="且听"
+EXECUTABLE_NAME="Kumone"
 BUNDLE_ID="com.hoviksinn.kumone.test"
-DISPLAY_NAME="Kumone Test"
+DISPLAY_NAME="且听"
 # This fork only packages isolated test builds; upstream updates stay disabled.
 if [ "$(uname -s)" != "Darwin" ] || [ "$(uname -m)" != "arm64" ]; then
   echo "error: build on Apple Silicon macOS 26+ with Xcode (or use GitHub Actions)." >&2
@@ -31,13 +32,13 @@ BUILD_DIR="$ROOT/.build/app"
 APP_BUNDLE="$BUILD_DIR/$APP_NAME.app"
 
 # One native arm64 build. SwiftPM supplies resources from this same tree.
-swift build -c "$CONF" --triple "$TRIPLE" --product "$APP_NAME"
+swift build -c "$CONF" --triple "$TRIPLE" --product "$EXECUTABLE_NAME"
 BIN_PATH="$(swift build -c "$CONF" --triple "$TRIPLE" --show-bin-path)"
 
 rm -rf "$BUILD_DIR"
 mkdir -p "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Resources"
-cp "$BIN_PATH/$APP_NAME" "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
-chmod +x "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
+cp "$BIN_PATH/$EXECUTABLE_NAME" "$APP_BUNDLE/Contents/MacOS/$EXECUTABLE_NAME"
+chmod +x "$APP_BUNDLE/Contents/MacOS/$EXECUTABLE_NAME"
 
 # Embed Sparkle.framework (SwiftPM binary artifact) into Contents/Frameworks.
 SPARKLE_FW="$(find "$ROOT/.build/artifacts" -type d -name 'Sparkle.framework' -path '*macos*' 2>/dev/null | head -n1)"
@@ -109,7 +110,7 @@ find "$BIN_PATH" -maxdepth 1 -name '*.bundle' -not -name '*Tests*' \
 # App icon: compile the Icon Composer bundle into Assets.car and keep the
 # source bundle alongside for Liquid Glass light/dark rendering on macOS 26.
 ICON_SOURCE="$ROOT/AppIcon.icon"
-if [ -d "$ICON_SOURCE" ]; then
+if [ -f "$ICON_SOURCE/icon.json" ]; then
   cp -R "$ICON_SOURCE" "$APP_BUNDLE/Contents/Resources/AppIcon.icon"
   xcrun actool "$ICON_SOURCE" \
     --compile "$APP_BUNDLE/Contents/Resources" \
@@ -124,6 +125,9 @@ if [ -d "$ICON_SOURCE" ]; then
     echo "ERROR: actool did not produce Assets.car" >&2
     exit 1
   fi
+else
+  echo "ERROR: the QieTing Icon Composer source is missing" >&2
+  exit 1
 fi
 
 printf 'APPL????' > "$APP_BUNDLE/Contents/PkgInfo"
@@ -141,7 +145,7 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
         <string>zh-Hans</string>
         <string>en</string>
     </array>
-    <key>CFBundleExecutable</key><string>$APP_NAME</string>
+    <key>CFBundleExecutable</key><string>$EXECUTABLE_NAME</string>
     <key>CFBundleIconName</key><string>AppIcon</string>
     <key>CFBundleIcons</key>
     <dict>

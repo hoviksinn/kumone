@@ -6,11 +6,11 @@
 
 <div align="center">
 
-<img src="docs/icon.png" width="140" alt="Kumone" />
+<img src="docs/qieting-icon.svg" width="140" alt="且听 QieTing" />
 
-# Kumone
+# 且听 · QieTing
 
-**雲の音 — 原生 macOS 网易云音乐客户端**
+**且听音乐，随心而行 — 原生 macOS 音乐播放器**
 
 Swift / SwiftUI / AppKit · 直连网易云真实 API · GitHub Actions 测试构建
 
@@ -18,24 +18,15 @@ Swift / SwiftUI / AppKit · 直连网易云真实 API · GitHub Actions 测试�
 [![Swift](https://img.shields.io/badge/Swift-6.2-F05138?logo=swift&logoColor=white)](Package.swift)
 [![License](https://img.shields.io/badge/license-LGPL--3.0--only-orange)](LICENSE)
 
-<table>
-  <tr>
-    <td><img src="docs/screenshot-home.png" alt="推荐" /></td>
-    <td><img src="docs/screenshot-nowplaying.png" alt="沉浸播放页" /></td>
-  </tr>
-  <tr>
-    <td><img src="docs/screenshot-daily.png" alt="每日推荐" /></td>
-    <td><img src="docs/screenshot-lyrics.png" alt="歌词面板" /></td>
-  </tr>
-</table>
-
 </div>
 
-此仓库为 [hoviksinn/kumone](https://github.com/hoviksinn/kumone) 的个人 macOS 定制版，基于 [missuo/kumone](https://github.com/missuo/kumone) 开源项目。仅支持 macOS 26.0 及更新系统、Apple Silicon（arm64）。保留上游版权、协议与致谢。
+**且听（QieTing）** 是 [hoviksinn/kumone](https://github.com/hoviksinn/kumone) 的个人 macOS 定制版，基于 [missuo/kumone](https://github.com/missuo/kumone) 开源项目。仅支持 macOS 26.0 及更新系统、Apple Silicon（arm64）。保留上游版权、协议与致谢。
 
-## 名字由来
+## 名称与图标
 
-**Kumone** 取自日语 **雲の音**（*kumo no ne*，「云的声音」），缩合为一个词 —— **雲音**（假名写作 くもね，读作 *kumone*）。呼应网易「云」音乐的「云」字：从云端飘落到你耳边的音乐。
+应用显示名称统一为 **且听**，英文内部标识为 **QieTing**。这是基于 Kumone 的个人定制，不改变上游作品归属。Swift 模块、内部可执行文件、既有测试版 Bundle ID 和数据目录保留原名，避免丢失登录、设置与缓存。
+
+新的原创占位图标采用靛紫底色与五条圆角声波。可维护矢量源文件位于 `AppIcon.icon`，由 Apple `actool` 编译为 macOS 原生图标。修改后运行 `python3 Scripts/generate-icon-preview.py` 可重建本页的平面预览，系统实际显示使用 Liquid Glass 渲染。
 
 ## 功能
 
@@ -46,7 +37,7 @@ Swift / SwiftUI / AppKit · 直连网易云真实 API · GitHub Actions 测试�
 - 🔓 **灰色歌曲解锁** — 原生实现 UnblockNeteaseMusic 核心音源（pyncmd / 酷我 / 酷狗），无版权或试听歌曲自动匹配第三方音源
 - 🖼 **沉浸播放页** — 封面取色渐变背景 + 大封面 + 大字同步歌词（点击播放条封面进入，Esc 退出）
 - 📻 **私人漫游** — 沉浸式 FM 页面，不喜欢 / 切歌
-- 📝 **歌词** — 侧边玻璃面板、同步歌词、逐字歌词与翻译，点击跳转
+- 📝 **歌词** — 完整高度的右侧区域、同步歌词、逐字歌词与翻译，点击跳转
 - 🪟 **桌面歌词** — LyricsX 风格悬浮置顶歌词（含翻译），可拖动、位置持久化，所有空间与全屏应用上可见
 - 📚 **音乐库** — 我喜欢的音乐、创建 / 收藏的歌单、收藏专辑、关注歌手、最近播放、音乐云盘
 - ✏️ **歌单管理** — 新建 / 删除 / 收藏歌单、添加 / 移除歌曲、红心
@@ -59,9 +50,9 @@ Swift / SwiftUI / AppKit · 直连网易云真实 API · GitHub Actions 测试�
 
 要求 macOS 26.0 或更高版本及 Apple Silicon Mac；Intel Mac 不再支持。
 
-在本仓库的 [Actions → CI](https://github.com/hoviksinn/kumone/actions/workflows/ci.yml) 选择一次成功的运行，下载底部 Artifacts 中名称含 `macOS26-arm64` 的产物。解压下载文件和其中的 App ZIP，即可得到 `Kumone.app`。手动运行及安全测试说明见[中文测试指南](docs/MACOS_TEST_BUILDS_CN.md)。
+在本仓库的 [Actions → CI](https://github.com/hoviksinn/kumone/actions/workflows/ci.yml) 选择一次成功的运行，下载底部 Artifacts 中名称含 `macOS26-arm64` 的产物。解压下载文件和其中的 App ZIP，即可得到 `且听.app`。手动运行及安全测试说明见[中文测试指南](docs/MACOS_TEST_BUILDS_CN.md)。
 
-测试版显示为 `Kumone Test`，固定使用独立 Bundle ID `com.hoviksinn.kumone.test`、始终禁用更新，不使用原作者证书或发布密钥，也没有 Apple 公证。不要覆盖原版 Kumone；按测试指南使用独立 macOS 用户账户，隔离仍沿用上游目录名的数据。此仓库不提供 Homebrew 安装、正式发布或自动更新。
+下载包以 `QieTing-Test-macOS26-arm64` 命名，解压后为 `且听.app`，应用显示为「且听」。测试版固定使用独立 Bundle ID `com.hoviksinn.kumone.test`、始终禁用更新，不使用原作者证书或发布密钥，也没有 Apple 公证。不要覆盖原版 Kumone；按测试指南使用独立 macOS 用户账户，隔离仍沿用上游目录名的数据。此仓库不提供 Homebrew 安装、正式发布或自动更新。
 
 ## 构建
 
@@ -70,7 +61,7 @@ Swift / SwiftUI / AppKit · 直连网易云真实 API · GitHub Actions 测试�
 ```bash
 swift build --triple arm64-apple-macosx26.0  # 编译
 make test                                 # 准备 Metal 核并运行全部测试
-Scripts/build-app.sh           # 打包 .app（输出 .build/app/Kumone.app）
+Scripts/build-app.sh           # 打包 .app（输出 .build/app/且听.app）
 Scripts/compile_and_run.sh     # 杀进程 → 重新打包 → 启动
 ```
 
@@ -95,7 +86,7 @@ Sources/Kumone/
 
 ## Credits
 
-Kumone 是从零编写的 Swift 实现，未复制以下项目的代码，但深度参考了它们的设计与实现思路，在此致谢：
+本定制版基于 **missuo 的 Kumone**（[上游项目](https://github.com/missuo/kumone)，© 2026 missuo，LGPL-3.0-only）。上游 Swift 实现参考了以下项目的设计与思路，继续保留这些致谢：
 
 - [YesPlayMusic](https://github.com/qier222/YesPlayMusic)（MIT，© qier222）— 功能设计、网易云 API 端点与行为逻辑的参考
 - [kaset](https://github.com/sozercan/kaset)（MIT，© sozercan）— UI 设计系统、动效与 SwiftPM 打包方案的参考
@@ -104,4 +95,4 @@ Kumone 是从零编写的 Swift 实现，未复制以下项目的代码，但深
 
 ## 协议与说明
 
-本项目以 [LGPL-3.0-only](LICENSE) 协议开源（随附 [GPL-3.0](COPYING) 文本）。仅供学习交流，音乐数据与版权归网易云音乐及各音源平台所有。不支持下载、无社交功能。
+本项目以 [LGPL-3.0-only](LICENSE) 协议开源（随附 [GPL-3.0](COPYING) 文本）。仅供学习交流，音乐数据与版权归网易云音乐及各音源平台所有。保留上游已有的下载与缓存能力，不新增社交功能。

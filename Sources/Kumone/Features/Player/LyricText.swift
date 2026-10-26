@@ -55,3 +55,106 @@ struct LyricText: View {
         return out
     }
 }
+
+/// A local, display-synchronised karaoke surface. The display link chooses
+/// when to draw; only the audio engine chooses which characters are sung.
+/// Inactive rows, LRC-only lyrics and the rest of the window have no link.
+struct LyricPlaybackText: View {
+    let line: LyricLine
+    let isActive: Bool
+    let size: CGFloat
+    var weight: Font.Weight = .bold
+    var color: Color = .primary
+    var verbatim = true
+
+    @EnvironmentObject private var player: PlayerService
+
+    var body: some View {
+        if isActive, verbatim, let words = line.words, !words.isEmpty {
+            DisplayLinkedLyricText(line: line, words: words, size: size, weight: weight,
+                                  color: color, lyricsCursor: player.lyricsCursor)
+        } else {
+            LyricText(line: line, size: size, weight: weight, color: color)
+        }
+    }
+}
+
+private struct DisplayLinkedLyricText: View {
+    let line: LyricLine
+    let words: [LyricWord]
+    let size: CGFloat
+    let weight: Font.Weight
+    let color: Color
+
+    @EnvironmentObject private var player: PlayerService
+    // Explicit seeks also repaint while playing within the same lyric row.
+    // Ordinary 5 Hz progress changes do not invalidate this small surface.
+    @ObservedObject var lyricsCursor: LyricsCursor
+    @State private var displayedAlphas: [Double]?
+    @State private var refreshTask: Task<Void, Never>?
+    @State private var refreshGeneration = 0
+    @State private var isVisible = false
+
+    var body: some View {
+        LyricText(
+            line: line, size: size, weight: weight, color: color,
+            alphas: displayedAlphas ?? LyricHighlightTiming.alphas(for: line, words: words, at: player.progress)
+        )
+        // A focus spring must never become the timing source for a YRC wipe.
+        .transaction { $0.animation = nil }
+        .background {
+            LyricDisplayRefresh(isEnabled: player.isPlaying, onRefresh: requestHighlightRefresh)
+                .frame(width: 1, height: 1)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+        }
+        .onAppear {
+            isVisible = true
+            requestHighlightRefresh()
+        }
+        .onDisappear {
+            isVisible = false
+            cancelRefresh()
+        }
+        .onChange(of: line) { _, _ in
+            cancelRefresh()
+            displayedAlphas = nil
+            requestHighlightRefresh()
+        }
+        .onChange(of: player.isPlaying) { _, _ in
+            cancelRefresh()
+            requestHighlightRefresh()
+        }
+        .onChange(of: lyricsCursor.seekRevision) { _, _ in
+            // A prior engine read may still be suspended. Retire its drawing
+            // generation and immediately use the actual explicit seek target;
+            // the next serialized engine read then resumes normal sampling.
+            cancelRefresh()
+            displayedAlphas = LyricHighlightTiming.alphas(for: line, words: words,
+                                                          at: lyricsCursor.mediaTime)
+            requestHighlightRefresh()
+        }
+    }
+
+    private func requestHighlightRefresh() {
+        // At most one real engine read is outstanding. If file scheduling or
+        // an AutoMix hand-over takes longer than a frame, skip that frame
+        // rather than blocking AppKit or growing a display-rate task backlog.
+        guard isVisible, refreshTask == nil else { return }
+        let generation = refreshGeneration
+        refreshTask = Task { @MainActor in
+            let time = await player.livePlaybackTimeAsync()
+            guard !Task.isCancelled, isVisible, generation == refreshGeneration else { return }
+            let next = LyricHighlightTiming.alphas(for: line, words: words, at: time)
+            // Gaps between sung words don't need a new SwiftUI rendering pass.
+            if displayedAlphas != next { displayedAlphas = next }
+            refreshTask = nil
+        }
+    }
+
+    private func cancelRefresh() {
+        refreshGeneration &+= 1
+        refreshTask?.cancel()
+        refreshTask = nil
+    }
+}
