@@ -133,6 +133,16 @@ class OwnedCommand:
     def identity(entry: dict[str, Any]) -> tuple[Any, ...]:
         return entry["pid"], entry["startedAt"], entry["command"], entry["processGroup"]
 
+    @staticmethod
+    def unavailable_command_path(expected: str, observed: str) -> bool:
+        # Apple's ps prints (p_comm) when it cannot read KERN_PROCARGS2;
+        # XNU remembers at most MAXCOMLEN=16 bytes. This is not restricted to
+        # zombie state. Only recognize the exact admitted ASCII basename;
+        # it never authorizes a new identity, sampling, signals or progress.
+        basename = Path(expected).name
+        return (bool(basename) and basename.isascii() and not basename.startswith("(")
+                and observed == "(" + basename[:16] + ")")
+
     def verify(self, pid: int, table: dict[int, dict[str, Any]] | None = None
                ) -> tuple[bool, str, bool]:
         table = self.table() if table is None else table
@@ -150,6 +160,8 @@ class OwnedCommand:
                                        for key in ("pid", "startedAt", "processGroup"))
             if zombie and same_birth_and_group:
                 return False, f"admitted PID {pid} is an unavailable zombie: {evidence}", True
+            if same_birth_and_group and self.unavailable_command_path(admitted["command"], entry["command"]):
+                return False, f"admitted PID {pid} command path is unavailable (matching Darwin ps fallback): {evidence}", True
             return False, f"PID {pid} no longer matches its admitted process identity: {evidence}", False
         chain = self.ancestry(pid, table)
         if chain is None and admitted is None:
@@ -159,6 +171,8 @@ class OwnedCommand:
             return False, f"own driver {self.driver} no longer has its isolated process group", False
         if zombie:
             return False, f"owned PID {pid} is an unavailable zombie: {evidence}", True
+        if admitted is None and entry["command"].startswith("(") and entry["command"].endswith(")"):
+            return False, f"PID {pid} has no readable executable identity to admit: {evidence}", False
         try:
             actual_group = os.getpgid(pid)
         except OSError as error:

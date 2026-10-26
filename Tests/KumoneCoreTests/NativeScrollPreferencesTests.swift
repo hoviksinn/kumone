@@ -238,7 +238,12 @@ struct NativeScrollPreferencesTests {
         let initial = try scrollSnapshot(scroll, context: context.merging(["snapshotPurpose": "wheel-initial"]) { _, new in new })
         #expect(scroll.window === window)
         #expect((scroll.documentView?.frame.width ?? 0) > scroll.contentSize.width + 100)
-        let visible = scroll.contentView.visibleRect
+        // Shelf deliberately allows its content's shadows outside the strip.
+        // AppKit can therefore report the ancestor's 300pt visibleRect for a
+        // 92pt clip view (CI #53). Only its intersection with the clip's own
+        // bounds is an actual wheel target; the expanded midpoint hits the
+        // enclosing vertical scroll view instead.
+        let visible = scroll.contentView.visibleRect.intersection(scroll.contentView.bounds)
         #expect(!visible.isEmpty)
         let point = scroll.contentView.convert(NSPoint(x: visible.midX, y: visible.midY), to: nil)
         let screen = window.convertPoint(toScreen: point)
@@ -246,7 +251,14 @@ struct NativeScrollPreferencesTests {
         let hit = root.hitTest(root.convert(point, from: nil))
         #expect(hit?.enclosingScrollView === scroll,
                 "The wheel target must be inside the actual visible native scroll view")
-        try NativeScrollJournal.record("wheel.geometry.return", details: context)
+        try NativeScrollJournal.record("wheel.geometry.return", details: context.merging([
+            "targetClipBounds": NSStringFromRect(scroll.contentView.bounds),
+            "targetClipVisibleRect": NSStringFromRect(scroll.contentView.visibleRect),
+            "actualTargetViewport": NSStringFromRect(visible),
+            "intendedWindowPoint": NSStringFromPoint(point),
+            "hitViewEnclosingScrollIsTarget": hit?.enclosingScrollView === scroll,
+            "commitRootClass": String(describing: type(of: root)),
+        ]) { _, new in new })
         var receipts: [[String: Any]] = []
         var forwardOffset = start.origin.x
         var previousTimestamp: TimeInterval = 0
@@ -304,8 +316,20 @@ struct NativeScrollPreferencesTests {
             let beforeOffset = scroll.documentVisibleRect.origin.x
             try NativeScrollJournal.record("scrollWheel.enter", details: eventContext)
             scroll.scrollWheel(with: event)
-            try NativeScrollJournal.record("scrollWheel.return", details: eventContext)
-            try await nativeCommit(scroll, context: eventContext)
+            let immediatelyAfterInput = scroll.documentVisibleRect.origin.x
+            try NativeScrollJournal.record("scrollWheel.return", details: eventContext.merging([
+                "offsetImmediatelyAfterNativeInput": immediatelyAfterInput,
+            ]) { _, new in new })
+            // The shelf's owner is the NSHostingView, not the child native
+            // scroll view. Commit that same existing queue turn at the real
+            // root so pending SwiftUI layout/display participates before the
+            // next input and observation. This does not wait for a duration
+            // or set any scroll position.
+            try await nativeCommit(root, context: eventContext.merging([
+                "commitScope": "window-content-root",
+                "commitRootClass": String(describing: type(of: root)),
+                "commitRootIsNativeScrollTarget": root === scroll,
+            ]) { _, new in new })
             let after = try scrollSnapshot(scroll, context: eventContext.merging(["snapshotPurpose": "wheel-after"]) { _, new in new })
             let afterOffset = scroll.documentVisibleRect.origin.x
             if direction == "forward" {
@@ -320,6 +344,10 @@ struct NativeScrollPreferencesTests {
                 "direction": direction, "signedInputLinesX": deltaX,
                 "before": before, "afterNativeCommit": after,
                 "actualOffsetBefore": beforeOffset, "actualOffsetAfter": afterOffset,
+                "offsetImmediatelyAfterNativeInput": immediatelyAfterInput,
+                "commitScope": "window-content-root",
+                "commitRootClass": String(describing: type(of: root)),
+                "actualTargetViewport": NSStringFromRect(visible),
                 "actualHorizontalMotion": direction == "forward" ? afterOffset > beforeOffset : afterOffset < beforeOffset,
             ]) { _, new in new })
         }

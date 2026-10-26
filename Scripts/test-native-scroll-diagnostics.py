@@ -11,6 +11,9 @@ import tempfile
 import textwrap
 import time
 import unittest
+from unittest import mock
+from types import SimpleNamespace
+import io
 
 
 WRAPPER = Path(__file__).with_name("run-native-scroll-diagnostics.py")
@@ -137,7 +140,11 @@ class WatchdogTests(unittest.TestCase):
             self.assertTrue(owner.verify(child.pid)[0])
             original = owner.table()
             for changes in [{'command': 'different-live-command'},
-                            {'state': 'Z', 'command': '<defunct>', 'startedAt': 'different-birth'}]:
+                            {'state': 'Z', 'command': '<defunct>', 'startedAt': 'different-birth'},
+                            {'state': 'R<', 'command': '(sleep)', 'startedAt': 'different-birth'},
+                            {'state': 'R<', 'command': '(sleep)', 'processGroup': child.pid + 1},
+                            {'state': 'R<', 'command': '/different/path/sleep'},
+                            {'state': 'R<', 'command': '(another-name)'}]:
                 table = dict(original)
                 table[child.pid] = dict(original[child.pid], **changes)
                 valid, reason, gone = owner.verify(child.pid, table)
@@ -149,6 +156,46 @@ class WatchdogTests(unittest.TestCase):
         finally:
             child.terminate()
             child.wait(timeout=3)
+
+    def test_exact_apple_ps_fallback_is_unavailable_never_live_or_sampled(self):
+        child = subprocess.Popen(['/bin/sleep', '60'], start_new_session=True)
+        owner = DIAGNOSTICS.OwnedCommand(child.pid)
+        try:
+            self.assertTrue(owner.verify(child.pid)[0])
+            admitted = dict(owner.admitted[child.pid])
+            original = owner.table()
+            for state in ['S<', 'R<']:
+                table = dict(original)
+                table[child.pid] = dict(original[child.pid], command='(sleep)', state=state)
+                valid, reason, gone = owner.verify(child.pid, table)
+                self.assertFalse(valid)
+                self.assertTrue(gone, reason)
+                self.assertIn('matching Darwin ps fallback', reason)
+                self.assertEqual(owner.admitted[child.pid], admitted)
+                args = SimpleNamespace(sample_output=self.sample, sample_log=self.sample_log,
+                                       sample_command=str(self.sample_command))
+                with mock.patch.object(owner, 'table', return_value=table):
+                    self.assertEqual(owner.current(), [])
+                    result = DIAGNOSTICS.collect_sample(args, {'testProcessID': child.pid}, owner, io.BytesIO())
+                self.assertFalse(result['attempted'])
+                self.assertFalse(self.sample.exists())
+            fresh_owner = DIAGNOSTICS.OwnedCommand(child.pid)
+            valid, reason, gone = fresh_owner.verify(child.pid, table)
+            self.assertFalse(valid)
+            self.assertFalse(gone)
+            self.assertIn('no readable executable identity to admit', reason)
+            self.assertEqual(fresh_owner.admitted, {})
+        finally:
+            child.terminate()
+            child.wait(timeout=3)
+
+    def test_apple_ps_fallback_requires_the_exact_admitted_kernel_short_name(self):
+        expected = '/Applications/Xcode.app/usr/libexec/swift/pm/swiftpm-testing-helper'
+        self.assertTrue(DIAGNOSTICS.OwnedCommand.unavailable_command_path(expected, '(swiftpm-testing-)'))
+        for observed in ['(swiftpm-testing)', '(swiftpm-testing-helper)', '(swiftpm-other---)',
+                         'swiftpm-testing-', '/other/path/swiftpm-testing-helper']:
+            self.assertFalse(DIAGNOSTICS.OwnedCommand.unavailable_command_path(expected, observed))
+        self.assertFalse(DIAGNOSTICS.OwnedCommand.unavailable_command_path('(swiftpm-testing-)', '(swiftpm-testing-)'))
 
     def test_foreign_zombie_does_not_bypass_parent_chain_validation(self):
         driver = subprocess.Popen(['/bin/sleep', '60'], start_new_session=True)

@@ -110,3 +110,11 @@ CI #51 自动触发，独立进程组相关检查实际通过，但自测 18 项
 新输入采用真实传统水平鼠标滚轮协议：公开 CG `.line`、isContinuous=0、phase/momentumPhase=0；[Apple NSEvent.phase](https://developer.apple.com/documentation/appkit/nsevent/phase-swift.property) 明确说明传统滚轮没有手势阶段。每个真实原生/生产 Shelf/重建场景都必须实际向右移动 `x > start.x`，再以相反原生输入向左移动 `x < forward.x`；文档/clip/knob 坐标不被测试修改，样式及指示器策略检查保留。五项测试及四项原始场景都继续执行，仍需新的 Mac 结果证明该输入能观察实际生产滚动。
 
 事件仍直接交给实际原生 view，CG-created NSEvent 的 window=nil 及实际坐标均记录；不冒称已经验证 NSApplication/WindowServer 路由、物理触控板惯性或指示器淡出。CI #52 的原生源时钟/严格 PCM 18 项及 EOF 1 项继续通过，完整 UI、音频候选、完整回归和新 App 均尚未通过。
+
+## CI #53：已验证真实向右位移，继续修正宿主几何与提交范围
+
+[CI #53](https://github.com/hoviksinn/kumone/actions/runs/39967118648) 不再停滞。标准 NSScrollView 在 Legacy/Overlay 均为 `0 → 80 → 0pt`；全部六个生产 Shelf/重建场景都实际 `0 → 80pt`，原始严格向右位移及全部样式断言通过。因此隐藏水平指示器未禁用这些真实生产视图的横向滚动，CI #47 的零位移不能作为生产轴配置故障证据。
+
+专项仍有九条错误：六条命中检查发现 SwiftUI unclipped visibleRect 高达 300pt，而卡片实际 bounds 高仅 92pt，直接取前者中点落在外层纵向区域；另三条反向检查在 SwiftUI 原生调用返回后约 1–8ms 仍读到 80pt，而其余反向场景正常返回 0pt。当前提交屏障只更新目标子视图，尚未提交外层 NSHostingView，不能预先将其断定为生产反向滚动故障。下一修正取 visibleRect 与自身 bounds 的真实交集，保留命中断言；仍使用一次原生主队列提交，但提交实际 hosting 根并记录即时/提交前/提交后偏移，不增加 sleep、重试、期限或直接设置坐标。
+
+该次还观察到 macOS ps 在退出交界将完整路径回退为 `(swiftpm-testing-)`，即使公开状态暂为 R；与已认领 PID/启动时间/进程组完全一致。诊断修正只将精确匹配的内核短名回退标为不可采样/不可计入进度，不允许它认领新进程或发送信号；一般活路径变化、错误短名及启动身份变化仍失败。23 项脚本自测单独验证此边界。媒体时钟/严格 PCM 18 项及 EOF 1 项继续通过；工具栏、窗口、歌词、完整回归和 App 仍受前置滚动失败阻断，尚未运行本次完整验收。
