@@ -156,3 +156,7 @@ QIETING_VALIDATION_STAGE 先为 audio：实际 AU 桥接 1 项、输出/原边�
 [CI #58](https://github.com/hoviksinn/kumone/actions/runs/40315719793) 已进入新音频源码编译，发现六条错误，均来自两处桥接名称问题：ObjC 的 [AUAudioUnit 属性](https://developer.apple.com/documentation/avfaudio/avaudiounit/auaudiounit) 实际为大写 `AUAudioUnit`，Swift 导入后的小写名称不能直接写在 ObjC++ 中；局部 `ComponentDescription()` 又与 Carbon 同名类型冲突，产生派生转换错误。
 
 只修正 ObjC getter，并为辅助函数加产品前缀。RenderState、内部 render block、平滑 Kernel 和媒体时钟均未改，前两者逐字节比较一致。该次尚未运行原生 AU/最终输出测试；下一次先继续实际 SDK 编译与桥接专项，不将静态检查代替通过。
+
+## CI #59：C 结构状态标志的 Swift 转换
+
+[CI #59](https://github.com/hoviksinn/kumone/actions/runs/40316595630) 的 ObjC++ 已编译，继续在 Swift 边界发现 C 结构中的四个 BOOL 标志导入为 ObjCBool，不能直接赋给 Swift Bool。只在新快照适配器及直接读取该 C 结构的新增测试中显式取 boolValue；Swift 包装快照的 Bool 不改，C 函数返回值也不改。新增 Output 测试仅六行状态读取变化，去掉 boolValue 后与原文件逐字节一致；测试声明、数据和所有断言保留。仍未进入原生处理测试，没有最终输出成功结果。

@@ -1587,16 +1587,16 @@ final class PlaybackEngine: @unchecked Sendable {
         let finalRoutes = engine.outputConnectionPoints(for: controlBoundaryEffect, outputBus: 0)
         let actualSerialRoute = masterRoutes.count == 1 && masterRoutes.first?.node === controlBoundaryEffect
             && finalRoutes.count == 1 && finalRoutes.first?.node === engine.outputNode
-        result.available = controlBoundaryConnected && actualSerialRoute && raw.available
-        result.prepared = raw.prepared
+        result.available = controlBoundaryConnected && actualSerialRoute && raw.available.boolValue
+        result.prepared = raw.prepared.boolValue
         result.inputSampleRate = raw.inputSampleRate
         result.outputSampleRate = raw.outputSampleRate
         result.channelCount = raw.channelCount
         result.delayFrames = raw.delayFrames
         result.envelopeFrames = raw.envelopeFrames
         result.silenceDetectionFloor = raw.silenceDetectionFloor
-        result.rawCaptureOverflow = raw.rawCaptureOverflow
-        result.rawCaptureTimestampFault = raw.rawCaptureTimestampFault
+        result.rawCaptureOverflow = raw.rawCaptureOverflow.boolValue
+        result.rawCaptureTimestampFault = raw.rawCaptureTimestampFault.boolValue
         result.resourceGeneration = raw.resourceGeneration
         result.modifiedOutputFrames = raw.modifiedOutputFrames
         result.silenceEntriesSmoothed = raw.silenceEntriesSmoothed

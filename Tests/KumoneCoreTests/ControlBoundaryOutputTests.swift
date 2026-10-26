@@ -174,7 +174,7 @@ struct ControlBoundaryOutputTests {
             if index == 31 { try trace.append(pair) }
         }
         let before = try graph.snapshot()
-        try #require(before.available && before.prepared)
+        try #require(before.available.boolValue && before.prepared.boolValue)
         try #require(KumoneArmControlBoundary(unit, 1, 4096))
         graph.player.pause()
         for _ in 0..<32 { try trace.append(graph.pull()) }
@@ -191,7 +191,7 @@ struct ControlBoundaryOutputTests {
         #expect(after.hostResetRequests == before.hostResetRequests)
         #expect(after.appliedHostResetRequests == before.appliedHostResetRequests)
         #expect(after.transportCommands == before.transportCommands + 2)
-        #expect(!after.rawCaptureOverflow && !after.rawCaptureTimestampFault)
+        #expect(!after.rawCaptureOverflow.boolValue && !after.rawCaptureTimestampFault.boolValue)
         try ControlBoundaryEvidence.record(["name": "registered-inline-au-actual-engine-edges",
             "analysis": result.json, "reportedDelayFrames": after.delayFrames,
             "latencySeconds": unit.auAudioUnit.latency,
@@ -220,7 +220,7 @@ struct ControlBoundaryOutputTests {
             try actual.append(processed.pull())
         }
         let snapshot = try processed.snapshot()
-        try #require(snapshot.available && snapshot.prepared)
+        try #require(snapshot.available.boolValue && snapshot.prepared.boolValue)
         #expect(snapshot.inputSampleRate == outputRate && snapshot.outputSampleRate == outputRate)
         #expect(snapshot.envelopeFrames == UInt32(ceil(outputRate * 0.002)))
         #expect(snapshot.delayFrames == snapshot.envelopeFrames + 2)
@@ -246,7 +246,7 @@ struct ControlBoundaryOutputTests {
         }
         #expect(rawFinalError < 0.000_01)
         #expect(snapshot.modifiedOutputFrames == 0)
-        #expect(!snapshot.rawCaptureOverflow && !snapshot.rawCaptureTimestampFault)
+        #expect(!snapshot.rawCaptureOverflow.boolValue && !snapshot.rawCaptureTimestampFault.boolValue)
         #expect(abs(actual.final[0][processedImpulse] - 0.4) < 0.000_01,
                 "Input-silence flags must not suppress the real delayed impulse")
         try ControlBoundaryEvidence.record(["name": "actual-engine-impulse", "outputRate": outputRate,
@@ -646,10 +646,10 @@ struct ControlBoundaryOutputTests {
         // No rendering or engine owns this detached AU's render resources.
         if unit.auAudioUnit.renderResourcesAllocated { unit.auAudioUnit.deallocateRenderResources() }
         let detached = try first.snapshot()
-        #expect(!detached.prepared)
+        #expect(!detached.prepared.boolValue)
         let rebuilt = try DirectControlBoundaryGraph(rate: 96_000, processed: true, existingEffect: unit)
         let allocated = try rebuilt.snapshot()
-        #expect(allocated.prepared && allocated.resourceGeneration > applied.resourceGeneration)
+        #expect(allocated.prepared.boolValue && allocated.resourceGeneration > applied.resourceGeneration)
         #expect(allocated.inputSampleRate == 96_000 && allocated.outputSampleRate == 96_000)
         #expect(allocated.envelopeFrames == 192 && allocated.delayFrames == 194)
         #expect(abs(unit.auAudioUnit.latency - Double(allocated.delayFrames) / 96_000) < 1.0 / 96_000)
