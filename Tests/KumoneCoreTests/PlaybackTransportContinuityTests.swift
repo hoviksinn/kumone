@@ -63,8 +63,11 @@ struct PlaybackTransportContinuityTests {
         return url
     }
 
-    private func engine(playing url: URL, from seconds: TimeInterval = 0, bothDecks: Bool = false) throws -> PlaybackEngine {
+    private func engine(playing url: URL, from seconds: TimeInterval = 0, bothDecks: Bool = false, boundaryRawCapture: Bool = false) throws -> PlaybackEngine {
         let engine = PlaybackEngine()
+        if boundaryRawCapture {
+            try engine.enableBoundaryRawCaptureForTesting(capacityFrames: 262_144)
+        }
         try engine.enableOfflineRenderingForTesting(maximumFrameCount: Self.quantum)
         _ = try engine.loadFile(at: url, on: .a)
         engine.play(deck: .a, from: seconds)
@@ -334,17 +337,24 @@ struct PlaybackTransportContinuityTests {
     func aRunningGraphDrainsPausedDSPWithoutLosingSourcePCM(bothDecks: Bool) throws {
         let url = try fixture()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
-        let reference = try engine(playing: url, bothDecks: bothDecks)
-        let subject = try engine(playing: url, bothDecks: bothDecks)
+        let reference = try engine(playing: url, bothDecks: bothDecks, boundaryRawCapture: true)
+        let subject = try engine(playing: url, bothDecks: bothDecks, boundaryRawCapture: true)
         defer { reference.stopAll(); subject.stopAll() }
-        let golden = try TransportPCMReference(engine: reference, quantum: Self.quantum)
-        for _ in 0..<8 { try golden.compare(subject.renderOfflineForTesting(Self.quantum)) }
+        let golden = try TransportPCMReference(engine: reference, quantum: Self.quantum, observation: .rawBeforeBoundaryEnvelope)
+        var boundaryTrace = ControlBoundaryPCMTrace()
+        for index in 0..<8 {
+            let pair = try subject.renderOfflineBoundaryEvidenceForTesting(Self.quantum)
+            try golden.compare(pair.rawOutput)
+            if index == 7 { try boundaryTrace.append(pair) }
+        }
         subject.pause()
         let paused = subject.transportSnapshotForTesting(.a)
         #expect(paused.paused && paused.engineRunning && !paused.nodePlaying)
         let sourceFramesBeforeDrain = golden.comparedFrames
         for _ in 0..<12 {
-            try golden.compare(subject.renderOfflineForTesting(Self.quantum), allowingIntentionalSilence: true)
+            let pair = try subject.renderOfflineBoundaryEvidenceForTesting(Self.quantum)
+            try golden.compare(pair.rawOutput, allowingIntentionalSilence: true)
+            try boundaryTrace.append(pair)
             #expect(subject.position(of: .a) == paused.position,
                 "rendering the paused DSP tail and silence must not advance source media time")
         }
@@ -359,14 +369,25 @@ struct PlaybackTransportContinuityTests {
         let refillBuffers = Int(ceil(Double(latencyBound) / Double(Self.quantum)))
         var refillSilenceFrames = 0
         for chunk in 0..<24 {
-            refillSilenceFrames += try golden.compare(subject.renderOfflineForTesting(Self.quantum),
-                allowingIntentionalSilence: chunk < refillBuffers)
+            let pair = try subject.renderOfflineBoundaryEvidenceForTesting(Self.quantum)
+            refillSilenceFrames += try golden.compare(pair.rawOutput, allowingIntentionalSilence: chunk < refillBuffers)
+            try boundaryTrace.append(pair)
         }
         #expect(refillSilenceFrames <= latencyBound,
             "only measured DSP refill latency may insert silence after native source resume")
         #expect(golden.maximumSampleError < 0.000_01,
             "every non-silent source frame must match the next uninterrupted golden frame; no skip or repeat")
         #expect(golden.maximumSignal > 0.1 && golden.comparedFrames > 24 * Int(Self.quantum))
+        let processor = subject.boundarySnapshotForTesting()
+        #expect(processor.available && processor.prepared && !processor.rawCaptureOverflow && !processor.rawCaptureTimestampFault)
+        let finalAnalysis = try ControlBoundaryPCMOracle.analyze(boundaryTrace,
+            envelopeFrames: Int(processor.envelopeFrames), floor: Float(processor.silenceDetectionFloor))
+        #expect(finalAnalysis.entries.count == 1 && finalAnalysis.exits.count == 1)
+        #expect(finalAnalysis.modifiedFrames > 0 && finalAnalysis.maximumDifference > 0.000_1)
+        try ControlBoundaryEvidence.record(["name": "transport-paused-dsp-two-layers", "decks": bothDecks ? 2 : 1,
+            "rawContentMaximumError": golden.maximumSampleError, "comparedRawFrames": golden.comparedFrames,
+            "finalOutput": finalAnalysis.json, "outputRate": processor.outputSampleRate,
+            "delayFrames": processor.delayFrames, "envelopeFrames": processor.envelopeFrames])
         try TransportEvidence.record(["name": "pausedDSPDrainAndRefill", "decks": bothDecks ? 2 : 1,
             "pausedRenderedFrames": 12 * Int(Self.quantum), "naturalDSPTailFrames": tailFrames,
             "resumeDSPRefillSilenceFrames": refillSilenceFrames, "measuredAULatencySeconds": paused.sourceProcessingLatency,

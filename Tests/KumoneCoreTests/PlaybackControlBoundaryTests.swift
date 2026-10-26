@@ -3,7 +3,7 @@ import Foundation
 import Testing
 @testable import KumoneCore
 
-/// Diagnostic experiment, deliberately separate from a production de-click fix.
+/// Actual production output evidence, with a separate strict pre-envelope PCM layer.
 /// Every value is measured after the real deck DSP, master limiter and volume.
 /// The fixtures are original synthetic PCM; no music or account data is saved.
 private enum PlaybackBoundaryEvidence {
@@ -15,7 +15,7 @@ private enum PlaybackBoundaryEvidence {
         defer { lock.unlock() }
         cases.append(measurements)
         let report: [String: Any] = [
-            "scope": "Offline final production output; diagnostic only, no production envelope and no physical DAC/listening claim",
+            "scope": "Actual inline processed final production output plus strict raw-media oracle; no physical DAC/listening claim",
             "outputSampleRate": DeckChain.format.sampleRate,
             "interpretation": "A large adjacent-sample delta is waveform evidence, not by itself proof of the reported audible click. Compare the steady control and source position checks.",
             "cases": cases,
@@ -88,8 +88,11 @@ struct PlaybackControlBoundaryTests {
         if sourceRate != sampleRate { try #require(state.queuedSourceBufferCount >= 8) }
     }
 
-    private func engine(_ url: URL, sourceRate: Double) throws -> PlaybackEngine {
+    private func engine(_ url: URL, sourceRate: Double, boundaryRawCapture: Bool = false) throws -> PlaybackEngine {
         let result = PlaybackEngine()
+        if boundaryRawCapture {
+            try result.enableBoundaryRawCaptureForTesting(capacityFrames: 262_144)
+        }
         try result.enableOfflineRenderingForTesting(maximumFrameCount: quantum)
         _ = try result.loadFile(at: url, on: .a)
         result.play(deck: .a, from: 0)
@@ -162,15 +165,18 @@ struct PlaybackControlBoundaryTests {
         defer { try? FileManager.default.removeItem(at: folder) }
         let url = try fixture(sampleRate: sourceRate, amplitude: amplitude, phase: 0.71,
                               in: folder, name: "original-synthetic-tone")
-        let reference = try engine(url, sourceRate: sourceRate)
-        let subject = try engine(url, sourceRate: sourceRate)
+        let reference = try engine(url, sourceRate: sourceRate, boundaryRawCapture: true)
+        let subject = try engine(url, sourceRate: sourceRate, boundaryRawCapture: true)
         defer { reference.stopAll(); subject.stopAll() }
-        let golden = try TransportPCMReference(engine: reference, quantum: quantum, buffers: 100)
+        let golden = try TransportPCMReference(engine: reference, quantum: quantum, buffers: 100, observation: .rawBeforeBoundaryEnvelope)
+        var boundaryTrace = ControlBoundaryPCMTrace()
         var steady = Array(repeating: [Float](), count: 2)
         for index in 0..<32 {
-            let output = try subject.renderOfflineForTesting(quantum)
-            try golden.compare(output)
+            let pair = try subject.renderOfflineBoundaryEvidenceForTesting(quantum)
+            let output = pair.finalOutput
+            try golden.compare(pair.rawOutput)
             if index >= 28 { try append(output, to: &steady) }
+            if index == 31 { try boundaryTrace.append(pair) }
         }
         let before = subject.transportSnapshotForTesting(.a)
         subject.pause()
@@ -179,8 +185,10 @@ struct PlaybackControlBoundaryTests {
         #expect(abs(frozen.position - before.position) <= 2 / sampleRate)
         var pause = steady.map { Array($0.suffix(Int(quantum))) }
         for _ in 0..<24 {
-            let output = try subject.renderOfflineForTesting(quantum)
-            try golden.compare(output, allowingIntentionalSilence: true)
+            let pair = try subject.renderOfflineBoundaryEvidenceForTesting(quantum)
+            let output = pair.finalOutput
+            try golden.compare(pair.rawOutput, allowingIntentionalSilence: true)
+            try boundaryTrace.append(pair)
             try append(output, to: &pause)
             #expect(subject.position(of: .a) == frozen.position)
         }
@@ -194,8 +202,10 @@ struct PlaybackControlBoundaryTests {
         var resume = pausedTail
         var resumeRefillSilenceFrames = 0
         for _ in 0..<32 {
-            let output = try subject.renderOfflineForTesting(quantum)
-            resumeRefillSilenceFrames += try golden.compare(output, allowingIntentionalSilence: true)
+            let pair = try subject.renderOfflineBoundaryEvidenceForTesting(quantum)
+            let output = pair.finalOutput
+            resumeRefillSilenceFrames += try golden.compare(pair.rawOutput, allowingIntentionalSilence: true)
+            try boundaryTrace.append(pair)
             try append(output, to: &resume)
         }
         #expect((resume.flatMap { $0 }.map(abs).max() ?? 0) > amplitude * 0.4,
@@ -211,6 +221,18 @@ struct PlaybackControlBoundaryTests {
                 "diagnostic observation must retain every audible PCM frame with the original strict tolerance")
         let allMeasuredSamplesAreFinite = (steady + pause + resume).flatMap { $0 }.allSatisfy { $0.isFinite }
         #expect(allMeasuredSamplesAreFinite)
+        let processor = subject.boundarySnapshotForTesting()
+        #expect(processor.available && processor.prepared && !processor.rawCaptureOverflow && !processor.rawCaptureTimestampFault)
+        let finalAnalysis = try ControlBoundaryPCMOracle.analyze(boundaryTrace,
+            envelopeFrames: Int(processor.envelopeFrames), floor: Float(processor.silenceDetectionFloor))
+        #expect(finalAnalysis.entries.count == 1 && finalAnalysis.exits.count == 1)
+        #expect(finalAnalysis.modifiedFrames > 0 && finalAnalysis.maximumDifference > amplitude * 0.01)
+        #expect(finalAnalysis.finalMaximumStep < finalAnalysis.rawMaximumStep)
+        try ControlBoundaryEvidence.record(["name": "known-control-boundary-two-layers", "sourceRate": sourceRate,
+            "sourceAmplitude": amplitude, "rawContentMaximumError": golden.maximumSampleError,
+            "comparedRawFrames": golden.comparedFrames, "finalOutput": finalAnalysis.json,
+            "outputRate": processor.outputSampleRate, "delayFrames": processor.delayFrames,
+            "envelopeFrames": processor.envelopeFrames])
         try PlaybackBoundaryEvidence.record([
             "operation": "pause-resume", "sourceSampleRate": sourceRate, "sourceAmplitude": amplitude,
             "steady": metrics(steady), "pause": metrics(pause), "resume": metrics(resume),
@@ -224,7 +246,8 @@ struct PlaybackControlBoundaryTests {
             "resumeCompletedTicks": resumed.lastResumeCompletedAt,
             "sourceFramesCompared": golden.comparedFrames, "maximumPCMError": golden.maximumSampleError,
             "resumeRefillSilenceFrames": resumeRefillSilenceFrames, "measuredRefillBoundFrames": refillBound,
-            "productionSignalProcessingChanged": false,
+            "productionSignalProcessingChanged": true, "pcmComparisonLayer": "pre-envelope-with-same-fifo-delay",
+            "processedFinalOutput": finalAnalysis.json,
         ])
     }
 
@@ -260,7 +283,7 @@ struct PlaybackControlBoundaryTests {
             "operation": "direct-stop-load-play", "sourceSampleRate": sourceRate,
             "steady": metrics(steady), "replacement": metrics(replacement),
             "generationBefore": before.generation, "generationAfter": replaced.generation,
-            "productionSignalProcessingChanged": false,
+            "productionSignalProcessingChanged": true, "nonzeroReplacementRepairClaim": false,
         ])
     }
 }

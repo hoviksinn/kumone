@@ -14,7 +14,11 @@ def main():
     root = args.output
     gates = {}
     for name, minimum in (
-        ("window-test-summary.json", 18),
+        ("native-toolbar-test-summary.json", 3),
+        ("native-scroll-test-summary.json", 5),
+        ("window-test-summary.json", 19),
+        ("control-boundary-bridge-test-summary.json", 1),
+        ("control-boundary-output-test-summary.json", 14),
         ("lyrics-seek-test-summary.json", 3),
         ("seek-clock-test-summary.json", 18),
         ("segment-eof-test-summary.json", 1),
@@ -42,19 +46,19 @@ def main():
         "passed_targeted_gates": gates,
         "full_regression_at_upload": "pending; inspect the completed run separately",
         "physical_visual_and_120hz_acceptance": "pending",
-        "control_boundary_click_pop": "unresolved",
+        "control_boundary_click_pop": "inline production output gates passed; physical listening pending; no universal direct-replacement or wet-tail claim",
     }
     (root / "preview-status.json").write_text(
         json.dumps(status, indent=2, ensure_ascii=False) + "\n")
     (root / "PREVIEW.md").write_text(
-        "# 且听 QieTing · UI Preview\n\n"
-        "此包通过基础编译、真实窗口/歌词 Seek、媒体时钟与严格 PCM、AutoMix EOF 专项，"
+        "# 且听 QieTing · UI / Audio Preview\n\n"
+        "此包通过基础编译、原生工具栏和滚动、真实窗口/歌词 Seek、媒体时钟与严格 PCM、AutoMix EOF 及生产输出 De-click 专项，"
         "以及 macOS 26 arm64 App 打包校验。**上传 Preview 时，完整回归尚未完成。**\n\n"
         f"源码：`{source}`\n\n[查看本次 CI 的最终结果]({run_url})。"
         "只有完整回归成功后才会上传同一次构建的 QieTing-Test 包。\n\n"
         "请实机检查导航、玻璃搜索、侧栏半透明材质、系统滚动条偏好、Seek 歌词定位、"
         "屏幕右缘反复开合、ProMotion/60Hz 与减少动态效果。云端不证明所有界面达到 120fps，"
-        "也未唯一复现 macOS 27 的偶发窗口异常。短促 Click/Pop 仍未修复。\n\n"
+        "也未唯一复现 macOS 27 的偶发窗口异常。暂停/恢复 De-click 已接入真实生产输出并通过上述专项，仍须用耳机和扬声器确认听感；不承诺所有直接切歌或湿延迟尾音均已消除电流音。\n\n"
         "解压外层 Artifact ZIP 后再解压 QieTing-Preview ZIP，运行其中的 且听.app。"
         "沿用独立测试 Bundle ID、原有数据身份和签名方式；自动更新禁用。"
         "不清理缓存、用户歌曲、登录信息或 AI 模型。\n"

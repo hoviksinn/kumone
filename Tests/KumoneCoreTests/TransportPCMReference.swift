@@ -11,16 +11,23 @@ import Foundation
 /// bounded DSP-refill window after resume; callers must assert the refill
 /// silence count against measured AU latency. Ordinary playback excludes none.
 final class TransportPCMReference {
+    enum Observation { case finalOutput, rawBeforeBoundaryEnvelope }
     private var golden: [[Float]]
     private(set) var comparedFrames = 0
     private(set) var intentionalSilenceFrames = 0
     private(set) var maximumSampleError: Float = 0
     private(set) var maximumSignal: Float = 0
 
-    init(engine: PlaybackEngine, quantum: AVAudioFrameCount, buffers: Int = 80) throws {
+    init(engine: PlaybackEngine, quantum: AVAudioFrameCount, buffers: Int = 80,
+         observation: Observation = .finalOutput) throws {
         var channels: [[Float]] = []
         for _ in 0..<buffers {
-            let buffer = try engine.renderOfflineForTesting(quantum)
+            let buffer: AVAudioPCMBuffer
+            switch observation {
+            case .finalOutput: buffer = try engine.renderOfflineForTesting(quantum)
+            case .rawBeforeBoundaryEnvelope:
+                buffer = try engine.renderOfflineBoundaryEvidenceForTesting(quantum).rawOutput
+            }
             guard let data = buffer.floatChannelData else { throw Self.error("Golden output must be float PCM") }
             if channels.isEmpty { channels = Array(repeating: [], count: Int(buffer.format.channelCount)) }
             for channel in channels.indices {

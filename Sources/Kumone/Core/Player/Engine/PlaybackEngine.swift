@@ -50,7 +50,7 @@ enum PlaybackEngineEvent: Sendable {
 ///
 /// …and once, on the master path shared by both decks and the segment:
 ///   mainMixerNode → AVAudioUnitEffect (peak limiter, −1 dBFS) → masterMixer
-///   (the user's volume) → outputNode. See `connectMasterChainLocked`.
+///   (the user's volume) → control-boundary processor → outputNode. See `connectMasterChainLocked`.
 ///
 /// Every effect node is attached and wired at init with neutral parameters
 /// (all EQ gains 0, the high-pass band bypassed, the delay 100% dry), because
@@ -104,6 +104,12 @@ final class PlaybackEngine: @unchecked Sendable {
     /// override flips `AVAudioUnitEffect.bypass`, never the topology.
     private let masterLimiter = DeckChain.makeMasterLimiter()
     private let masterMixer = AVAudioMixerNode()
+    /// One permanent, true serial output processor. Failure is explicit and
+    /// preserves the legacy graph; validation must require available+prepared.
+    private let controlBoundaryEffect: AVAudioUnitEffect?
+    private var controlBoundaryConnected = false
+    private var controlBoundaryFailure: String?
+    private var boundaryGateBudgetSource = "not-armed"
     /// Whether the limiter is doing anything. Off, the node is bypassed *and*
     /// the ceiling's −1 dB compensation comes off with it, so the whole master
     /// path is byte-identical to the pre-limiter player.
@@ -168,6 +174,9 @@ final class PlaybackEngine: @unchecked Sendable {
         var sourceRenderClock: SourceRenderClock?
         /// Native source transport is paused while the render graph stays live.
         var needsTransportResume = false
+        /// Offline regression seam: exercise the existing native-ready retry
+        /// branch without changing its timestamp calculation or play inputs.
+        var holdTransportResumeReadinessForTesting = false
         var pendingTransitionDrainGeneration: Int?
         /// Retained diagnostic field: source-only native transport needs no
         /// host or AU-render-count correction (rendered silence is not media).
@@ -618,6 +627,12 @@ final class PlaybackEngine: @unchecked Sendable {
         var continuation: AsyncStream<PlaybackEngineEvent>.Continuation!
         events = AsyncStream { continuation = $0 }
         eventContinuation = continuation
+        var boundaryError: NSError?
+        controlBoundaryEffect = KumoneCreateControlBoundaryEffect(&boundaryError)
+        if controlBoundaryEffect == nil {
+            controlBoundaryFailure = boundaryError?.localizedDescription ?? "Custom output AU was not created"
+            PlaybackJournal.note("control boundary unavailable: \(controlBoundaryFailure ?? "unknown error")")
+        }
 
         var states: [Deck: DeckState] = [:]
         for deck in [Deck.a, .b] {
@@ -649,6 +664,7 @@ final class PlaybackEngine: @unchecked Sendable {
         engine.mainMixerNode.outputVolume = 1
         engine.attach(masterLimiter)
         engine.attach(masterMixer)
+        if let controlBoundaryEffect { engine.attach(controlBoundaryEffect) }
 
         // Wire all three chains once, before the engine ever starts — the graph
         // is immutable from here on (see graphFormat).
@@ -950,6 +966,9 @@ final class PlaybackEngine: @unchecked Sendable {
             self.lastPauseRequestedAt = requestedAt
             self.lastPauseExecutedAt = pauseBegan
             self.capturePauseClocksLocked()
+            // Arm before source.pause: a concurrent render must see the
+            // control epoch before it sees a control-generated waveform edge.
+            self.armControlBoundaryLocked(command: 1)
             self.isPaused = true
             self.seamMeasurementEpoch &+= 1
             self.seamOffsetContext = nil
@@ -1005,6 +1024,7 @@ final class PlaybackEngine: @unchecked Sendable {
             }
             // Usually the engine is still running; ensureEngineRunning is
             // recovery for a real route/configuration interruption only.
+            self.armControlBoundaryLocked(command: 2)
             self.isPaused = false
             self.resumeSurvivingNodesLocked()
             PlaybackJournal.note(String(format: "transport resume source-only start=%.2fms",
@@ -1416,40 +1436,184 @@ final class PlaybackEngine: @unchecked Sendable {
 
     /// Use the actual deck/effect/master graph with no hardware audio device.
     /// Must be configured before playback. Production never enables this mode.
-    func enableOfflineRenderingForTesting(maximumFrameCount: AVAudioFrameCount = 1024) throws {
+    func enableOfflineRenderingForTesting(maximumFrameCount: AVAudioFrameCount = 1024,
+                                         outputSampleRate: Double = DeckChain.format.sampleRate) throws {
         try queue.sync {
             guard !engine.isRunning else {
                 throw NSError(domain: "PlaybackEngineOffline", code: 1,
                               userInfo: [NSLocalizedDescriptionKey: "Configure offline mode before playback"])
             }
-            try engine.enableManualRenderingMode(.offline, format: graphFormat,
+            guard outputSampleRate.isFinite, outputSampleRate >= 8_000,
+                  outputSampleRate <= 768_000,
+                  let outputFormat = AVAudioFormat(standardFormatWithSampleRate: outputSampleRate,
+                                                   channels: graphFormat.channelCount) else {
+                throw Self.boundaryValidationError("Invalid offline output format")
+            }
+            try engine.enableManualRenderingMode(.offline, format: outputFormat,
                                                   maximumFrameCount: maximumFrameCount)
+            // Sources retain graphFormat. Only the stopped final path adopts
+            // the actual output rate, independently of the input file's rate.
+            connectMasterChainLocked()
+            installOutputSampleSinkLocked()
         }
     }
 
     /// Pull one buffer through production DSP. An error fails the test instead
     /// of silently treating a missing output device as a passing assertion.
     func renderOfflineForTesting(_ frames: AVAudioFrameCount) throws -> AVAudioPCMBuffer {
-        try queue.sync {
-            guard engine.isInManualRenderingMode, engine.manualRenderingMode == .offline,
-                  engine.isRunning,
-                  frames > 0, frames <= engine.manualRenderingMaximumFrameCount,
-                  let buffer = AVAudioPCMBuffer(pcmFormat: engine.manualRenderingFormat,
-                                               frameCapacity: frames) else {
-                throw NSError(domain: "PlaybackEngineOffline", code: 2,
-                              userInfo: [NSLocalizedDescriptionKey: "Offline engine is not ready to render"])
-            }
-            // Offline time advances by pulls, not wall time. Run the SAME
-            // production flush controller against that source-frame clock so
-            // two reference graphs restore their faders at identical frames.
-            faderFlushTickLocked()
-            let status = try engine.renderOffline(frames, to: buffer)
-            guard status == .success, buffer.frameLength == frames else {
-                throw NSError(domain: "PlaybackEngineOffline", code: 3,
-                              userInfo: [NSLocalizedDescriptionKey: "Offline render failed: \(status.rawValue)"])
-            }
-            return buffer
+        try queue.sync { try renderOfflineLockedForTesting(frames) }
+    }
+
+    private func renderOfflineLockedForTesting(_ frames: AVAudioFrameCount) throws -> AVAudioPCMBuffer {
+        guard engine.isInManualRenderingMode, engine.manualRenderingMode == .offline,
+              engine.isRunning,
+              frames > 0, frames <= engine.manualRenderingMaximumFrameCount,
+              let buffer = AVAudioPCMBuffer(pcmFormat: engine.manualRenderingFormat,
+                                           frameCapacity: frames) else {
+            throw NSError(domain: "PlaybackEngineOffline", code: 2,
+                          userInfo: [NSLocalizedDescriptionKey: "Offline engine is not ready to render"])
         }
+        // Offline time advances by pulls, not wall time. Run the SAME
+        // production flush controller against that source-frame clock so
+        // two reference graphs restore their faders at identical frames.
+        faderFlushTickLocked()
+        let status = try engine.renderOffline(frames, to: buffer)
+        guard status == .success, buffer.frameLength == frames else {
+            throw NSError(domain: "PlaybackEngineOffline", code: 3,
+                          userInfo: [NSLocalizedDescriptionKey: "Offline render failed: \(status.rawValue)"])
+        }
+        return buffer
+    }
+
+    struct BoundaryRenderEvidence {
+        let finalOutput: AVAudioPCMBuffer
+        let rawOutput: AVAudioPCMBuffer
+        let renderStartSampleTime: AVAudioFramePosition
+    }
+
+    struct BoundarySnapshot {
+        var available = false
+        var prepared = false
+        var inputSampleRate: Double = 0
+        var outputSampleRate: Double = 0
+        var channelCount: UInt32 = 0
+        var delayFrames: UInt32 = 0
+        var envelopeFrames: UInt32 = 0
+        var silenceDetectionFloor: Double = 0
+        var rawCaptureOverflow = false
+        var rawCaptureTimestampFault = false
+        var resourceGeneration: UInt64 = 0
+        var modifiedOutputFrames: UInt64 = 0
+        var silenceEntriesSmoothed: UInt64 = 0
+        var silenceExitsSmoothed: UInt64 = 0
+        var inputFrames: UInt64 = 0
+        var outputFrames: UInt64 = 0
+        var transportCommands: UInt64 = 0
+        var hostResetRequests: UInt64 = 0
+        var appliedHostResetRequests: UInt64 = 0
+        var controlBudgetFinalFrames: UInt32 = 0
+        var componentFlags: UInt32 = 0
+        var controlBudgetSource = "not-armed"
+        var unavailableReason: String?
+    }
+
+    /// Test capture is disabled in the ordinary player. Configure before
+    /// resources are allocated; copy only after a synchronous offline pull.
+    func enableBoundaryRawCaptureForTesting(capacityFrames: UInt32) throws {
+        try queue.sync {
+            guard !engine.isRunning, controlBoundaryConnected,
+                  let controlBoundaryEffect else {
+                throw Self.boundaryValidationError("Output processor is unavailable or already running")
+            }
+            var error: NSError?
+            guard KumonePrepareControlBoundaryRawCapture(controlBoundaryEffect, capacityFrames, &error) else {
+                throw error ?? Self.boundaryValidationError("Raw output capture preparation failed")
+            }
+        }
+    }
+
+    /// One real engine pull, paired by the AU's actual output sample timestamp.
+    /// Missing/overwritten capture fails; it is never replaced by fake silence,
+    /// a second render, a guessed offset, or merely the last AU callback.
+    func renderOfflineBoundaryEvidenceForTesting(_ frames: AVAudioFrameCount) throws -> BoundaryRenderEvidence {
+        try queue.sync {
+            guard controlBoundaryConnected, let controlBoundaryEffect else {
+                throw Self.boundaryValidationError("Output processor is unavailable")
+            }
+            let start = engine.manualRenderingSampleTime
+            let final = try renderOfflineLockedForTesting(frames)
+            var error: NSError?
+            guard let raw = KumoneCopyControlBoundaryRawOutput(controlBoundaryEffect, start, frames, &error) else {
+                throw error ?? Self.boundaryValidationError("Raw output timestamps do not match the final pull")
+            }
+            guard raw.frameLength == final.frameLength,
+                  raw.format.sampleRate == final.format.sampleRate,
+                  raw.format.channelCount == final.format.channelCount else {
+                throw Self.boundaryValidationError("Raw/final output formats differ")
+            }
+            return BoundaryRenderEvidence(finalOutput: final, rawOutput: raw, renderStartSampleTime: start)
+        }
+    }
+
+    func boundarySnapshotForTesting() -> BoundarySnapshot { queue.sync { boundarySnapshotLocked() } }
+
+    /// Hold only the existing native-readiness failure branch in offline
+    /// tests. Releasing does not start a node: the original scheduled retry
+    /// chooses the native anchor and invokes the unchanged play parameters.
+    func setTransportResumeReadinessHeldForTesting(_ held: Bool, on source: TraceDeck) throws {
+        try queue.sync {
+            guard engine.isInManualRenderingMode, engine.manualRenderingMode == .offline else {
+                throw Self.boundaryValidationError("Resume-readiness hold is restricted to offline validation")
+            }
+            let state: DeckState
+            switch source {
+            case .a: state = deckStates[.a]!
+            case .b: state = deckStates[.b]!
+            case .segment: state = segmentState
+            case .output: throw Self.boundaryValidationError("The output has no source resume-readiness branch")
+            }
+            state.holdTransportResumeReadinessForTesting = held
+        }
+    }
+
+    private func boundarySnapshotLocked() -> BoundarySnapshot {
+        var result = BoundarySnapshot()
+        result.controlBudgetSource = boundaryGateBudgetSource
+        result.unavailableReason = controlBoundaryFailure
+        guard let controlBoundaryEffect else { return result }
+        var raw = KumoneControlBoundarySnapshot()
+        guard KumoneReadControlBoundarySnapshot(controlBoundaryEffect, &raw) else { return result }
+        let masterRoutes = engine.outputConnectionPoints(for: masterMixer, outputBus: 0)
+        let finalRoutes = engine.outputConnectionPoints(for: controlBoundaryEffect, outputBus: 0)
+        let actualSerialRoute = masterRoutes.count == 1 && masterRoutes.first?.node === controlBoundaryEffect
+            && finalRoutes.count == 1 && finalRoutes.first?.node === engine.outputNode
+        result.available = controlBoundaryConnected && actualSerialRoute && raw.available
+        result.prepared = raw.prepared
+        result.inputSampleRate = raw.inputSampleRate
+        result.outputSampleRate = raw.outputSampleRate
+        result.channelCount = raw.channelCount
+        result.delayFrames = raw.delayFrames
+        result.envelopeFrames = raw.envelopeFrames
+        result.silenceDetectionFloor = raw.silenceDetectionFloor
+        result.rawCaptureOverflow = raw.rawCaptureOverflow
+        result.rawCaptureTimestampFault = raw.rawCaptureTimestampFault
+        result.resourceGeneration = raw.resourceGeneration
+        result.modifiedOutputFrames = raw.modifiedOutputFrames
+        result.silenceEntriesSmoothed = raw.silenceEntriesSmoothed
+        result.silenceExitsSmoothed = raw.silenceExitsSmoothed
+        result.inputFrames = raw.inputFrames
+        result.outputFrames = raw.outputFrames
+        result.transportCommands = raw.transportCommands
+        result.hostResetRequests = raw.hostResetRequests
+        result.appliedHostResetRequests = raw.appliedHostResetRequests
+        result.controlBudgetFinalFrames = raw.lastGateBudgetFrames
+        result.componentFlags = raw.componentFlags
+        return result
+    }
+
+    private static func boundaryValidationError(_ message: String) -> NSError {
+        NSError(domain: "PlaybackEngineControlBoundary", code: 1,
+                userInfo: [NSLocalizedDescriptionKey: message])
     }
 
     struct TransportCommandRecord: Sendable {
@@ -1625,8 +1789,8 @@ final class PlaybackEngine: @unchecked Sendable {
     /// Hand every buffer of the engine's final mixed output to `block`, for a
     /// meter or an analyzer. Pass nil to stop.
     ///
-    /// The tap sits on `masterMixer`'s output — the **last** node before the
-    /// output device — so it hears both decks, the pre-rendered segment, the
+    /// The tap sits on the control-boundary processor's output — the **last**
+    /// node before the output device — so it hears both decks, the pre-rendered segment, the
     /// master limiter and the user's volume: whatever a listener hears, with no
     /// dependence on which deck is live or how a hand-over is running.
     ///
@@ -1793,7 +1957,11 @@ final class PlaybackEngine: @unchecked Sendable {
     /// buffer, and the capture tee while a capture file is open.
     private func installOutputSampleSinkLocked() {
         let mixer = outputTapNode
-        if mixerTapInstalled { mixer.removeTap(onBus: 0); mixerTapInstalled = false }
+        if mixerTapInstalled {
+            installedOutputTapNode?.removeTap(onBus: 0)
+            installedOutputTapNode = nil
+            mixerTapInstalled = false
+        }
         let sink = outputSampleSink
         let timedSink = outputTimedSampleSinkForTesting
         let capture = tapCapture
@@ -1805,6 +1973,7 @@ final class PlaybackEngine: @unchecked Sendable {
             capture.tee(buffer, at: when)
         }
         mixerTapInstalled = true
+        installedOutputTapNode = mixer
     }
 
     /// Test hook: report the peak magnitude one deck contributes to the mixer,
@@ -1983,7 +2152,7 @@ final class PlaybackEngine: @unchecked Sendable {
         state.isConnected = true
     }
 
-    /// **The master path: `mainMixerNode → limiter → masterMixer → output`.**
+    /// **The master path: `mainMixerNode → limiter → masterMixer → controlBoundary → output`.**
     ///
     /// Two decisions are written into that order, and both are about where the
     /// user's volume sits relative to the limiter.
@@ -2004,10 +2173,9 @@ final class PlaybackEngine: @unchecked Sendable {
     /// done as well; a mixer does it with a node that already exists and that
     /// the output tap can sit on.
     ///
-    /// Connected with `nil` formats deliberately: the mixer sum has always
-    /// been rendered at the output device's format, and naming `graphFormat`
-    /// here would move the sample-rate conversion from `mainMixerNode` to
-    /// `masterMixer` for no reason at all.
+    /// The upstream mixer/effects keep native negotiation. The final two
+    /// connections explicitly adopt the actual output rate so the processor's
+    /// envelope and fixed lookahead are computed in that rate, not graphFormat.
     ///
     /// Re-run by `rebuildGraphLocked`, because a configuration change can drop
     /// `mainMixerNode`'s own connection to the output node and quietly restore
@@ -2016,10 +2184,105 @@ final class PlaybackEngine: @unchecked Sendable {
         engine.mainMixerNode.outputVolume = 1
         engine.connect(engine.mainMixerNode, to: masterLimiter, format: nil)
         engine.connect(masterLimiter, to: masterMixer, format: nil)
-        engine.connect(masterMixer, to: engine.outputNode, format: nil)
+        connectControlBoundaryOutputLocked()
         masterLimiter.bypass = !masterLimiterActive
         applyMasterVolumeLocked()
         journalMasterTopologyLocked("masterChain")
+    }
+
+    /// Reconfigure only while the engine is stopped. Keep the former
+    /// master-to-output negotiation as the channel-layout reference, then
+    /// match the processor rate to actual hardware/manual output. Stereo to
+    /// multichannel device conversion remains the output node's responsibility.
+    private func connectControlBoundaryOutputLocked() {
+        guard !engine.isRunning else { return }
+        if mixerTapInstalled {
+            installedOutputTapNode?.removeTap(onBus: 0)
+            installedOutputTapNode = nil
+            mixerTapInstalled = false
+        }
+        controlBoundaryConnected = false
+        if let controlBoundaryEffect { engine.disconnectNodeOutput(controlBoundaryEffect) }
+        engine.disconnectNodeOutput(masterMixer)
+        engine.connect(masterMixer, to: engine.outputNode, format: nil)
+        guard let controlBoundaryEffect else { return }
+        let legacy = masterMixer.outputFormat(forBus: 0)
+        let destination = engine.isInManualRenderingMode
+            ? engine.manualRenderingFormat : engine.outputNode.outputFormat(forBus: 0)
+        guard destination.sampleRate.isFinite, destination.sampleRate >= 8_000,
+              destination.sampleRate <= 768_000, legacy.channelCount > 0, legacy.channelCount <= 32,
+              let format = AVAudioFormat(standardFormatWithSampleRate: destination.sampleRate,
+                                         channels: legacy.channelCount) else {
+            controlBoundaryFailure = "Unavailable or unsupported final output format"
+            PlaybackJournal.note("control boundary unavailable: \(controlBoundaryFailure!)")
+            return
+        }
+        engine.disconnectNodeOutput(masterMixer)
+        let exception = KumoneCatchException {
+            self.engine.connect(self.masterMixer, to: controlBoundaryEffect, format: format)
+            self.engine.connect(controlBoundaryEffect, to: self.engine.outputNode, format: format)
+        }
+        if let exception {
+            controlBoundaryFailure = "Final output connection failed: \(exception.reason ?? exception.name.rawValue)"
+            PlaybackJournal.note("control boundary unavailable: \(controlBoundaryFailure!)")
+            engine.disconnectNodeOutput(masterMixer)
+            engine.disconnectNodeOutput(controlBoundaryEffect)
+            engine.connect(masterMixer, to: engine.outputNode, format: nil)
+            return
+        }
+        controlBoundaryConnected = true
+        controlBoundaryFailure = nil
+        PlaybackJournal.note(String(format: "control boundary connected final=%.0fHz/%uch",
+                                    format.sampleRate, format.channelCount))
+    }
+
+    /// This budget bounds only how long a coalesced recent-running command
+    /// remains armed. It does not delay a command, move a media clock, or use
+    /// device/AirPlay presentation latency. Paused output may drain naturally.
+    private func armControlBoundaryLocked(command: UInt32) {
+        guard controlBoundaryConnected, let controlBoundaryEffect else { return }
+        let current = boundarySnapshotLocked()
+        // Before any actual render there is no pause/resume output boundary.
+        // Do not manufacture a fade on the first natural source frame merely
+        // because queued controls occurred before the first IO callback.
+        guard current.available, current.prepared, current.inputFrames > 0,
+              current.outputSampleRate > 0 else { return }
+        let active = Array(deckStates.values).filter { $0.isPlaying || $0.needsTransportResume }
+            + ((transition?.phase == .segmentPlaying || segmentState.needsTransportResume) ? [segmentState] : [])
+        let masterLatency = masterLimiter.auAudioUnit.latency + masterMixer.auAudioUnit.latency
+        let processing = (active.map {
+            $0.timePitch.auAudioUnit.latency + $0.eq.auAudioUnit.latency + $0.delay.auAudioUnit.latency
+        }.max() ?? 0) + masterLatency
+        let lead = active.compactMap { actualSourceRenderLeadFramesLocked($0) }.max()
+        let measuredLeadSeconds = lead.map { Double($0) / graphFormat.sampleRate } ?? 0
+        let outputQuantum: Double
+        if engine.isInManualRenderingMode {
+            outputQuantum = Double(engine.manualRenderingMaximumFrameCount) / current.outputSampleRate
+        } else {
+            outputQuantum = Double(engine.outputNode.auAudioUnit.maximumFramesToRender) / current.outputSampleRate
+        }
+        let units = active.flatMap { [$0.player, $0.timePitch, $0.eq, $0.delay] as [AVAudioNode] }
+            + [masterLimiter, masterMixer, controlBoundaryEffect]
+        let declaredQuantum = units.map { node -> Double in
+            let rate = node.outputFormat(forBus: 0).sampleRate
+            return rate.isFinite && rate > 0
+                ? Double(node.auAudioUnit.maximumFramesToRender) / rate : 0
+        }.max() ?? 0
+        let seconds = max(processing, measuredLeadSeconds) + 2 * max(outputQuantum, declaredQuantum)
+        let requested = ceil(seconds * current.outputSampleRate)
+        // This is the kernel's packet field capacity, not a behavioral timeout.
+        let maximumPacketBudget: Double = Double((1 << 22) - 1)
+        guard requested.isFinite, requested > 0, requested <= maximumPacketBudget else {
+            PlaybackJournal.note("control boundary arm rejected: invalid native resource bound")
+            return
+        }
+        let budget = UInt32(requested)
+        boundaryGateBudgetSource = String(format: "processing=%.6f; sameRateLeadKnown=%@; measuredSameRateLead=%.6f; outputQuantum=%.6f; declaredAUQuantum=%.6f",
+                                         processing, lead == nil ? "false" : "true",
+                                         measuredLeadSeconds, outputQuantum, declaredQuantum)
+        if !KumoneArmControlBoundary(controlBoundaryEffect, command, budget) {
+            PlaybackJournal.note("control boundary arm failed: processor unavailable")
+        }
     }
 
     /// The panel's "capture now": the master-path state and eight seconds of
@@ -2460,7 +2723,8 @@ final class PlaybackEngine: @unchecked Sendable {
         guard state.isPlaying, !isPaused, state.isConnected, engine.isRunning else { return }
         guard !state.player.isPlaying else { return }
         let resume = state.needsTransportResume ? nativeResumeStartLocked(state) : (ready: true, time: nil as AVAudioTime?)
-        guard resume.ready else {
+        let heldForTesting = state.needsTransportResume && state.holdTransportResumeReadinessForTesting
+        guard resume.ready && !heldForTesting else {
             if attempt < Self.playRetries {
                 queue.asyncAfter(deadline: .now() + Self.playRetryInterval) { [weak self] in
                     self?.startNodeIfNeededLocked(state, attempt: attempt + 1)
@@ -2476,6 +2740,10 @@ final class PlaybackEngine: @unchecked Sendable {
         // window follows a restart after a device switch). Catch it and try
         // again shortly; every guard above is re-checked on retry.
         markFrameBeforeNativeStartLocked(state)
+        // A native-anchor/IO retry can succeed after the entry gate expired.
+        // Re-arm only an existing transport resume at its actual ready start;
+        // ordinary Deck starts and future host-scheduled releases do not arm.
+        if state.needsTransportResume { armControlBoundaryLocked(command: 2) }
         guard let exception = KumoneCatchException({
             if let time = resume.time { state.player.play(at: time) } else { state.player.play() }
         }) else {
@@ -2516,7 +2784,7 @@ final class PlaybackEngine: @unchecked Sendable {
               segmentState.generation == generation, segmentState.needsTransportResume else { return }
         if segmentState.player.isPlaying { segmentState.needsTransportResume = false; return }
         let resume = nativeResumeStartLocked(segmentState)
-        guard resume.ready else {
+        guard resume.ready && !segmentState.holdTransportResumeReadinessForTesting else {
             if attempt < Self.playRetries {
                 queue.asyncAfter(deadline: .now() + Self.playRetryInterval) { [weak self] in
                     self?.resumeSegmentNodeIfNeededLocked(generation: generation, attempt: attempt + 1)
@@ -2525,6 +2793,9 @@ final class PlaybackEngine: @unchecked Sendable {
             return
         }
         markFrameBeforeNativeStartLocked(segmentState)
+        // The method's existing guards require a real transport resume.
+        // A delayed native-ready attempt receives a fresh finite render gate.
+        armControlBoundaryLocked(command: 2)
         guard let exception = KumoneCatchException({
             if let time = resume.time { self.segmentState.player.play(at: time) } else { self.segmentState.player.play() }
         }) else {
@@ -2796,6 +3067,7 @@ final class PlaybackEngine: @unchecked Sendable {
     }
     private let tapCapture = TapCapture()
     private var mixerTapInstalled = false
+    private weak var installedOutputTapNode: AVAudioNode?
 
     /// Where a finished capture is *read back* — integrated LUFS, oversampled
     /// true peak, the chain-stage summaries. Seconds of work per capture, and
@@ -2839,9 +3111,12 @@ final class PlaybackEngine: @unchecked Sendable {
         return dir.appendingPathComponent("\(stamp)-\(label).caf")
     }
 
-    /// Where the one output tap lives. `masterMixer`, not `mainMixerNode`:
-    /// see `setOutputSampleSink`.
-    private var outputTapNode: AVAudioNode { masterMixer }
+    /// The one tap observes actual processed final output. Raw pre-envelope
+    /// test evidence is a separate processor capture, never this analysis tap.
+    private var outputTapNode: AVAudioNode {
+        if controlBoundaryConnected, let controlBoundaryEffect { return controlBoundaryEffect }
+        return masterMixer // Explicit legacy fallback is unavailable in validation.
+    }
 
     func captureOutputTap(seconds: Double, label: String) {
         queue.async { self.captureOutputTapLocked(seconds: seconds, label: label) }
@@ -2895,9 +3170,9 @@ final class PlaybackEngine: @unchecked Sendable {
                             self?.measureSeamOffsetLocked(label: label, capture: url,
                                                           startHostTime: startHostTime)
                         }
-                        // With no spectrum sink there is nothing left for the
-                        // tap to do; the shared installer removes it then.
-                        if self?.outputSampleSink == nil {
+                        // Remove the shared tap only when neither live consumer
+                        // remains. Reinstalling under a timed capture loses PCM.
+                        if self?.outputSampleSink == nil && self?.outputTimedSampleSinkForTesting == nil {
                             self?.installOutputSampleSinkLocked()
                         }
                     }
@@ -3371,6 +3646,7 @@ final class PlaybackEngine: @unchecked Sendable {
             if node === engine.mainMixerNode { return "mainMixer" }
             if node === masterLimiter { return "limiter" }
             if node === masterMixer { return "masterMixer" }
+            if let controlBoundaryEffect, node === controlBoundaryEffect { return "controlBoundary" }
             if node === engine.outputNode { return "output" }
             if node === segmentState.player { return "segPlayer" }
             for (deck, state) in deckStates {
@@ -3400,13 +3676,15 @@ final class PlaybackEngine: @unchecked Sendable {
         }
         PlaybackJournal.note(String(
             format: "AU readback(%@) topology mainMixer[%@ → %@; in: %@] limiter[%@ → %@] "
-                + "masterMixer[%@ → %@; in: %@] output[in %@ out %@] running=%@",
+                + "masterMixer[%@ → %@; in: %@] controlBoundary[%@ → %@] output[in %@ out %@] running=%@",
             context,
             fmt(engine.mainMixerNode.outputFormat(forBus: 0)), outs(engine.mainMixerNode),
             ins(engine.mainMixerNode, limit: 8),
             fmt(masterLimiter.outputFormat(forBus: 0)), outs(masterLimiter),
             fmt(masterMixer.outputFormat(forBus: 0)), outs(masterMixer),
             ins(masterMixer, limit: 8),
+            controlBoundaryEffect.map { fmt($0.outputFormat(forBus: 0)) } ?? "unavailable",
+            controlBoundaryEffect.map { outs($0) } ?? "(none)",
             fmt(engine.outputNode.inputFormat(forBus: 0)),
             fmt(engine.outputNode.outputFormat(forBus: 0)),
             engine.isRunning ? "yes" : "no"))

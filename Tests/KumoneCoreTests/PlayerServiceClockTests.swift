@@ -58,8 +58,11 @@ struct PlayerServiceClockTests {
         return url
     }
 
-    private func engine(_ url: URL) throws -> PlaybackEngine {
+    private func engine(_ url: URL, boundaryRawCapture: Bool = false) throws -> PlaybackEngine {
         let engine = PlaybackEngine()
+        if boundaryRawCapture {
+            try engine.enableBoundaryRawCaptureForTesting(capacityFrames: 262_144)
+        }
         try engine.enableOfflineRenderingForTesting(maximumFrameCount: quantum)
         _ = try engine.loadFile(at: url, on: .a)
         engine.play(deck: .a, from: 0)
@@ -159,12 +162,17 @@ struct PlayerServiceClockTests {
     @Test func pausedGraphDrainsDSPWhileEveryPublishedMediaClockStaysFrozen() async throws {
         let url = try fixture()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
-        let reference = try engine(url)
-        let subject = try engine(url)
+        let reference = try engine(url, boundaryRawCapture: true)
+        let subject = try engine(url, boundaryRawCapture: true)
         defer { subject.stopAll(); reference.stopAll() }
-        let golden = try TransportPCMReference(engine: reference, quantum: quantum)
+        let golden = try TransportPCMReference(engine: reference, quantum: quantum, observation: .rawBeforeBoundaryEnvelope)
         let player = try service(subject)
-        for _ in 0..<8 { try golden.compare(subject.renderOfflineForTesting(quantum)) }
+        var boundaryTrace = ControlBoundaryPCMTrace()
+        for index in 0..<8 {
+            let pair = try subject.renderOfflineBoundaryEvidenceForTesting(quantum)
+            try golden.compare(pair.rawOutput)
+            if index == 7 { try boundaryTrace.append(pair) }
+        }
         _ = try await assertSameClock(player, engine: subject)
         player.pause()
         let frozen = try await assertSameClock(player, engine: subject)
@@ -176,8 +184,10 @@ struct PlayerServiceClockTests {
         var tailPeak: Float = 0
         var settledPeak: Float = 0
         for chunk in 0..<24 {
-            let output = try subject.renderOfflineForTesting(quantum)
-            try golden.compare(output, allowingIntentionalSilence: true)
+            let pair = try subject.renderOfflineBoundaryEvidenceForTesting(quantum)
+            let output = pair.finalOutput
+            try golden.compare(pair.rawOutput, allowingIntentionalSilence: true)
+            try boundaryTrace.append(pair)
             let channels = try #require(output.floatChannelData)
             let peak = (0..<Int(output.format.channelCount)).map { channel in
                 (0..<Int(output.frameLength)).map { abs(channels[channel][$0]) }.max() ?? 0
@@ -194,8 +204,9 @@ struct PlayerServiceClockTests {
         _ = try await assertSameClock(player, engine: subject)
         var refillSilence = 0
         for _ in 0..<24 {
-            refillSilence += try golden.compare(subject.renderOfflineForTesting(quantum),
-                                                allowingIntentionalSilence: true)
+            let pair = try subject.renderOfflineBoundaryEvidenceForTesting(quantum)
+            refillSilence += try golden.compare(pair.rawOutput, allowingIntentionalSilence: true)
+            try boundaryTrace.append(pair)
             _ = try await assertSameClock(player, engine: subject)
         }
         #expect(golden.maximumSampleError < 0.000_01,
@@ -209,6 +220,18 @@ struct PlayerServiceClockTests {
         #expect(player.isPlaying)
         #expect(abs(player.progress - frozen.seconds - 24 * Double(quantum) / sampleRate) <= 2 / sampleRate,
                 "paused IO frames must not become media time after resume")
+        let processor = subject.boundarySnapshotForTesting()
+        #expect(processor.available && processor.prepared && !processor.rawCaptureOverflow && !processor.rawCaptureTimestampFault)
+        let finalAnalysis = try ControlBoundaryPCMOracle.analyze(boundaryTrace,
+            envelopeFrames: Int(processor.envelopeFrames), floor: Float(processor.silenceDetectionFloor))
+        #expect(finalAnalysis.entries.count == 1 && finalAnalysis.exits.count == 1)
+        #expect(finalAnalysis.modifiedFrames > 0 && finalAnalysis.maximumDifference > 0.000_1)
+        try ControlBoundaryEvidence.record(["name": "service-paused-dsp-two-layers",
+            "rawContentMaximumError": golden.maximumSampleError, "comparedRawFrames": golden.comparedFrames,
+            "finalOutput": finalAnalysis.json, "outputRate": processor.outputSampleRate,
+            "delayFrames": processor.delayFrames, "envelopeFrames": processor.envelopeFrames,
+            "engineSeconds": subject.position(of: .a), "serviceSeconds": player.progress,
+            "lyricsSeconds": player.lyricsCursor.mediaTime])
         try ServiceClockEvidence.record([
             "name": "pausedDSPRendering", "pausedMediaSeconds": frozen.seconds,
             "pausedOutputFramesPerChannel": 24 * Int(quantum),

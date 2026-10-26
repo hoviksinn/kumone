@@ -15,7 +15,7 @@ env:
   MACOSX_DEPLOYMENT_TARGET: "26.0"
   # UI and audio changes are independently verified before the final combined
   # run. Scoped stages never package an App or claim complete regression.
-  QIETING_VALIDATION_STAGE: ui
+  QIETING_VALIDATION_STAGE: audio
 
 jobs:
   build-and-test:
@@ -54,6 +54,29 @@ jobs:
           while IFS= read -r -d '' test_bin; do
             cp "$BIN_PATH/mlx.metallib" "$test_bin/mlx.metallib"
           done < <(find "$BIN_PATH" -type d -path '*.xctest/Contents/MacOS' -print0)
+
+      # First prove the actual process-local AVAudioUnitEffect bridge and
+      # serial processor output. A bypass/unavailable AU is an assertion failure.
+      - name: Actual output Audio Unit bridge regression
+        shell: bash
+        run: |
+          swift test --skip-build --triple arm64-apple-macosx26.0 --disable-xctest --filter registeredUnitProcessesBothEdgesInActualEngineOutput 2>&1 | tee .build/control-boundary-bridge-regression.log
+          python3 Scripts/verify-test-log.py .build/control-boundary-bridge-regression.log --minimum-tests 1 --report .build/control-boundary-bridge-test-summary.json
+          test -s .build/control-boundary-validation.json
+          cp .build/control-boundary-validation.json .build/control-boundary-bridge-validation.json
+
+      # 11 new output declarations + 1 actual live segment declaration +
+      # the 2 preserved original boundary diagnostics. Parameter rows and the
+      # preceding repeated bridge check are not additional unique tests.
+      - name: Production output control boundary regression
+        shell: bash
+        run: |
+          swift test --skip-build --triple arm64-apple-macosx26.0 --disable-xctest --filter 'ControlBoundaryOutputTests|ControlBoundaryLiveSegmentTests|PlaybackControlBoundaryTests' 2>&1 | tee .build/control-boundary-output-regression.log
+          python3 Scripts/verify-test-log.py .build/control-boundary-output-regression.log --minimum-tests 14 --report .build/control-boundary-output-test-summary.json
+          test -s .build/control-boundary-validation.json
+          test -s .build/playback-boundary-diagnostic.json
+          cp .build/control-boundary-validation.json .build/control-boundary-targeted-validation.json
+          cp .build/playback-boundary-diagnostic.json .build/playback-boundary-targeted-diagnostic.json
 
       # CI #47 reached all earlier UI gates; exercise its actual scrollbar
       # failure first, then repeat the complete hosted UI regression.
@@ -156,6 +179,12 @@ jobs:
             .build/lyrics-seek-test-summary.json
             .build/seek-clock-test-summary.json
             .build/segment-eof-test-summary.json
+            .build/control-boundary-bridge-test-summary.json
+            .build/control-boundary-bridge-validation.json
+            .build/control-boundary-output-test-summary.json
+            .build/control-boundary-validation.json
+            .build/control-boundary-targeted-validation.json
+            .build/playback-boundary-targeted-diagnostic.json
           if-no-files-found: error
           retention-days: 14
           compression-level: 0
@@ -165,13 +194,14 @@ jobs:
         shell: bash
         run: |
           swift test --skip-build --triple arm64-apple-macosx26.0 --disable-xctest 2>&1 | tee .build/test.log
-          python3 Scripts/verify-test-log.py .build/test.log --minimum-tests 999 --report .build/test-summary.json
+          python3 Scripts/verify-test-log.py .build/test.log --minimum-tests 1011 --report .build/test-summary.json
           test -s .build/transport-validation.json
           test -s .build/media-clock-diagnostic.json
           test -s .build/service-clock-validation.json
           test -s .build/transition-segment-validation.json
           test -s .build/window-navigation-validation.json
           test -s .build/playback-boundary-diagnostic.json
+          test -s .build/control-boundary-validation.json
 
       - name: Zip test app (preserve bundle metadata)
         if: ${{ success() && env.QIETING_VALIDATION_STAGE == 'complete' }}
@@ -203,6 +233,12 @@ jobs:
             .build/lyrics-seek-test-summary.json
             .build/seek-clock-test-summary.json
             .build/segment-eof-test-summary.json
+            .build/control-boundary-bridge-test-summary.json
+            .build/control-boundary-bridge-validation.json
+            .build/control-boundary-output-test-summary.json
+            .build/control-boundary-validation.json
+            .build/control-boundary-targeted-validation.json
+            .build/playback-boundary-targeted-diagnostic.json
             .build/test-summary.json
             .build/transport-validation.json
             .build/media-clock-diagnostic.json
@@ -231,6 +267,12 @@ jobs:
             .build/lyrics-seek-test-summary.json
             .build/seek-clock-test-summary.json
             .build/segment-eof-test-summary.json
+            .build/control-boundary-bridge-test-summary.json
+            .build/control-boundary-bridge-validation.json
+            .build/control-boundary-output-test-summary.json
+            .build/control-boundary-validation.json
+            .build/control-boundary-targeted-validation.json
+            .build/playback-boundary-targeted-diagnostic.json
             .build/test-summary.json
             .build/native-toolbar-regression.log
             .build/native-toolbar-validation.json
@@ -245,6 +287,8 @@ jobs:
             .build/lyrics-viewport-*.png
             .build/seek-clock-regression.log
             .build/segment-eof-regression.log
+            .build/control-boundary-bridge-regression.log
+            .build/control-boundary-output-regression.log
             .build/test.log
             .build/transport-validation.json
             .build/media-clock-diagnostic.json
